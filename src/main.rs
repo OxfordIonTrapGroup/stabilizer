@@ -458,12 +458,12 @@ fn spi4_setup(spi4: &pac::SPI4) {
     spi4.cr1.modify(|_, w| w.cstart().started());
 }
 
-fn tim2_setup(tim2: &pac::TIM2) {
-    tim2.psc.write(|w| w.psc().bits(200 - 1));  // from 200 MHz
-    tim2.arr.write(|w| unsafe { w.bits(2 - 1) });  // µs
-    tim2.dier.write(|w| w.ude().set_bit());
-    tim2.egr.write(|w| w.ug().set_bit());
-    tim2.cr1.modify(|_, w|
+fn tim3_setup(tim3: &pac::TIM3) {
+    tim3.psc.write(|w| w.psc().bits(200 - 1));  // from 200 MHz
+    tim3.arr.write(|w| unsafe { w.bits(2 - 1) });  // µs
+    tim3.dier.write(|w| w.ude().set_bit());
+    tim3.egr.write(|w| w.ug().set_bit());
+    tim3.cr1.modify(|_, w|
         w.dir().clear_bit()  // up
          .cen().set_bit());  // enable
 }
@@ -475,7 +475,7 @@ fn dma1_setup(dma1: &pac::DMA1, dmamux1: &pac::DMAMUX1, ma: usize, pa0: usize, p
     dma1.st[0].par.write(|w| unsafe { w.bits(pa0 as u32) });
     dma1.st[0].m0ar.write(|w| unsafe { w.bits(ma as u32) });
     dma1.st[0].ndtr.write(|w| unsafe { w.ndt().bits(1) });
-    dmamux1.ccr[0].modify(|_, w| w.dmareq_id().tim2_up());
+    dmamux1.ccr[0].modify(|_, w| w.dmareq_id().tim3_up());
     dma1.st[0].cr.modify(|_, w| unsafe {
         w.pl().bits(0b01)  // medium
          .circ().set_bit()  // reload ndtr
@@ -498,7 +498,7 @@ fn dma1_setup(dma1: &pac::DMA1, dmamux1: &pac::DMAMUX1, ma: usize, pa0: usize, p
     dma1.st[1].par.write(|w| unsafe { w.bits(pa1 as u32) });
     dma1.st[1].m0ar.write(|w| unsafe { w.bits(ma as u32) });
     dma1.st[1].ndtr.write(|w| unsafe { w.ndt().bits(1) });
-    dmamux1.ccr[1].modify(|_, w| w.dmareq_id().tim2_up());
+    dmamux1.ccr[1].modify(|_, w| w.dmareq_id().tim3_up());
     dma1.st[1].cr.modify(|_, w| unsafe {
         w.pl().bits(0b01)  // medium
          .circ().set_bit()  // reload ndtr
@@ -621,13 +621,13 @@ const APP: () = {
                 &spi1.cr1 as *const _ as usize,
                 &spi5.cr1 as *const _ as usize);
 
-        rcc.apb1lenr.modify(|_, w| w.tim2en().set_bit());
+        rcc.apb1lenr.modify(|_, w| w.tim3en().set_bit());
 
         // work around the SPI stall erratum
         let dbgmcu = dp.DBGMCU;
-        dbgmcu.apb1lfz1.modify(|_, w| w.tim2().set_bit());
+        dbgmcu.apb1lfz1.modify(|_, w| w.tim3().set_bit());
 
-        tim2_setup(&dp.TIM2);
+        tim3_setup(&dp.TIM3);
 
         let i2c2 = dp.I2C2;
         i2c::setup(&rcc, &i2c2);
