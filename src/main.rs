@@ -38,6 +38,8 @@ mod eth;
 mod iir;
 use iir::*;
 
+mod feedforward;
+
 pub mod i2c;
 mod eeprom;
 
@@ -542,11 +544,14 @@ const APP: () = {
     struct Resources {
         spi: (pac::SPI1, pac::SPI2, pac::SPI4, pac::SPI5),
         i2c: pac::I2C2,
+        ff_tim: (pac::TIM1),
         ethernet_periph: (pac::ETHERNET_MAC, pac::ETHERNET_DMA, pac::ETHERNET_MTL),
         #[init([[0.; 5]; 2])]
         iir_state: [IIRState; 2],
         #[init([IIR { ba: [0., 0., 0., 0., 0.], y_offset: 0., y_min: -SCALE - 1., y_max: SCALE }; 2])]
         iir_ch: [IIR; 2],
+        #[init(feedforward::FFState{id: 0, n_coarse: 0, period_correction: 0, phase:0})]
+        ff_state: feedforward::FFState,
         #[link_section = ".sram3.eth"]
         #[init(eth::Device::new())]
         ethernet: eth::Device,
@@ -629,6 +634,14 @@ const APP: () = {
 
         tim3_setup(&dp.TIM3);
 
+
+        let tim1 = dp.TIM1;
+        #[cfg(feature = "current_stabilizer")]
+        {
+            rcc.apb2enr.modify(|_, w| w.tim1en().set_bit());
+            feedforward::setup(&tim1, &dp.GPIOA);
+        }
+
         let i2c2 = dp.I2C2;
         i2c::setup(&rcc, &i2c2);
 
@@ -640,11 +653,12 @@ const APP: () = {
         init::LateResources {
             spi: (spi1, spi2, spi4, spi5),
             i2c: i2c2,
+            ff_tim: tim1,
             ethernet_periph: (dp.ETHERNET_MAC, dp.ETHERNET_DMA, dp.ETHERNET_MTL),
         }
     }
 
-    #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c])]
+    #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c, ff_state])]
     fn idle(c: idle::Context) -> ! {
         let (MAC, DMA, MTL) = c.resources.ethernet_periph;
 
@@ -671,6 +685,7 @@ const APP: () = {
         let mut sockets = net::socket::SocketSet::new(&mut socket_set_entries[..]);
         create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle0);
         create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle1);
+        create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle2);
 
         // unsafe { eth::enable_interrupt(DMA); }
         let mut time = 0u32;
@@ -679,6 +694,9 @@ const APP: () = {
         let mut server = Server::new();
         let mut iir_state: resources::iir_state = c.resources.iir_state;
         let mut iir_ch: resources::iir_ch = c.resources.iir_ch;
+        let mut ff_state: resources::ff_state = c.resources.ff_state;
+        let mut ff_id: u32 = 0;
+
         loop {
             // if ETHERNET_PENDING.swap(false, Ordering::Relaxed) { }
             let tick = Instant::now() > next_ms;
@@ -717,6 +735,21 @@ const APP: () = {
                     });
                 }
             }
+            #[cfg(feature = "current_stabilizer")]
+            {
+                let socket = &mut *sockets.get::<net::socket::TcpSocket>(tcp_handle2);
+                if socket.state() == net::socket::TcpState::CloseWait {
+                    socket.close();
+                } else if !(socket.is_open() || socket.is_listening()) {
+                    socket.listen(1236).unwrap_or_else(|e| warn!("TCP listen error: {:?}", e));
+                } else if tick && socket.can_send() {
+                    let s = ff_state.lock(|ff_state| feedforward::FFState{..*ff_state});
+                    if s.id != ff_id {
+                        json_reply(socket, &s);
+                        ff_id = s.id;
+                    }
+                }
+            }
 
             if !match iface.poll(&mut sockets, net::time::Instant::from_millis(time as i64)) {
                 Ok(changed) => changed,
@@ -738,7 +771,7 @@ const APP: () = {
 
     // seems to slow it down
     // #[link_section = ".data.spi1"]
-    #[task(binds = SPI1, resources = [spi, iir_state, iir_ch], priority = 2)]
+    #[task(binds = SPI1, resources = [spi, iir_state, iir_ch], priority = 3)]
     fn spi1(c: spi1::Context) {
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
@@ -775,6 +808,15 @@ const APP: () = {
         }
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
+    }
+
+    #[task(binds = TIM1_UP, resources = [ff_tim, ff_state], priority = 2) ]
+    fn feedforward_timer(c: feedforward_timer::Context) {
+        #[cfg(feature = "current_stabilizer")]
+        unsafe
+        {
+            feedforward::tim_interrupt(c.resources.ff_tim, c.resources.ff_state);
+        }
     }
 
     /*

@@ -57,6 +57,7 @@ rev = "da675dc3"
 [features]
 semihosting = ["panic-semihosting", "cortex-m-log/semihosting"]
 bkpt = [ ]
+current_stabilizer = [ ]
 
 [profile.dev]
 codegen-units = 1
