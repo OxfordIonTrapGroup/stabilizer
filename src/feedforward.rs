@@ -24,33 +24,33 @@ pub struct FFSettings {
 }
 
 
-fn tim1_setup(tim1: &pac::TIM1) {
-    tim1.arr.write(|w| unsafe { w.bits(TMR_ARR_NOMINAL) });
-    tim1.dier.write(|w| w.uie().set_bit()); // Interrupt on overflow
+fn tim2_setup(tim2: &pac::TIM2) {
+    tim2.arr.write(|w| unsafe { w.bits(TMR_ARR_NOMINAL) });
+    tim2.dier.write(|w| w.uie().set_bit()); // Interrupt on overflow
     unsafe{
-        tim1.ccmr1_input().modify(|_, w| w.cc1s().bits(1) ); // Capture/compare 1 channel is input from TI1
-        tim1.ccmr1_input().modify(|_, w| w.ic1f().bits(0b11) ); // f_sampling = f_ck_int, require N=8 stables samples for a transition
+        tim2.ccmr2_input().modify(|_, w| w.cc4s().bits(1) ); // Capture/compare 4 channel is input from TI4
+        tim2.ccmr2_input().modify(|_, w| w.ic4f().bits(0b11) ); // f_sampling = f_ck_int, require N=8 stables samples for a transition
     }
-    tim1.ccer.modify(|_, w|
-        w.cc1e().set_bit() // Enable capture
+    tim2.ccer.modify(|_, w|
+        w.cc4e().set_bit() // Enable capture
         );
 
-    tim1.cr1.modify(|_, w|
+    tim2.cr1.modify(|_, w|
         w.cen().set_bit());  // enable
 }
 
 
-pub fn setup(tim1: &pac::TIM1, gpioa: &pac::GPIOA)
+pub fn setup(tim2: &pac::TIM2, gpioa: &pac::GPIOA)
 {
-    tim1_setup(tim1);
+    tim2_setup(tim2);
 
-    // Enable PA8 = DI1 as AF input
-    gpioa.moder.modify(|_, w| w.moder8().alternate()); // moder0 corresponds to pin 0 on GPIOA
-    gpioa.afrh.modify(|_, w| w.afr8().af1()); // AF1 = TIM1_CH1
+    // Enable PA3 = DI0 as AF input
+    gpioa.moder.modify(|_, w| w.moder3().alternate());
+    gpioa.afrl.modify(|_, w| w.afr3().af1()); // AF1 = TIM2_CH4
 }
 
 
-pub unsafe fn tim_interrupt(tim: &pac::TIM1, ff_state: &mut FFState) {
+pub unsafe fn tim_interrupt(tim: &pac::TIM2, ff_state: &mut FFState) {
     static mut N: u32 = 0;
     static mut ID: u32 = 0;
     static mut PHASE_INT: i32 = 0;
@@ -66,8 +66,8 @@ pub unsafe fn tim_interrupt(tim: &pac::TIM1, ff_state: &mut FFState) {
         // TODO: Update DAC
     }
 
-    if sr.cc1if().bit_is_set() {
-        tim.sr.write(|w| w.cc1if().clear_bit() );
+    if sr.cc4if().bit_is_set() {
+        tim.sr.write(|w| w.cc4if().clear_bit() );
         ID += 1;
         let n_fine = tim.ccr1.read().bits();
         let phase = n_fine + N*TMR_ARR_NOMINAL;

@@ -544,7 +544,7 @@ const APP: () = {
     struct Resources {
         spi: (pac::SPI1, pac::SPI2, pac::SPI4, pac::SPI5),
         i2c: pac::I2C2,
-        ff_tim: (pac::TIM1),
+        ff_tim: (pac::TIM2),
         ethernet_periph: (pac::ETHERNET_MAC, pac::ETHERNET_DMA, pac::ETHERNET_MTL),
         #[init([[0.; 5]; 2])]
         iir_state: [IIRState; 2],
@@ -635,11 +635,11 @@ const APP: () = {
         tim3_setup(&dp.TIM3);
 
 
-        let tim1 = dp.TIM1;
+        let tim2 = dp.TIM2;
         #[cfg(feature = "current_stabilizer")]
         {
-            rcc.apb2enr.modify(|_, w| w.tim1en().set_bit());
-            feedforward::setup(&tim1, &dp.GPIOA);
+            rcc.apb1lenr.modify(|_, w| w.tim2en().set_bit());
+            feedforward::setup(&tim2, &dp.GPIOA);
         }
 
         let i2c2 = dp.I2C2;
@@ -653,7 +653,7 @@ const APP: () = {
         init::LateResources {
             spi: (spi1, spi2, spi4, spi5),
             i2c: i2c2,
-            ff_tim: tim1,
+            ff_tim: tim2,
             ethernet_periph: (dp.ETHERNET_MAC, dp.ETHERNET_DMA, dp.ETHERNET_MTL),
         }
     }
@@ -810,7 +810,7 @@ const APP: () = {
         cortex_m::asm::bkpt();
     }
 
-    #[task(binds = TIM1_UP, resources = [ff_tim, ff_state], priority = 2) ]
+    #[task(binds = TIM2, resources = [ff_tim, ff_state], priority = 2) ]
     fn feedforward_timer(c: feedforward_timer::Context) {
         #[cfg(feature = "current_stabilizer")]
         unsafe
