@@ -34,6 +34,7 @@ log = "0.4"
 panic-semihosting = { version = "0.5", optional = true }
 serde = { version = "1.0", features = ["derive"], default-features = false }
 heapless = { version = "0.5" }
+libm = { version = "0.1.4", optional = true }
 
 [dependencies.serde-json-core]
 # version = "0.0"
@@ -57,7 +58,7 @@ rev = "da675dc3"
 [features]
 semihosting = ["panic-semihosting", "cortex-m-log/semihosting"]
 bkpt = [ ]
-current_stabilizer = [ ]
+current_stabilizer = [ "libm" ]
 
 [profile.dev]
 codegen-units = 1

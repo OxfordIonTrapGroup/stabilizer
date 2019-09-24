@@ -1,5 +1,10 @@
 use stm32h7::stm32h743 as pac;
 use serde::{Serialize, Deserialize};
+use core::f32::consts::PI;
+use core::ptr;
+extern crate libm;
+use libm::F32Ext;
+
 
 const N_HARMONICS: usize = 5;
 
@@ -7,6 +12,8 @@ const N_LOOKUP: usize = 120;
 const LINE_FREQ: u32 = 50; // Hz
 const TMR_CLK_FREQ: u32 = 200000000; // Hz
 const TMR_ARR_NOMINAL: u32 = TMR_CLK_FREQ / (LINE_FREQ* (N_LOOKUP as u32));
+
+
 
 #[derive(Serialize)]
 pub struct FFState {
@@ -16,11 +23,16 @@ pub struct FFState {
     pub phase: i32
 }
 
-#[derive(Debug,Deserialize,Serialize)]
+#[derive(Debug,Deserialize,Serialize,Clone)]
 pub struct FFSettings {
-    pub sin_amplitudes: [i16; N_HARMONICS],
-    pub cos_amplitudes: [i16; N_HARMONICS],
-    pub enable: bool
+    pub sin_amps: [f32; N_HARMONICS],
+    pub cos_amps: [f32; N_HARMONICS],
+}
+
+impl FFSettings {
+    pub fn new() -> FFSettings {
+        FFSettings{ sin_amps: [0.; N_HARMONICS], cos_amps: [0.; N_HARMONICS] }
+    }
 }
 
 
@@ -50,7 +62,11 @@ pub fn setup(tim2: &pac::TIM2, gpioa: &pac::GPIOA)
 }
 
 
-pub unsafe fn tim_interrupt(tim: &pac::TIM2, ff_state: &mut FFState) {
+pub unsafe fn tim_interrupt(
+    tim: &pac::TIM2,
+    ff_state: &mut FFState,
+    waveform: &mut FFWaveform
+) {
     static mut N: u32 = 0;
     static mut ID: u32 = 0;
     static mut PHASE_INT: i32 = 0;
@@ -63,7 +79,10 @@ pub unsafe fn tim_interrupt(tim: &pac::TIM2, ff_state: &mut FFState) {
         if N == N_LOOKUP as u32 {
             N = 0;
         }
-        // TODO: Update DAC
+        let spi4 = &*pac::SPI4::ptr();
+        let dac_val = waveform.amplitude[N as usize];
+        let txdr = &spi4.txdr as *const _ as *mut u16;
+        ptr::write_volatile(txdr, dac_val);    
     }
 
     if sr.cc4if().bit_is_set() {
@@ -83,5 +102,43 @@ pub unsafe fn tim_interrupt(tim: &pac::TIM2, ff_state: &mut FFState) {
         ff_state.period_correction = period_correction;
         let period = TMR_ARR_NOMINAL as i32 + period_correction;
         tim.arr.write(|w| w.bits(period as u32) );
+    }
+}
+
+
+pub struct FFWaveform {
+    pub amplitude: [u16; N_LOOKUP],
+}
+
+impl FFWaveform {
+    pub fn new() -> FFWaveform
+    {
+        FFWaveform{ amplitude: [0; N_LOOKUP] }
+    }
+
+    // Calculates the feedforward signal. This is called whenever the Fourier 
+    // coefficients are changed, so that in the interrupt loop we do the minimal 
+    // amount of work
+    pub fn update(&mut self, settings: &FFSettings)
+    {
+        for n in 0..N_LOOKUP {
+            self.amplitude[n] = FFWaveform::value(n, settings);
+        }
+    }
+
+    // Calculates the feed-forward signal at point n out of nFeedforward
+    fn value(n: usize, s: &FFSettings) -> u16
+    {
+        let mut sum: f32 = 0.;
+        let phase: f32 = 2.*PI * (n as f32) / (N_LOOKUP as f32);
+        for i in 0..N_HARMONICS {
+            sum += s.sin_amps[i] * unsafe{ (phase*(i as f32)).sin() };
+            sum += s.cos_amps[i] * unsafe{ (phase*(i as f32)).cos() };
+        }
+        
+        let dac_max: f32 = 32767.;
+        let dac_val: i32 = (dac_max*sum) as i32;
+        let dac_val: u16 = ((0x8000 as i32) + dac_val) as u16;
+        return dac_val;  
     }
 }

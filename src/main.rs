@@ -552,6 +552,7 @@ const APP: () = {
         iir_ch: [IIR; 2],
         #[init(feedforward::FFState{id: 0, n_coarse: 0, period_correction: 0, phase:0})]
         ff_state: feedforward::FFState,
+        ff_waveform: feedforward::FFWaveform,
         #[link_section = ".sram3.eth"]
         #[init(eth::Device::new())]
         ethernet: eth::Device,
@@ -654,11 +655,12 @@ const APP: () = {
             spi: (spi1, spi2, spi4, spi5),
             i2c: i2c2,
             ff_tim: tim2,
+            ff_waveform: feedforward::FFWaveform::new(),
             ethernet_periph: (dp.ETHERNET_MAC, dp.ETHERNET_DMA, dp.ETHERNET_MTL),
         }
     }
 
-    #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c, ff_state])]
+    #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c, ff_state, ff_waveform])]
     fn idle(c: idle::Context) -> ! {
         let (MAC, DMA, MTL) = c.resources.ethernet_periph;
 
@@ -686,6 +688,7 @@ const APP: () = {
         create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle0);
         create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle1);
         create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle2);
+        create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle3);
 
         // unsafe { eth::enable_interrupt(DMA); }
         let mut time = 0u32;
@@ -695,6 +698,7 @@ const APP: () = {
         let mut iir_state: resources::iir_state = c.resources.iir_state;
         let mut iir_ch: resources::iir_ch = c.resources.iir_ch;
         let mut ff_state: resources::ff_state = c.resources.ff_state;
+        let mut ff_waveform: resources::ff_waveform = c.resources.ff_waveform;
         let mut ff_id: u32 = 0;
 
         loop {
@@ -750,6 +754,19 @@ const APP: () = {
                     }
                 }
             }
+            #[cfg(feature = "current_stabilizer")]
+            {
+                let socket = &mut *sockets.get::<net::socket::TcpSocket>(tcp_handle3);
+                if socket.state() == net::socket::TcpState::CloseWait {
+                    socket.close();
+                } else if !(socket.is_open() || socket.is_listening()) {
+                    socket.listen(1237).unwrap_or_else(|e| warn!("TCP listen error: {:?}", e));
+                } else {
+                    server.poll(socket, |req: &feedforward::FFSettings| {
+                        ff_waveform.lock(|waveform| waveform.update(req));
+                    });
+                }
+            }
 
             if !match iface.poll(&mut sockets, net::time::Instant::from_millis(time as i64)) {
                 Ok(changed) => changed,
@@ -803,19 +820,26 @@ const APP: () = {
             let x0 = f32::from(a as i16);
             let y0 = iir_ch[1].update(&mut iir_state[1], x0);
             let d = y0 as i16 as u16 ^ 0x8000;
-            let txdr = &spi4.txdr as *const _ as *mut u16;
-            unsafe { ptr::write_volatile(txdr, d) };
+            #[cfg(not(feature = "current_stabilizer"))]
+            {
+                let txdr = &spi4.txdr as *const _ as *mut u16;
+                unsafe { ptr::write_volatile(txdr, d) };
+            }
         }
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
     }
 
-    #[task(binds = TIM2, resources = [ff_tim, ff_state], priority = 2) ]
+    #[task(binds = TIM2, resources = [ff_tim, ff_state, ff_waveform], priority = 2) ]
     fn feedforward_timer(c: feedforward_timer::Context) {
         #[cfg(feature = "current_stabilizer")]
         unsafe
         {
-            feedforward::tim_interrupt(c.resources.ff_tim, c.resources.ff_state);
+            feedforward::tim_interrupt(
+                c.resources.ff_tim,
+                c.resources.ff_state,
+                c.resources.ff_waveform
+            );
         }
     }
 
