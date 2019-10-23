@@ -38,6 +38,9 @@ use serde_json_core::{ser::to_string, de::from_slice};
 
 mod eth;
 
+mod cpu_dac;
+use cpu_dac::*;
+
 mod iir;
 use iir::*;
 
@@ -192,6 +195,10 @@ fn rcc_pll_setup(rcc: &pac::RCC, flash: &pac::FLASH) {
          .spi45sel().pll2_q()
     );
     rcc.d3ccipr.modify(|_, w| w.spi6sel().pll2_q());
+
+    // LSI needed for DAC
+    rcc.csr.modify(|_, w| w.lsion().set_bit());
+    while rcc.csr.read().lsirdy().is_not_ready() {}
 }
 
 fn io_compensation_setup(syscfg: &pac::SYSCFG) {
@@ -203,8 +210,9 @@ fn io_compensation_setup(syscfg: &pac::SYSCFG) {
     while syscfg.cccsr.read().ready().bit_is_clear() {}
 }
 
-fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpiod: &pac::GPIOD,
-              gpioe: &pac::GPIOE, gpiof: &pac::GPIOF, gpiog: &pac::GPIOG) {
+fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpioc: &pac::GPIOC,
+              gpiod: &pac::GPIOD, gpioe: &pac::GPIOE, gpiof: &pac::GPIOF,
+              gpiog: &pac::GPIOG) {
     // FP_LED0
     gpiod.otyper.modify(|_, w| w.ot5().push_pull());
     gpiod.moder.modify(|_, w| w.moder5().output());
@@ -349,6 +357,24 @@ fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpiod: &pac::GPIOD,
     gpioe.moder.modify(|_, w| w.moder15().output());
     gpioe.otyper.modify(|_, w| w.ot15().push_pull());
     gpioe.odr.modify(|_, w| w.odr15().low());
+
+    // SPI3 - current sense board
+    // SCK: PC10
+    gpioc.moder.modify(|_, w| w.moder10().alternate());
+    gpioc.otyper.modify(|_, w| w.ot10().push_pull());
+    gpioc.ospeedr.modify(|_, w| w.ospeedr10().very_high_speed());
+    gpioc.afrh.modify(|_, w| w.afr10().af6());
+    // MOSI: PC12
+    gpioc.moder.modify(|_, w| w.moder12().alternate());
+    gpioc.otyper.modify(|_, w| w.ot12().push_pull());
+    gpioc.ospeedr.modify(|_, w| w.ospeedr12().very_high_speed());
+    gpioc.afrh.modify(|_, w| w.afr12().af6());
+    // MISO: PB4
+    // NSS: PA15
+    gpioa.moder.modify(|_, w| w.moder15().alternate());
+    gpioa.otyper.modify(|_, w| w.ot15().push_pull());
+    gpioa.ospeedr.modify(|_, w| w.ospeedr15().very_high_speed());
+    gpioa.afrh.modify(|_, w| w.afr15().af6());
 }
 
 // ADC0
@@ -435,6 +461,7 @@ fn spi2_setup(spi2: &pac::SPI2) {
 
 // DAC1
 fn spi4_setup(spi4: &pac::SPI4) {
+    // AD5542
     spi4.cfg1.modify(|_, w|
         w.mbr().div2()
          .dsize().bits(16 - 1)
@@ -459,6 +486,37 @@ fn spi4_setup(spi4: &pac::SPI4) {
     spi4.cr2.modify(|_, w| w.tsize().bits(0));
     spi4.cr1.write(|w| w.spe().enabled());
     spi4.cr1.modify(|_, w| w.cstart().started());
+}
+
+// GPIO header SPI
+fn spi3_setup(spi3: &pac::SPI3) {
+    // AD5541
+    // max 25 MHz
+    // 16 bit word
+    spi3.cfg1.modify(|_, w|
+        w.mbr().div8()
+         .dsize().bits(16 - 1)
+         .fthlv().one_frame()
+    );
+    spi3.cfg2.modify(|_, w|
+        w.afcntr().controlled()
+         .ssom().not_asserted()
+         .ssoe().enabled()
+         .ssiop().active_low()
+         .ssm().disabled()
+         .cpol().idle_low()
+         .cpha().first_edge()
+         .lsbfrst().msbfirst()
+         .master().master()
+         .sp().motorola()
+         .comm().transmitter()
+         .ioswp().disabled()
+         .midi().bits(0)
+         .mssi().bits(0)
+    );
+    spi3.cr2.modify(|_, w| w.tsize().bits(0));
+    spi3.cr1.write(|w| w.spe().enabled());
+    spi3.cr1.modify(|_, w| w.cstart().started());
 }
 
 fn tim2_setup(tim2: &pac::TIM2) {
@@ -519,6 +577,19 @@ fn dma1_setup(dma1: &pac::DMA1, dmamux1: &pac::DMAMUX1, ma: usize, pa0: usize, p
     dma1.st[1].cr.modify(|_, w| w.en().set_bit());
 }
 
+fn cpu_dac_setup(cpu_dac: &pac::DAC){
+    // (optional) Disable CPU-DAC internal output buffer
+    // cpu_dac.mcr.modify(|_, w| unsafe{
+    //                   w.mode1().bits(0b010)
+    //                    .mode2().bits(0b010)
+    //                    });
+    // enable CPU-DAC outputs 1 and 2
+    cpu_dac.cr.modify(|_, w|
+                      w.en1().set_bit()
+                       .en2().set_bit()
+                       );
+}
+
 const SCALE: f32 = ((1 << 15) - 1) as f32;
 
 #[link_section = ".sram1.datspi"]
@@ -546,6 +617,10 @@ const APP: () = {
         spi: (pac::SPI1, pac::SPI2, pac::SPI4, pac::SPI5),
         i2c: pac::I2C2,
         ethernet_periph: (pac::ETHERNET_MAC, pac::ETHERNET_DMA, pac::ETHERNET_MTL),
+        cpu_dac: pac::DAC,
+        #[init([CPU_DAC {out: 0x000, en: false}; 2])]
+        cpu_dac_ch: [CPU_DAC; 2],
+        gpio_hdr_spi: pac::SPI3,  // different use to spi1/2/4/5
         #[init([[0.; 5]; 2])]
         iir_state: [IIRState; 2],
         #[init([IIR { ba: [0., 0., 0., 0., 0.], y_offset: 0., y_min: -SCALE - 1., y_max: SCALE }; 2])]
@@ -587,7 +662,7 @@ const APP: () = {
             .gpiofen().set_bit()
             .gpiogen().set_bit()
         );
-        gpio_setup(&dp.GPIOA, &dp.GPIOB, &dp.GPIOD, &dp.GPIOE, &dp.GPIOF, &dp.GPIOG);
+        gpio_setup(&dp.GPIOA, &dp.GPIOB, &dp.GPIOC, &dp.GPIOD, &dp.GPIOE, &dp.GPIOF, &dp.GPIOG);
 
         rcc.apb1lenr.modify(|_, w| w.spi2en().set_bit());
         let spi2 = dp.SPI2;
@@ -640,14 +715,46 @@ const APP: () = {
 
         // c.schedule.tick(Instant::now()).unwrap();
 
+
+        rcc.apb1lenr.modify(|_, w| w.spi3en().set_bit());
+        let spi3 = dp.SPI3;
+        spi3_setup(&spi3);
+
+        let d: u16 = 0x7fff;
+        let txdr = &spi3.txdr as *const _ as *mut u16;
+        unsafe { ptr::write_volatile(txdr, d) };
+
+        // idea for server integration: if changed spawn interrupt
+
+        // enable cpu_dac clock
+        rcc.apb1lenr.modify(|_, w| w.dac12en().set_bit());
+        rcc.apb1lenr.read().bits();
+        // manual suggests wait for domain to leave standby/sleep
+        while rcc.cr.read().d2ckrdy().is_not_ready() {}
+
+        // configure cpu_dac
+        let cpu_dacx = dp.DAC;
+        cpu_dac_setup(&cpu_dacx);
+
+        // read cpu_dac output registers
+        let dac1_out = cpu_dacx.dor1.read().dacc1dor().bits();
+        let dac2_out = cpu_dacx.dor2.read().dacc2dor().bits();
+        info!("dor1:2 {:x}:{:x}", dac1_out, dac2_out);
+
+
+
         init::LateResources {
             spi: (spi1, spi2, spi4, spi5),
             i2c: i2c2,
             ethernet_periph: (dp.ETHERNET_MAC, dp.ETHERNET_DMA, dp.ETHERNET_MTL),
+            cpu_dac: cpu_dacx,
+            gpio_hdr_spi: spi3,
         }
     }
 
-    #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c])]
+    // #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c])]
+    #[idle(resources = [ethernet, ethernet_periph, cpu_dac, cpu_dac_ch,
+                        iir_state, iir_ch, i2c, gpio_hdr_spi])]
     fn idle(c: idle::Context) -> ! {
         let (MAC, DMA, MTL) = c.resources.ethernet_periph;
 
@@ -682,6 +789,8 @@ const APP: () = {
         let mut server = Server::new();
         let mut iir_state: resources::iir_state = c.resources.iir_state;
         let mut iir_ch: resources::iir_ch = c.resources.iir_ch;
+        let mut cpu_dac_ch = c.resources.cpu_dac_ch;
+        let mut gpio_hdr_spi = c.resources.gpio_hdr_spi;
         loop {
             // if ETHERNET_PENDING.swap(false, Ordering::Relaxed) { }
             let tick = Instant::now() > next_ms;
@@ -715,7 +824,11 @@ const APP: () = {
                 } else {
                     server.poll(socket, |req: &Request| {
                         if req.channel < 2 {
+                            cpu_dac_ch[req.channel as usize] = req.cpu_dac;
                             iir_ch.lock(|iir_ch| iir_ch[req.channel as usize] = req.iir);
+                            let word: u16 = req.gpio_hdr_spi;
+                            let txdr = &gpio_hdr_spi.txdr as *const _ as *mut u16;
+                            unsafe { ptr::write_volatile(txdr, word) };
                         }
                     });
                 }
@@ -728,6 +841,22 @@ const APP: () = {
             } {
                 // cortex_m::asm::wfi();
             }
+
+            c.resources.cpu_dac.cr.modify(|_, w| {
+                let mut temp = match cpu_dac_ch[0].en{
+                    true => w.en1().set_bit(),
+                    false => w.en1().clear_bit(),
+                };
+                match cpu_dac_ch[1].en{
+                    true => temp.en2().set_bit(),
+                    false => temp.en2().clear_bit(),
+                }
+            });
+
+            c.resources.cpu_dac.dhr12r1.write(|w| unsafe {
+                w.dacc1dhr().bits(cpu_dac_ch[0].out)});
+            c.resources.cpu_dac.dhr12r2.write(|w| unsafe {
+                w.dacc2dhr().bits(cpu_dac_ch[1].out)});
         }
     }
 
@@ -802,6 +931,8 @@ const APP: () = {
 struct Request {
     channel: u8,
     iir: IIR,
+    cpu_dac: CPU_DAC,
+    gpio_hdr_spi: u16,
 }
 
 #[derive(Serialize)]
@@ -839,7 +970,7 @@ impl Server {
         where
             T: DeserializeOwned,
             F: FnOnce(&T) -> R,
-    {
+    {// attempts to run f on received data, returns option of f(response)
         while socket.can_recv() {
             let found = socket.recv(|buf| {
                 let (len, found) = match buf.iter().position(|&c| c as char == '\n') {

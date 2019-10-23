@@ -4,6 +4,7 @@ from collections import OrderedDict as OD
 import logging
 
 import numpy as np
+import serial
 
 logger = logging.getLogger()
 
@@ -13,17 +14,16 @@ class StabilizerError(Exception):
 
 
 class StabilizerConfig:
-    async def connect(self, host, port=1235):
-        self.reader, self.writer = await asyncio.open_connection(host, port)
+    def connect(self, host, port=1235):
+        self.dev = serial.serial_for_url("socket://"+host+":"+str(port))
 
-    async def set(self, channel, iir, dac, gpio_hdr_word):
-        up = OD([("channel", channel), ("iir", iir.as_dict()),
-                ("cpu_dac", dac.as_dict()), ("gpio_hdr_spi", gpio_hdr_word)])
+    def set(self, channel, iir, dac):
+        up = OD([("channel", channel), ("iir", iir.as_dict()), ("cpu_dac", dac.as_dict())])
         s = json.dumps(up, separators=(",", ":"))
         assert "\n" not in s
         logger.debug("send %s", s)
-        self.writer.write(s.encode() + b"\n")
-        r = (await self.reader.readline()).decode()
+        self.dev.write(s.encode() + b"\n")
+        r = (self.dev.readline()).decode()
         logger.debug("recv %s", r)
         ret = json.loads(r, object_pairs_hook=OD)
         if ret["code"] != 200:
@@ -101,7 +101,6 @@ class CPU_DAC:
         return dac
 
 
-
 if __name__ == "__main__":
     import argparse
 
@@ -117,7 +116,7 @@ if __name__ == "__main__":
 
 
     p = argparse.ArgumentParser()
-    p.add_argument("-s", "--stabilizer", default="10.0.16.99")
+    p.add_argument("-s", "--stabilizer", default="10.255.6.169")
     p.add_argument("-c", "--channel", default=0, type=int,
                    help="Stabilizer channel to configure")
     p.add_argument("-o", "--offset", default=0., type=float,
@@ -131,9 +130,6 @@ if __name__ == "__main__":
                    help="CPU-DAC enable, 0 for off")
     p.add_argument("-d", "--cpu-dac-out", default=0, type=int,
                    help="CPU-DAC output, as u12 from GND to 2.04 V ")
-    p.add_argument("-g", "--gpio_hdr_word", default=0x7fff,
-                   type=lambda x: int(x, 0),
-                   help="16 bit word for gpio_hdr_spi")
 
     args = p.parse_args()
 
@@ -141,7 +137,7 @@ if __name__ == "__main__":
     # loop.set_debug(True)
     logging.basicConfig(level=logging.DEBUG)
 
-    async def main():
+    def main():
         d = CPU_DAC()
         d.set_out(args.cpu_dac_out)
         d.set_en(args.cpu_dac_en)
@@ -149,9 +145,10 @@ if __name__ == "__main__":
         i.configure_pi(args.proportional_gain, args.integral_gain)
         i.set_x_offset(args.offset)
         s = StabilizerConfig()
-        await s.connect(args.stabilizer)
+        s.connect(args.stabilizer)
         assert args.channel in range(2)
-        r = await s.set(args.channel, i, d, args.gpio_hdr_word)
+        r = s.set(args.channel, i, d)
 
-    loop.run_until_complete(main())
+
+    main()
 
