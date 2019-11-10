@@ -16,10 +16,20 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     unsafe { core::intrinsics::abort(); }
 }
 
+#[inline(never)]
+#[panic_handler]
+#[cfg(feature = "seriallog")]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let gpiod = unsafe { &*pac::GPIOD::ptr() };
+    gpiod.odr.modify(|_, w| w.odr6().high().odr12().high());  // FP_LED_1, FP_LED_3
+    error!("{}", info);
+    loop { }
+}
+
 #[cfg(feature = "semihosting")]
 extern crate panic_semihosting;
 
-#[cfg(not(any(feature = "nightly", feature = "semihosting")))]
+#[cfg(not(any(feature = "nightly", feature = "semihosting", feature = "seriallog")))]
 extern crate panic_halt;
 
 #[macro_use]
@@ -46,7 +56,22 @@ use iir::*;
 mod i2c;
 mod eeprom;
 
-#[cfg(not(feature = "semihosting"))]
+#[cfg(feature = "seriallog")]
+struct UartWriter;
+
+#[cfg(feature = "seriallog")]
+impl core::fmt::Write for UartWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let data = s.as_bytes();
+        for i in 0..data.len() {
+            usart3_write(data[i]);
+        }
+        Ok(())
+    }
+}
+
+
+#[cfg(not(any(feature = "semihosting", feature = "seriallog")))]
 fn init_log() {}
 
 #[cfg(feature = "semihosting")]
@@ -64,6 +89,35 @@ fn init_log() {
     };
 
     init_log(logger).unwrap();
+}
+
+#[cfg(feature = "seriallog")]
+struct SerialLog;
+
+#[cfg(feature = "seriallog")]
+use log::{Record, Level, Metadata, LevelFilter};
+
+#[cfg(feature = "seriallog")]
+impl log::Log for SerialLog {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &Record) {
+        let mut writer = UartWriter{};
+        writer.write_fmt(format_args!("{} - {}\n", record.level(), record.args())).ok();
+    }
+
+    fn flush(&self) {}
+}
+
+#[cfg(feature = "seriallog")]
+fn init_log() {
+    static mut LOGGER: SerialLog = SerialLog;
+    unsafe {
+    log::set_logger(&LOGGER)
+        .map(|()| log::set_max_level(LevelFilter::Trace)).unwrap();
+    }
 }
 
 // Pull in build information (from `built` crate)
@@ -193,6 +247,7 @@ fn rcc_pll_setup(rcc: &pac::RCC, flash: &pac::FLASH) {
         w.spi123sel().pll2_p()
          .spi45sel().pll2_q()
     );
+    rcc.d2ccip2r.modify(|_, w| w.usart234578sel().pll2_q() );
     rcc.d3ccipr.modify(|_, w| w.spi6sel().pll2_q());
 }
 
@@ -351,6 +406,17 @@ fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpiod: &pac::GPIOD,
     gpioe.moder.modify(|_, w| w.moder15().output());
     gpioe.otyper.modify(|_, w| w.ot15().push_pull());
     gpioe.odr.modify(|_, w| w.odr15().low());
+
+
+    // USART3 TX: PD8
+    gpiod.moder.modify(|_, w| w.moder8().alternate());
+    gpiod.otyper.modify(|_, w| w.ot8().push_pull());
+    gpiod.ospeedr.modify(|_, w| w.ospeedr8().high_speed());
+    gpiod.afrh.modify(|_, w| w.afr8().af7());
+
+    // USART3 RX: PD9
+    gpiod.moder.modify(|_, w| w.moder9().alternate());
+    gpiod.afrh.modify(|_, w| w.afr9().af7());
 }
 
 // ADC0
@@ -521,6 +587,47 @@ fn dma1_setup(dma1: &pac::DMA1, dmamux1: &pac::DMAMUX1, ma: usize, pa0: usize, p
     dma1.st[1].cr.modify(|_, w| w.en().set_bit());
 }
 
+fn usart3_setup(usart3: &pac::USART3)
+{
+    let baudrate = 1_000_000;
+    let sysclk = 100_000_000;
+
+    // Calculate baudrate divisor
+    let usartdiv = sysclk / baudrate;
+
+    // 16 times oversampling, OVER8 = 0
+    let brr = usartdiv as u16;
+    usart3.brr.write(|w| { w.brr().bits(brr) });
+
+    // Reset registers to disable advanced USART features
+    usart3.cr2.reset();
+    usart3.cr3.reset();
+
+    // Enable transmission and receiving
+    // and configure frame
+    usart3.cr1.write(|w| {
+        w.fifoen().set_bit() // FIFO mode enabled
+        .over8().oversampling16() // Oversampling by 16
+        .ue().enabled()
+        .te().enabled()
+        .re().enabled()
+    });
+}
+
+fn usart3_write(byte: u8) {
+    let usart3 = unsafe{&*pac::USART3::ptr()};
+
+    loop {
+        let isr = usart3.isr.read();
+
+        if isr.txe().bit_is_set() {
+            break;
+        }
+    }
+    usart3.tdr.write(|w| unsafe { w.bits(byte as u32)});
+}
+
+
 const SCALE: f32 = ((1 << 15) - 1) as f32;
 
 #[link_section = ".sram1.datspi"]
@@ -608,6 +715,12 @@ const APP: () = {
         let spi5 = dp.SPI5;
         spi5_setup(&spi5);
         // spi5.ier.write(|w| w.eotie().set_bit());
+
+        rcc.apb1lenr.modify(|_, w| w.usart3en().set_bit());
+        rcc.apb1lrstr.modify(|_, w| w.usart3rst().set_bit());
+        rcc.apb1lrstr.modify(|_, w| w.usart3rst().clear_bit());
+        let usart3 = dp.USART3;
+        usart3_setup(&usart3);
 
         rcc.ahb2enr.modify(|_, w|
             w
