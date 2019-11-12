@@ -215,22 +215,22 @@ fn io_compensation_setup(syscfg: &pac::SYSCFG) {
 fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpioc: &pac::GPIOC,
               gpiod: &pac::GPIOD, gpioe: &pac::GPIOE, gpiof: &pac::GPIOF,
               gpiog: &pac::GPIOG) {
-    // FP_LED0
+    // FP_LED0 (labelled "L2" on v1.0 front panel)
     gpiod.otyper.modify(|_, w| w.ot5().push_pull());
     gpiod.moder.modify(|_, w| w.moder5().output());
     gpiod.odr.modify(|_, w| w.odr5().low());
 
-    // FP_LED1
+    // FP_LED1 (labelled "L3" on v1.0 front panel)
     gpiod.otyper.modify(|_, w| w.ot6().push_pull());
     gpiod.moder.modify(|_, w| w.moder6().output());
     gpiod.odr.modify(|_, w| w.odr6().low());
 
-    // LED_FP2
+    // FP_LED2 (labelled "L0" on v1.0 front panel)
     gpiog.otyper.modify(|_, w| w.ot4().push_pull());
     gpiog.moder.modify(|_, w| w.moder4().output());
     gpiog.odr.modify(|_, w| w.odr4().low());
 
-    // LED_FP3
+    // FP_LED3 (labelled "L1" on v1.0 front panel)
     gpiod.otyper.modify(|_, w| w.ot12().push_pull());
     gpiod.moder.modify(|_, w| w.moder12().output());
     gpiod.odr.modify(|_, w| w.odr12().low());
