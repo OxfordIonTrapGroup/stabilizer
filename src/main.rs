@@ -921,8 +921,14 @@ const APP: () = {
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
 
+        // Keep FP_LED0 ("L2") on, and toggle FP_LED2 ("L0"). Consequently, the
+        // latter will be on, but appear slightly more dim if the ADC poll loop
+        // is still working as it should, and continuously bright/dark if it
+        // has stopped.
         let gpiod = unsafe { &*pac::GPIOD::ptr() };
-        gpiod.odr.modify(|_, w| w.odr6().high().odr12().high());  // FP_LED_1, FP_LED_3
+        gpiod.odr.modify(|r, w| w.odr5().high());
+        let gpiog = unsafe { &*pac::GPIOG::ptr() };
+        gpiog.odr.modify(|r, w| w.odr4().bit(!r.odr4().bit_is_set()));
 
         let (spi1, spi2, spi4, spi5) = c.resources.spi;
         let iir_ch = c.resources.iir_ch;
