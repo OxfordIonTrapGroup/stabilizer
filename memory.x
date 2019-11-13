@@ -9,8 +9,10 @@ MEMORY
   BACKUPSRAM (rwx) : ORIGIN = 0x38000000, LENGTH = 64K
   RAM_B  (rwx) : ORIGIN = 0x38800000, LENGTH = 4K
   FLASH  (rx)  : ORIGIN = 0x08000000, LENGTH = 1024K
-  FLASH1 (rx)  : ORIGIN = 0x08100000, LENGTH = 1024K
+  FLASH1 (rx)  : ORIGIN = 0x08100000, LENGTH = 896K
+  FLASH_CONFIG (rx)  : ORIGIN = 0x081e0000, LENGTH = 128K
 }
+  /* The final page of FLASH1 is reserved for a config structure */
 
 SECTIONS {
   .itcm : ALIGN(8) {
@@ -33,4 +35,9 @@ SECTIONS {
     *(.sram3 .sram3.*);
     . = ALIGN(4);
     } > SRAM3
+
+  .flash_config ORIGIN(FLASH_CONFIG) : ALIGN(4) {
+    _flash_config_base = .;
+  }
+
 } INSERT AFTER .bss;

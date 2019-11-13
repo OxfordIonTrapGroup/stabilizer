@@ -46,6 +46,7 @@ use iir::*;
 mod i2c;
 mod eeprom;
 mod board;
+mod config;
 
 #[cfg(not(feature = "semihosting"))]
 fn init_log() {}
@@ -128,15 +129,14 @@ const APP: () = {
 
     #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c])]
     fn idle(c: idle::Context) -> ! {
+        let mut config = config::Config::new();
+        config.load();
+
+        info!("{:?}", config);
+
         let (MAC, DMA, MTL) = c.resources.ethernet_periph;
 
-        let hardware_addr = match eeprom::read_eui48(c.resources.i2c) {
-            Err(_) => {
-                info!("Could not read EEPROM, using default MAC address");
-                net::wire::EthernetAddress([0x10, 0xE2, 0xD5, 0x00, 0x03, 0x00])
-            },
-            Ok(raw_mac) => net::wire::EthernetAddress(raw_mac)
-        };
+        let hardware_addr = config.get_hardware_addr(c.resources.i2c);
         info!("MAC: {}", hardware_addr);
 
         unsafe { c.resources.ethernet.init(hardware_addr, MAC, DMA, MTL) };
