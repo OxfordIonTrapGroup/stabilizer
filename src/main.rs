@@ -234,7 +234,7 @@ const APP: () = {
     #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c])]
     fn idle(c: idle::Context) -> ! {
         let (MAC, DMA, MTL) = c.resources.ethernet_periph;
-        let use_dhcp = false;
+        let use_dhcp = true;
 
         let hardware_addr = match eeprom::read_eui48(c.resources.i2c) {
             Err(_) => {
