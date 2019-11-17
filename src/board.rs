@@ -123,6 +123,7 @@ fn rcc_pll_setup(rcc: &pac::RCC, flash: &pac::FLASH) {
         w.spi123sel().pll2_p()
          .spi45sel().pll2_q()
     );
+    rcc.d2ccip2r.modify(|_, w| w.usart234578sel().pll2_q() );
     rcc.d3ccipr.modify(|_, w| w.spi6sel().pll2_q());
 }
 
@@ -281,6 +282,16 @@ fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpiod: &pac::GPIOD,
     gpioe.moder.modify(|_, w| w.moder15().output());
     gpioe.otyper.modify(|_, w| w.ot15().push_pull());
     gpioe.odr.modify(|_, w| w.odr15().low());
+
+    // USART3 TX: PD8
+    gpiod.moder.modify(|_, w| w.moder8().alternate());
+    gpiod.otyper.modify(|_, w| w.ot8().push_pull());
+    gpiod.ospeedr.modify(|_, w| w.ospeedr8().high_speed());
+    gpiod.afrh.modify(|_, w| w.afr8().af7());
+
+    // USART3 RX: PD9
+    gpiod.moder.modify(|_, w| w.moder9().alternate());
+    gpiod.afrh.modify(|_, w| w.afr9().af7());
 }
 
 // ADC0

@@ -16,10 +16,20 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     unsafe { core::intrinsics::abort(); }
 }
 
+#[inline(never)]
+#[panic_handler]
+#[cfg(feature = "seriallog")]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let gpiod = unsafe { &*pac::GPIOD::ptr() };
+    gpiod.odr.modify(|_, w| w.odr6().high().odr12().high());  // FP_LED_1, FP_LED_3
+    error!("{}", info);
+    loop { }
+}
+
 #[cfg(feature = "semihosting")]
 extern crate panic_semihosting;
 
-#[cfg(not(any(feature = "nightly", feature = "semihosting")))]
+#[cfg(not(any(feature = "nightly", feature = "semihosting", feature = "seriallog")))]
 extern crate panic_halt;
 
 #[macro_use]
@@ -47,7 +57,22 @@ mod i2c;
 mod eeprom;
 mod board;
 
-#[cfg(not(feature = "semihosting"))]
+#[cfg(feature = "seriallog")]
+struct UartWriter;
+
+#[cfg(feature = "seriallog")]
+impl core::fmt::Write for UartWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let data = s.as_bytes();
+        for i in 0..data.len() {
+            usart3_write(data[i]);
+        }
+        Ok(())
+    }
+}
+
+
+#[cfg(not(any(feature = "semihosting", feature = "seriallog")))]
 fn init_log() {}
 
 #[cfg(feature = "semihosting")]
@@ -67,10 +92,79 @@ fn init_log() {
     init_log(logger).unwrap();
 }
 
+#[cfg(feature = "seriallog")]
+struct SerialLog;
+
+#[cfg(feature = "seriallog")]
+use log::{Record, Level, Metadata, LevelFilter};
+
+#[cfg(feature = "seriallog")]
+impl log::Log for SerialLog {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &Record) {
+        let mut writer = UartWriter{};
+        writer.write_fmt(format_args!("{} - {}\n", record.level(), record.args())).ok();
+    }
+
+    fn flush(&self) {}
+}
+
+#[cfg(feature = "seriallog")]
+fn init_log() {
+    static mut LOGGER: SerialLog = SerialLog;
+    unsafe {
+    log::set_logger(&LOGGER)
+        .map(|()| log::set_max_level(LevelFilter::Trace)).unwrap();
+    }
+}
+
 // Pull in build information (from `built` crate)
 mod build_info {
     #![allow(dead_code)]
     // include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
+
+fn usart3_setup(usart3: &pac::USART3)
+{
+    let baudrate = 1_000_000;
+    let sysclk = 100_000_000;
+
+    // Calculate baudrate divisor
+    let usartdiv = sysclk / baudrate;
+
+    // 16 times oversampling, OVER8 = 0
+    let brr = usartdiv as u16;
+    usart3.brr.write(|w| { w.brr().bits(brr) });
+
+    // Reset registers to disable advanced USART features
+    usart3.cr2.reset();
+    usart3.cr3.reset();
+
+    // Enable transmission and receiving
+    // and configure frame
+    usart3.cr1.write(|w| {
+        w.fifoen().set_bit() // FIFO mode enabled
+        .over8().oversampling16() // Oversampling by 16
+        .ue().enabled()
+        .te().enabled()
+        .re().enabled()
+    });
+}
+
+fn usart3_write(byte: u8) {
+    let usart3 = unsafe{&*pac::USART3::ptr()};
+
+    loop {
+        let isr = usart3.isr.read();
+
+        if isr.txe().bit_is_set() {
+            break;
+        }
+    }
+    usart3.tdr.write(|w| unsafe { w.bits(byte as u32)});
 }
 
 
@@ -113,6 +207,14 @@ const APP: () = {
     #[init(schedule = [tick])]
     fn init(c: init::Context) -> init::LateResources {
         board::init();
+
+        let dp = unsafe { pac::Peripherals::steal() };
+        let rcc = dp.RCC;
+        rcc.apb1lenr.modify(|_, w| w.usart3en().set_bit());
+        rcc.apb1lrstr.modify(|_, w| w.usart3rst().set_bit());
+        rcc.apb1lrstr.modify(|_, w| w.usart3rst().clear_bit());
+        let usart3 = dp.USART3;
+        usart3_setup(&usart3);
 
         init_log();
         // info!("Version {} {}", build_info::PKG_VERSION, build_info::GIT_VERSION.unwrap());

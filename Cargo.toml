@@ -58,6 +58,7 @@ rev = "v0.5.0"
 [features]
 semihosting = ["panic-semihosting", "cortex-m-log/semihosting"]
 bkpt = [ ]
+seriallog = [ ]
 nightly = ["cortex-m/inline-asm"]
 
 [profile.dev]
