@@ -56,6 +56,7 @@ use iir::*;
 mod i2c;
 mod eeprom;
 mod board;
+mod feedforward;
 
 #[cfg(feature = "seriallog")]
 struct UartWriter;
@@ -193,6 +194,7 @@ macro_rules! create_socket {
 const APP: () = {
     struct Resources {
         spi: (pac::SPI1, pac::SPI2, pac::SPI4, pac::SPI5),
+        tim: pac::TIM1,
         i2c: pac::I2C2,
         ethernet_periph: (pac::ETHERNET_MAC, pac::ETHERNET_DMA, pac::ETHERNET_MTL),
         #[init([[0.; 5]; 2])]
@@ -226,6 +228,7 @@ const APP: () = {
         let dp = c.device;
         init::LateResources {
             spi: (dp.SPI1, dp.SPI2, dp.SPI4, dp.SPI5),
+            tim: dp.TIM1,
             i2c: dp.I2C2,
             ethernet_periph: (dp.ETHERNET_MAC, dp.ETHERNET_DMA, dp.ETHERNET_MTL),
         }
@@ -382,6 +385,53 @@ const APP: () = {
         c.schedule.tick(c.scheduled + PERIOD.cycles()).unwrap();
     }
 
+    #[task(binds = TIM1_UP, resources = [tim], priority = 2) ]
+    fn feedforward_timer(c: feedforward_timer::Context) {
+        static mut N: u32 = 0;
+        static mut ID: u32 = 0;
+        static mut PHASE_INT: i32 = 0;
+
+        let tim1 = c.resources.tim;
+        // let ff_state = c.resources.ff_state;
+        // let waveform = c.resources.ff_waveform;
+        let sr = tim1.sr.read();
+
+        if sr.uif().bit_is_set() {
+            tim1.sr.write(|w| w.uif().clear_bit() );
+            *N += 1;
+            if *N == feedforward::N_LOOKUP as u32 {
+                *N = 0;
+            }
+            // let dac_val = waveform.amplitude[*N as usize];
+            let spi = unsafe { &*pac::SPI4::ptr() };
+            let txdr = &spi.txdr as *const _ as *mut u16;
+            unsafe { ptr::write_volatile(txdr, (100* *N) as u16) };
+
+            let gpiod = unsafe { &*pac::GPIOD::ptr() };
+            gpiod.odr.modify(|_, w| w.odr6().high());
+        }
+
+        if sr.cc1if().bit_is_set() {
+            tim1.sr.write(|w| w.cc1if().clear_bit() );
+            *ID += 1;
+            let n_fine = tim1.ccr1.read().bits();
+            let phase = n_fine + (*N)*feedforward::TMR_ARR_NOMINAL;
+            let phase_error = phase as i32 - (feedforward::N_LOOKUP as i32 + 1)*(feedforward::TMR_ARR_NOMINAL as i32)/2;
+            // ff_state.id = *ID;
+            // ff_state.n_coarse = *N;
+            // ff_state.phase = phase_error;
+
+            *PHASE_INT += phase_error;
+            let mut period_correction: i32 = *PHASE_INT/10000 + phase_error/500;
+            if period_correction > 1000 {period_correction=1000;}
+            if period_correction < -1000 {period_correction=-1000;}
+            // ff_state.period_correction = period_correction;
+            let period = feedforward::TMR_ARR_NOMINAL as i32 + period_correction;
+            tim1.arr.write(|w| unsafe { w.bits(period as u32) });
+        }
+
+    }
+
     // seems to slow it down
     // #[link_section = ".data.spi1"]
     #[task(binds = SPI1, resources = [spi, iir_state, iir_ch], priority = 2)]
@@ -416,8 +466,8 @@ const APP: () = {
             let x0 = f32::from(a as i16);
             let y0 = iir_ch[1].update(&mut iir_state[1], x0);
             let d = y0 as i16 as u16 ^ 0x8000;
-            let txdr = &spi4.txdr as *const _ as *mut u16;
-            unsafe { ptr::write_volatile(txdr, d) };
+            // let txdr = &spi4.txdr as *const _ as *mut u16;
+            // unsafe { ptr::write_volatile(txdr, d) };
         }
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();

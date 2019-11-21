@@ -1,6 +1,7 @@
 use super::pac;
 use super::i2c;
 use super::eth;
+use super::feedforward;
 
 fn pwr_setup(pwr: &pac::PWR) {
     // go to VOS1 voltage scale for high perf
@@ -292,6 +293,10 @@ fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpiod: &pac::GPIOD,
     // USART3 RX: PD9
     gpiod.moder.modify(|_, w| w.moder9().alternate());
     gpiod.afrh.modify(|_, w| w.afr9().af7());
+
+    // Enable PA8 as AF input
+    gpioa.moder.modify(|_, w| w.moder8().alternate()); // moder0 corresponds to pin 0 on GPIOA
+    gpioa.afrh.modify(|_, w| w.afr8().af1()); // AF1 = TIM1_CH1
 }
 
 // ADC0
@@ -462,6 +467,22 @@ fn dma1_setup(dma1: &pac::DMA1, dmamux1: &pac::DMAMUX1, ma: usize, pa0: usize, p
     dma1.st[1].cr.modify(|_, w| w.en().set_bit());
 }
 
+fn tim1_setup(tim1: &pac::TIM1) {
+    tim1.arr.write(|w| unsafe { w.bits(feedforward::TMR_ARR_NOMINAL) });
+    tim1.dier.write(|w| w.uie().set_bit()); // Interrupt on overflow
+    unsafe{
+        tim1.ccmr1_input().modify(|_, w| w.cc1s().bits(1) ); // Capture/compare 1 channel is input from TI1
+        tim1.ccmr1_input().modify(|_, w| w.ic1f().bits(0b11) ); // f_sampling = f_ck_int, require N=8 stables samples for a transition
+    }
+    tim1.ccer.modify(|_, w|
+        w.cc1e().set_bit() // Enable capture
+        );
+
+    tim1.cr1.modify(|_, w|
+        w.cen().set_bit());  // enable
+}
+
+
 #[link_section = ".sram1.datspi"]
 static mut DAT: u32 = 0x201;  // EN | CSTART
 
@@ -537,6 +558,9 @@ pub fn init() {
 
     let i2c2 = dp.I2C2;
     i2c::setup(&rcc, &i2c2);
+
+    rcc.apb2enr.modify(|_, w| w.tim1en().set_bit());
+    tim1_setup(&dp.TIM1);
 
     eth::setup(&rcc, &dp.SYSCFG);
     eth::setup_pins(&dp.GPIOA, &dp.GPIOB, &dp.GPIOC, &dp.GPIOG);
