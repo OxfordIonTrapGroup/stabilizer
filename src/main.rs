@@ -1,4 +1,4 @@
-#![deny(warnings)]
+// #![deny(warnings)]
 
 #![no_std]
 #![no_main]
@@ -201,6 +201,9 @@ const APP: () = {
         iir_state: [IIRState; 2],
         #[init([IIR { ba: [0., 0., 0., 0., 0.], y_offset: 0., y_min: -SCALE - 1., y_max: SCALE }; 2])]
         iir_ch: [IIR; 2],
+        ff_waveform: feedforward::Waveform,
+        #[init(feedforward::State{id:0, n_coarse:0, period_correction:0, phase:0})]
+        ff_state: feedforward::State,
         #[link_section = ".sram3.eth"]
         #[init(eth::Device::new())]
         ethernet: eth::Device,
@@ -225,16 +228,24 @@ const APP: () = {
 
         // c.schedule.tick(Instant::now()).unwrap();
 
+        let mut ff_waveform = feedforward::Waveform::new();
+        let ff_settings = feedforward::Settings{
+            sin_amplitudes: [0.,0.,0.,0.,0.],
+            cos_amplitudes: [0.;5]
+        };
+        ff_waveform.update_waveform(ff_settings);
+
         let dp = c.device;
         init::LateResources {
             spi: (dp.SPI1, dp.SPI2, dp.SPI4, dp.SPI5),
             tim: dp.TIM1,
             i2c: dp.I2C2,
+            ff_waveform: ff_waveform,
             ethernet_periph: (dp.ETHERNET_MAC, dp.ETHERNET_DMA, dp.ETHERNET_MTL),
         }
     }
 
-    #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c])]
+    #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c, ff_state, ff_waveform])]
     fn idle(c: idle::Context) -> ! {
         let (MAC, DMA, MTL) = c.resources.ethernet_periph;
         let use_dhcp = true;
@@ -385,15 +396,15 @@ const APP: () = {
         c.schedule.tick(c.scheduled + PERIOD.cycles()).unwrap();
     }
 
-    #[task(binds = TIM1_UP, resources = [tim], priority = 2) ]
+    #[task(binds = TIM1_UP, resources = [tim, ff_state, ff_waveform], priority = 2) ]
     fn feedforward_timer(c: feedforward_timer::Context) {
         static mut N: u32 = 0;
         static mut ID: u32 = 0;
         static mut PHASE_INT: i32 = 0;
 
         let tim1 = c.resources.tim;
-        // let ff_state = c.resources.ff_state;
-        // let waveform = c.resources.ff_waveform;
+        let ff_state = c.resources.ff_state;
+        let waveform = c.resources.ff_waveform;
         let sr = tim1.sr.read();
 
         if sr.uif().bit_is_set() {
@@ -402,13 +413,11 @@ const APP: () = {
             if *N == feedforward::N_LOOKUP as u32 {
                 *N = 0;
             }
-            // let dac_val = waveform.amplitude[*N as usize];
+            let y = waveform.amplitude[*N as usize];
+            let dac_val = y as u16 ^ 0x8000;
             let spi = unsafe { &*pac::SPI4::ptr() };
             let txdr = &spi.txdr as *const _ as *mut u16;
-            unsafe { ptr::write_volatile(txdr, (100* *N) as u16) };
-
-            let gpiod = unsafe { &*pac::GPIOD::ptr() };
-            gpiod.odr.modify(|_, w| w.odr6().high());
+            unsafe { ptr::write_volatile(txdr, dac_val) };
         }
 
         if sr.cc1if().bit_is_set() {
@@ -417,15 +426,15 @@ const APP: () = {
             let n_fine = tim1.ccr1.read().bits();
             let phase = n_fine + (*N)*feedforward::TMR_ARR_NOMINAL;
             let phase_error = phase as i32 - (feedforward::N_LOOKUP as i32 + 1)*(feedforward::TMR_ARR_NOMINAL as i32)/2;
-            // ff_state.id = *ID;
-            // ff_state.n_coarse = *N;
-            // ff_state.phase = phase_error;
+            ff_state.id = *ID;
+            ff_state.n_coarse = *N;
+            ff_state.phase = phase_error;
 
             *PHASE_INT += phase_error;
             let mut period_correction: i32 = *PHASE_INT/10000 + phase_error/500;
             if period_correction > 1000 {period_correction=1000;}
             if period_correction < -1000 {period_correction=-1000;}
-            // ff_state.period_correction = period_correction;
+            ff_state.period_correction = period_correction;
             let period = feedforward::TMR_ARR_NOMINAL as i32 + period_correction;
             tim1.arr.write(|w| unsafe { w.bits(period as u32) });
         }
@@ -438,7 +447,7 @@ const APP: () = {
     fn spi1(c: spi1::Context) {
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
-        let (spi1, spi2, spi4, spi5) = c.resources.spi;
+        let (spi1, spi2, _spi4, spi5) = c.resources.spi;
         let iir_ch = c.resources.iir_ch;
         let iir_state = c.resources.iir_state;
 
@@ -460,15 +469,15 @@ const APP: () = {
         if sr.eot().bit_is_set() {
             spi5.ifcr.write(|w| w.eotc().set_bit());
         }
-        if sr.rxp().bit_is_set() {
-            let rxdr = &spi5.rxdr as *const _ as *const u16;
-            let a = unsafe { ptr::read_volatile(rxdr) };
-            let x0 = f32::from(a as i16);
-            let y0 = iir_ch[1].update(&mut iir_state[1], x0);
-            let d = y0 as i16 as u16 ^ 0x8000;
+        // if sr.rxp().bit_is_set() {
+            // let rxdr = &spi5.rxdr as *const _ as *const u16;
+            // let a = unsafe { ptr::read_volatile(rxdr) };
+            // let x0 = f32::from(a as i16);
+            // let y0 = iir_ch[1].update(&mut iir_state[1], x0);
+            // let d = y0 as i16 as u16 ^ 0x8000;
             // let txdr = &spi4.txdr as *const _ as *mut u16;
             // unsafe { ptr::write_volatile(txdr, d) };
-        }
+        // }
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
     }
