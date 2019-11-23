@@ -533,11 +533,18 @@ pub fn init() {
     let dbgmcu = dp.DBGMCU;
     dbgmcu.apb1lfz1.modify(|_, w| w.tim2().set_bit());
 
-    tim2_setup(&dp.TIM2);
+    // tim2_setup(&dp.TIM2);
 
     let i2c2 = dp.I2C2;
     i2c::setup(&rcc, &i2c2);
 
     eth::setup(&rcc, &dp.SYSCFG);
     eth::setup_pins(&dp.GPIOA, &dp.GPIOB, &dp.GPIOC, &dp.GPIOG);
+}
+
+
+pub fn post_interrupt_init()
+{
+    let dp = unsafe{ pac::Peripherals::steal()}; 
+    tim2_setup(&dp.TIM2);   
 }

@@ -12,7 +12,9 @@ monitor arm semihosting enable
 # detect unhandled exceptions, hard faults and panics
 break DefaultHandler
 break HardFault
-break rust_begin_unwind
+#break rust_begin_unwind
+
+dump binary memory ramdump.dat 0x30020000 0x30040000
 
 load
 # tbreak cortex_m_rt::reset_handler

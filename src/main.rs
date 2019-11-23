@@ -1,4 +1,4 @@
-#![deny(warnings)]
+// #![deny(warnings)]
 
 #![no_std]
 #![no_main]
@@ -189,6 +189,20 @@ macro_rules! create_socket {
     )
 }
 
+const RAM_BASE: usize = 0x30020000;
+static mut LOG_OFFSET: usize = 0;
+
+fn append_ram_log(data: u32) {
+    unsafe{
+        if LOG_OFFSET > 0x20000 {
+            // panic!("Overflow");
+            return;
+        }
+        ptr::write_volatile((RAM_BASE+LOG_OFFSET) as *mut u32, data);
+        LOG_OFFSET += 4;
+    }
+}
+
 #[rtfm::app(device = stm32h7::stm32h743, peripherals = true, monotonic = rtfm::cyccnt::CYCCNT)]
 const APP: () = {
     struct Resources {
@@ -223,6 +237,14 @@ const APP: () = {
 
         // c.schedule.tick(Instant::now()).unwrap();
 
+        // let t1 = cortex_m::peripheral::DWT::get_cycle_count();
+        // let t2 = cortex_m::peripheral::DWT::get_cycle_count();
+        // info!("!");
+        // let t3 = cortex_m::peripheral::DWT::get_cycle_count();
+        // info!("t1,2,3 = {}, {}, {}", t1, t2, t3);
+        // info!("t2-t1 = {}", t2-t1);
+        // info!("t3-t2 = {}", t3-t2);
+
         let dp = c.device;
         init::LateResources {
             spi: (dp.SPI1, dp.SPI2, dp.SPI4, dp.SPI5),
@@ -235,6 +257,8 @@ const APP: () = {
     fn idle(c: idle::Context) -> ! {
         let (MAC, DMA, MTL) = c.resources.ethernet_periph;
         let use_dhcp = true;
+
+        board::post_interrupt_init();
 
         let hardware_addr = match eeprom::read_eui48(c.resources.i2c) {
             Err(_) => {
@@ -386,6 +410,8 @@ const APP: () = {
     // #[link_section = ".data.spi1"]
     #[task(binds = SPI1, resources = [spi, iir_state, iir_ch], priority = 2)]
     fn spi1(c: spi1::Context) {
+        let t_start = cortex_m::peripheral::DWT::get_cycle_count();
+
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
         let (spi1, spi2, spi4, spi5) = c.resources.spi;
@@ -421,6 +447,10 @@ const APP: () = {
         }
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
+
+        let t_end = cortex_m::peripheral::DWT::get_cycle_count();
+        append_ram_log(t_start);
+        append_ram_log(t_end);
     }
 
     /*
