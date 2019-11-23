@@ -250,6 +250,8 @@ const APP: () = {
         let (MAC, DMA, MTL) = c.resources.ethernet_periph;
         let use_dhcp = true;
 
+        board::late_init();
+
         let hardware_addr = match eeprom::read_eui48(c.resources.i2c) {
             Err(_) => {
                 info!("Could not read EEPROM, using default MAC address");
