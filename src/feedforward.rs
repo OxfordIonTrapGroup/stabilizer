@@ -36,10 +36,10 @@ impl Waveform {
     // Calculates the feedforward signal. This is called whenever the Fourier 
     // coefficients are changed, so that in the interrupt loop we do the minimal 
     // amount of work
-    pub fn update_waveform(&mut self, settings: Settings)
+    pub fn update(&mut self, settings: &Settings)
     {
         for n in 0..N_LOOKUP {
-            self.amplitude[n] = Waveform::value(n, &settings);
+            self.amplitude[n] = Waveform::value(n, settings);
         }
     }
 

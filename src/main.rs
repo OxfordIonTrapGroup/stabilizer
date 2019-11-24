@@ -228,12 +228,7 @@ const APP: () = {
 
         // c.schedule.tick(Instant::now()).unwrap();
 
-        let mut ff_waveform = feedforward::Waveform::new();
-        let ff_settings = feedforward::Settings{
-            sin_amplitudes: [0.,0.,0.,0.,0.],
-            cos_amplitudes: [0.;5]
-        };
-        ff_waveform.update_waveform(ff_settings);
+        let ff_waveform = feedforward::Waveform::new();
 
         let dp = c.device;
         init::LateResources {
@@ -286,6 +281,8 @@ const APP: () = {
         let mut sockets = net::socket::SocketSet::new(&mut socket_set_entries[..]);
         create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle0);
         create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle1);
+        create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle2);
+        create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle3);
 
         let mut dhcp_rx_storage = [0u8; DHCP_RX_BUFFER_SIZE];
         let mut dhcp_tx_storage = [0u8; DHCP_TX_BUFFER_SIZE];
@@ -310,6 +307,9 @@ const APP: () = {
         let mut server = Server::new();
         let mut iir_state: resources::iir_state = c.resources.iir_state;
         let mut iir_ch: resources::iir_ch = c.resources.iir_ch;
+        let mut ff_waveform: resources::ff_waveform = c.resources.ff_waveform;
+        let mut ff_state: resources::ff_state = c.resources.ff_state;
+        let mut last_id: u32 = 0;
         loop {
             // if ETHERNET_PENDING.swap(false, Ordering::Relaxed) { }
             let tick = Instant::now() > next_ms;
@@ -345,6 +345,32 @@ const APP: () = {
                         if req.channel < 2 {
                             iir_ch.lock(|iir_ch| iir_ch[req.channel as usize] = req.iir);
                         }
+                    });
+                }
+            }
+            {
+                let socket = &mut *sockets.get::<net::socket::TcpSocket>(tcp_handle2);
+                if socket.state() == net::socket::TcpState::CloseWait {
+                    socket.close();
+                } else if !(socket.is_open() || socket.is_listening()) {
+                    socket.listen(1236).unwrap_or_else(|e| warn!("TCP listen error: {:?}", e));
+                } else if tick && socket.can_send() {
+                    let s = ff_state.lock(|ff_state| feedforward::State{..*ff_state});
+                    if s.id != last_id {
+                        json_reply(socket, &s);
+                        last_id = s.id;
+                    }
+                }
+            }
+            {
+                let socket = &mut *sockets.get::<net::socket::TcpSocket>(tcp_handle3);
+                if socket.state() == net::socket::TcpState::CloseWait {
+                    socket.close();
+                } else if !(socket.is_open() || socket.is_listening()) {
+                    socket.listen(1237).unwrap_or_else(|e| warn!("TCP listen error: {:?}", e));
+                } else {
+                    server.poll(socket, |req: &feedforward::Settings| {
+                        ff_waveform.lock(|wav| wav.update(req));
                     });
                 }
             }
@@ -445,7 +471,7 @@ const APP: () = {
 
     // seems to slow it down
     // #[link_section = ".data.spi1"]
-    #[task(binds = SPI1, resources = [spi, iir_state, iir_ch], priority = 2)]
+    #[task(binds = SPI1, resources = [spi, iir_state, iir_ch], priority = 3)]
     fn spi1(c: spi1::Context) {
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
