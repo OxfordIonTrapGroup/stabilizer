@@ -785,7 +785,7 @@ const APP: () = {
         unsafe { c.resources.ethernet.init(hardware_addr, MAC, DMA, MTL) };
         let mut neighbor_cache_storage = [None; 8];
         let neighbor_cache = net::iface::NeighborCache::new(&mut neighbor_cache_storage[..]);
-        let local_addr = net::wire::IpAddress::v4(10, 255, 6, 169);
+        let local_addr = net::wire::IpAddress::v4(10, 255, 6, 56);
         let mut ip_addrs = [net::wire::IpCidr::new(local_addr, 24)];
         let mut iface = net::iface::EthernetInterfaceBuilder::new(c.resources.ethernet)
                     .ethernet_addr(hardware_addr)
@@ -795,8 +795,8 @@ const APP: () = {
         let mut socket_set_entries: [_; 8] = Default::default();
         let mut sockets = net::socket::SocketSet::new(&mut socket_set_entries[..]);
         create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle0);
-        create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle1);
-        create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle2);
+        create_socket!(sockets, tcp_rx_storage1, tcp_tx_storage1, tcp_handle1);
+        create_socket!(sockets, tcp_rx_storage2, tcp_tx_storage2, tcp_handle2);
 
         // unsafe { eth::enable_interrupt(DMA); }
         let mut time = 0u32;
@@ -863,8 +863,7 @@ const APP: () = {
                     info!("close");
                 } else if !(socket.is_open() || socket.is_listening()) {
                     socket.listen(1236).unwrap_or_else(|e| warn!("TCP listen error: {:?}", e));
-                    adc_logging.lock(|adc_logging| *adc_logging = 0);
-                    cortex_m::interrupt::free(|_| unsafe { storage::ADC_BUF.clear() });
+                    adc_logging.lock(|adc_logging| {*adc_logging = 0; unsafe { storage::ADC_BUF.clear() }});
                     info!("clear buf");
                 } else if socket.can_send() {
                     socket.send(|buf| unsafe {
@@ -879,7 +878,6 @@ const APP: () = {
                                      })
                 }
             }
-
             if !match iface.poll(&mut sockets, net::time::Instant::from_millis(time as i64)) {
                 Ok(changed) => changed,
                 Err(net::Error::Unrecognized) => true,
@@ -1050,7 +1048,7 @@ impl Server {
                     self.discard = true;
                     self.data.clear();
                 } else if !self.discard && len > 0 {
-                    self.data.extend_from_slice(&buf[..len - 1]).unwrap();
+                    self.data.extend_from_slice(&buf[..len]).unwrap();
                 }
                 (len, found)
             }).unwrap();
@@ -1060,12 +1058,12 @@ impl Server {
                     json_reply(socket, &Response { code: 520, message: "command buffer overflow" });
                     self.data.clear();
                 } else {
-                    let r = from_slice::<T>(&self.data);
-                    self.data.clear();
+                    let r = from_slice::<T>(&self.data[..self.data.len()-1]);
                     match r {
                         Ok(res) => {
                             let r = f(&res);
                             json_reply(socket, &Response { code: 200, message: "ok" });
+                            self.data.clear();
                             return Some(r);
                         },
                         Err(err) => {
@@ -1073,6 +1071,7 @@ impl Server {
                             json_reply(socket, &Response { code: 550, message: "parse error" });
                         },
                     }
+                    self.data.clear();
                 }
             }
         }

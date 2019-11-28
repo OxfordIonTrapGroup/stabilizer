@@ -1,4 +1,4 @@
-use core::{slice, cmp};
+use core::{slice, cmp, sync::atomic};
 use stm32h7::stm32h743 as pac;
 use smoltcp::Result;
 use smoltcp::time::Instant;
@@ -245,6 +245,7 @@ impl RxRing {
 
         let addr = &self.desc_buf[self.cur_desc] as *const _ as u32;
         assert_eq!(addr & 0x3, 0);
+        atomic::fence(atomic::Ordering::SeqCst);
         let dma = unsafe { pac::Peripherals::steal().ETHERNET_DMA };
         dma.dmacrx_dtpr.write(|w| unsafe { w.bits(addr) });
 
@@ -301,6 +302,7 @@ impl TxRing {
     }
 
     unsafe fn buf_as_slice_mut<'a>(&mut self, len: usize) -> &'a mut [u8] {
+        atomic::fence(atomic::Ordering::SeqCst);
         let len = cmp::min(len, ETH_BUFFER_SIZE);
         self.desc_buf[self.cur_desc][2] = EMAC_TDES2_IOC | (len as u32 & EMAC_TDES2_B1L);
         let addr = &self.pkt_buf[self.cur_desc] as *const _ as *mut u8;
@@ -314,6 +316,7 @@ impl TxRing {
 
         let addr = &self.desc_buf[self.cur_desc] as *const _ as u32;
         assert_eq!(addr & 0x3, 0);
+        atomic::fence(atomic::Ordering::SeqCst);
         let dma = unsafe { pac::Peripherals::steal().ETHERNET_DMA };
         dma.dmactx_dtpr.write(|w| unsafe { w.bits(addr) });
     }

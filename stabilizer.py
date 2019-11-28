@@ -119,7 +119,7 @@ if __name__ == "__main__":
 
 
     p = argparse.ArgumentParser()
-    p.add_argument("-s", "--stabilizer", default="10.0.16.99")
+    p.add_argument("-s", "--stabilizer", default="10.255.6.56")
     p.add_argument("-c", "--channel", default=0, type=int,
                    help="Stabilizer channel to configure")
     p.add_argument("-o", "--offset", default=0., type=float,
@@ -133,7 +133,7 @@ if __name__ == "__main__":
                    help="CPU-DAC enable, 0 for off")
     p.add_argument("-d", "--cpu-dac-out", default=0, type=int,
                    help="CPU-DAC output, as u12 from GND to 2.04 V ")
-    p.add_argument("-g", "--gpio_hdr_word", default=0x7fff,
+    p.add_argument("-g", "--gpio_hdr_word", default=0,
                    type=lambda x: int(x, 0),
                    help="16 bit word for gpio_hdr_spi")
 

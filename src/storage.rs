@@ -1,3 +1,4 @@
+use core::sync::atomic;
 use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use core::default::Default;
 use core::marker::Copy;
@@ -59,12 +60,16 @@ impl<T> RingBuffer<T> where T: Default + Copy {
     ///
     /// Panics if the buffer is locked for read/write access
     pub fn clear(&mut self) {
-        let wl = self.write_lock.compare_and_swap(false, true, Ordering::Acquire);
+        // FIXME: This shouldn't happen!
+        // let wl = self.write_lock.compare_and_swap(false, true, Ordering::Acquire);
+        // if wl {
+        //     panic!("Attempt to clear a write-locked buffer.")
+        // }
         let rl = self.read_lock.compare_and_swap(false, true, Ordering::Acquire);
-        if wl || rl {
-            panic!("Attempt to clear a locked buffer.")
+        if rl {
+            panic!("Attempt to clear a read-locked buffer.")
         }
-        self.tail.store(self.head.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.tail.store(self.head.load(Ordering::Acquire), Ordering::Release);
         self.write_lock.store(false, Ordering::Release);
         self.read_lock.store(false, Ordering::Release);
     }
@@ -81,12 +86,12 @@ impl<T> RingBuffer<T> where T: Default + Copy {
             panic!("Attempt to write to locked buffer.")
         }
         let tail = self.tail.load(Ordering::Relaxed);
-        let head = self.head.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
         if (tail + 1) % STORAGE_SIZE == head {
             return Err(())
         }
         self.storage[tail] = data;
-        self.tail.store((tail + 1) % STORAGE_SIZE, Ordering::Relaxed);
+        self.tail.store((tail + 1) % STORAGE_SIZE, Ordering::Release);
         self.write_lock.store(false, Ordering::Release);
         Ok(())
     }
@@ -103,7 +108,7 @@ impl<T> RingBuffer<T> where T: Default + Copy {
             panic!("Attempt to write to locked buffer.")
         }
         let tail = self.tail.load(Ordering::Relaxed);
-        let head = self.head.load(Ordering::Relaxed);
+        let head = self.head.load(Ordering::Acquire);
         let space = (STORAGE_SIZE + head - tail - 1) % STORAGE_SIZE;
         if data.len() > space {
             return Err(())
@@ -112,7 +117,7 @@ impl<T> RingBuffer<T> where T: Default + Copy {
         let size2 = data.len() - size1;
         self.storage[tail..tail+size1].copy_from_slice(&data[..size1]);
         self.storage[0..size2].copy_from_slice(&data[size1..]);
-        self.tail.store((tail + data.len()) % STORAGE_SIZE, Ordering::Relaxed);
+        self.tail.store((tail + data.len()) % STORAGE_SIZE, Ordering::Release);
         self.write_lock.store(false, Ordering::Release);
         Ok(())
     }
@@ -126,7 +131,7 @@ impl<T> RingBuffer<T> where T: Default + Copy {
         if false != self.read_lock.compare_and_swap(false, true, Ordering::Acquire) {
             panic!("Attempt to read from locked buffer.")
         }
-        let tail = self.tail.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Acquire);
         let head = self.head.load(Ordering::Relaxed);
         let available = (STORAGE_SIZE + tail - head) % STORAGE_SIZE;
         let to_copy = min(available, buf.len());
@@ -134,7 +139,7 @@ impl<T> RingBuffer<T> where T: Default + Copy {
         let size1 = min(head + to_copy, STORAGE_SIZE) - head;
         buf[..size1].copy_from_slice(&self.storage[head..head+size1]);
         buf[size1..to_copy].copy_from_slice(&self.storage[..to_copy-size1]);
-        self.head.store((head + to_copy) % STORAGE_SIZE, Ordering::Relaxed);
+        self.head.store((head + to_copy) % STORAGE_SIZE, Ordering::Release);
         self.read_lock.store(false, Ordering::Release);
         to_copy
     }

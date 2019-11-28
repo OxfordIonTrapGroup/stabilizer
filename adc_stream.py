@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
-    p.add_argument("-s", "--stabilizer", default="10.0.16.99")
+    p.add_argument("-s", "--stabilizer", default="10.255.6.56")
     p.add_argument("-c", "--channel", default=0, type=int,
                    help="Stabilizer channel to configure")
     p.add_argument("-f", "--file", default="adc_log.npy",

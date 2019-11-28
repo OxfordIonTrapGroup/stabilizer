@@ -1,6 +1,7 @@
 """Some plotting of adc-logs"""
 
 import numpy as np
+import math
 from matplotlib import pyplot as plt
 from numpy.fft import rfft, rfftfreq
 from scipy.signal import savgol_filter
@@ -20,7 +21,7 @@ if False:
 
 if __name__=="__main__":
 # if False:
-    plt_every_n = 100
+    plt_every_n = 1
 
     samples = np.load("adc_log.npy")
     # samples = np.load("open_loop_noise.npy")
@@ -66,7 +67,7 @@ if __name__=="__main__":
     f, nsd = normalised_fft(t, noise)
 
     nsd = np.abs(nsd) / np.sqrt(np.max(t))
-    plt.plot(f[::plt_every_n],
+    plt.semilogx(f[::plt_every_n],
              savgol_filter(nsd,
                            np.max((plt_every_n, 10))+1,
                            1)[::plt_every_n]*1e6)
@@ -78,11 +79,17 @@ if __name__=="__main__":
     # nsd = np.abs(nsd) / np.sqrt(np.max(t[:10000]))
     # plt.plot(f[::], nsd[::]/2000)
 
+
+
     plt.ylabel(r"NSD [$\mu$Volt/sqrt(Hz)]")
     plt.xlabel(r"frequency /Hz")
     plt.title(r"stabilizer_current_sense open loop noise")
     plt.grid()
     plt.savefig("nsd.png", dpi=600)
     plt.savefig("nsd.pdf")
-    # plt.show()
+    plt.show()
+    # np.save("noise_spectrum.npy",savgol_filter(nsd,
+                           #np.max((plt_every_n, 10))+1,
+                           #1)[::plt_every_n]*1e6)
+    #np.save("f.npy",f)
     print("test rms voltage from NSD", np.sqrt(2*(f[1]-f[0])*np.sum(nsd**2)) )
