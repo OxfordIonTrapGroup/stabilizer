@@ -20,6 +20,7 @@ pub struct State {
 pub struct Settings {
     pub sin_amplitudes: [f32; N_HARMONICS],
     pub cos_amplitudes: [f32; N_HARMONICS],
+    pub offset: f32
 }
 
 
@@ -33,8 +34,8 @@ impl Waveform {
         Waveform{ amplitude: [0; N_LOOKUP] }
     }
 
-    // Calculates the feedforward signal. This is called whenever the Fourier 
-    // coefficients are changed, so that in the interrupt loop we do the minimal 
+    // Calculates the feedforward signal. This is called whenever the Fourier
+    // coefficients are changed, so that in the interrupt loop we do the minimal
     // amount of work
     pub fn update(&mut self, settings: &Settings)
     {
@@ -52,7 +53,8 @@ impl Waveform {
             let harmonic_phase = phase*((i+1) as f32);
             sum += s.sin_amplitudes[i] * libm::sinf(harmonic_phase);
             sum += s.cos_amplitudes[i] * libm::cosf(harmonic_phase);
+            sum += s.offset * 0.2_f32;
         }
-        return (0x7fff as f32 * sum) as i16;  
+        return (0x7fff as f32 * sum) as i16;
     }
 }

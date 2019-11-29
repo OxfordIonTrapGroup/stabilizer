@@ -1,0 +1,1484 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index f39173c..6579911 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -17,6 +17,11 @@ dependencies = [
+  "stable_deref_trait 1.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
++[[package]]
++name = "autocfg"
++version = "0.1.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++
+ [[package]]
+ name = "bare-metal"
+ version = "0.2.5"
+@@ -27,7 +32,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "bitflags"
+-version = "1.1.0"
++version = "1.2.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ 
+ [[package]]
+@@ -37,7 +42,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ 
+ [[package]]
+ name = "cfg-if"
+-version = "0.1.9"
++version = "0.1.10"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ 
+ [[package]]
+@@ -83,23 +88,23 @@ dependencies = [
+ [[package]]
+ name = "cortex-m-rtfm"
+ version = "0.5.0-beta.1"
+-source = "git+https://github.com/japaric/cortex-m-rtfm?rev=da675dc3#da675dc35f373a38ab97cdc9813162e9d87507f9"
++source = "git+https://github.com/rtfm-rs/cortex-m-rtfm?rev=v0.5.0-beta.1#1fe9767ebac37a6f220d5e84505e16691b370002"
+ dependencies = [
+  "cortex-m 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "cortex-m-rt 0.6.10 (registry+https://github.com/rust-lang/crates.io-index)",
+- "cortex-m-rtfm-macros 0.5.0-alpha.1 (git+https://github.com/japaric/cortex-m-rtfm?rev=da675dc3)",
++ "cortex-m-rtfm-macros 0.5.0-beta.1 (git+https://github.com/rtfm-rs/cortex-m-rtfm?rev=v0.5.0-beta.1)",
+  "heapless 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)",
+- "rtfm-core 0.3.0-alpha.1 (git+https://github.com/japaric/rtfm-core)",
++ "rtfm-core 0.3.0-beta.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+ name = "cortex-m-rtfm-macros"
+-version = "0.5.0-alpha.1"
+-source = "git+https://github.com/japaric/cortex-m-rtfm?rev=da675dc3#da675dc35f373a38ab97cdc9813162e9d87507f9"
++version = "0.5.0-beta.1"
++source = "git+https://github.com/rtfm-rs/cortex-m-rtfm?rev=v0.5.0-beta.1#1fe9767ebac37a6f220d5e84505e16691b370002"
+ dependencies = [
+- "proc-macro2 1.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
++ "proc-macro2 1.0.6 (registry+https://github.com/rust-lang/crates.io-index)",
+  "quote 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+- "rtfm-syntax 0.4.0-alpha.1 (git+https://github.com/japaric/rtfm-syntax)",
++ "rtfm-syntax 0.4.0-beta.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "syn 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -147,15 +152,18 @@ dependencies = [
+ 
+ [[package]]
+ name = "indexmap"
+-version = "1.2.0"
++version = "1.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
++dependencies = [
++ "autocfg 0.1.7 (registry+https://github.com/rust-lang/crates.io-index)",
++]
+ 
+ [[package]]
+ name = "log"
+ version = "0.4.8"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "cfg-if 0.1.9 (registry+https://github.com/rust-lang/crates.io-index)",
++ "cfg-if 0.1.10 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+@@ -163,6 +171,11 @@ name = "managed"
+ version = "0.7.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ 
++[[package]]
++name = "panic-halt"
++version = "0.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++
+ [[package]]
+ name = "panic-semihosting"
+ version = "0.5.3"
+@@ -182,7 +195,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "proc-macro2"
+-version = "1.0.3"
++version = "1.0.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+  "unicode-xid 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+@@ -201,7 +214,7 @@ name = "quote"
+ version = "1.0.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "proc-macro2 1.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
++ "proc-macro2 1.0.6 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+@@ -232,16 +245,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ 
+ [[package]]
+ name = "rtfm-core"
+-version = "0.3.0-alpha.1"
+-source = "git+https://github.com/japaric/rtfm-core#22006d11dbd9b4997954ad57dcb02e1914c70e2c"
++version = "0.3.0-beta.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
+ 
+ [[package]]
+ name = "rtfm-syntax"
+-version = "0.4.0-alpha.1"
+-source = "git+https://github.com/japaric/rtfm-syntax#563efaffd9fad355d7a1334a3a54c902cd62f463"
++version = "0.4.0-beta.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "indexmap 1.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+- "proc-macro2 1.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
++ "indexmap 1.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
++ "proc-macro2 1.0.6 (registry+https://github.com/rust-lang/crates.io-index)",
+  "syn 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -268,10 +281,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ 
+ [[package]]
+ name = "serde"
+-version = "1.0.100"
++version = "1.0.101"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "serde_derive 1.0.100 (registry+https://github.com/rust-lang/crates.io-index)",
++ "serde_derive 1.0.101 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+@@ -280,15 +293,15 @@ version = "0.0.1"
+ source = "git+https://github.com/quartiq/serde-json-core.git?rev=fc764de#fc764deb8dfb82e5cfcc6c5059d8d5c3031e0591"
+ dependencies = [
+  "heapless 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)",
+- "serde 1.0.100 (registry+https://github.com/rust-lang/crates.io-index)",
++ "serde 1.0.101 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+ [[package]]
+ name = "serde_derive"
+-version = "1.0.100"
++version = "1.0.101"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "proc-macro2 1.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
++ "proc-macro2 1.0.6 (registry+https://github.com/rust-lang/crates.io-index)",
+  "quote 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "syn 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -296,9 +309,9 @@ dependencies = [
+ [[package]]
+ name = "smoltcp"
+ version = "0.5.0"
+-source = "git+https://github.com/m-labs/smoltcp.git?rev=1ada3da#1ada3da5aa33917daf891dda2242d7f5beadfb10"
++source = "git+https://github.com/m-labs/smoltcp.git?rev=0fedb1d#0fedb1db9aa26712830822dd61f065deaa34d611"
+ dependencies = [
+- "bitflags 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
++ "bitflags 1.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "byteorder 1.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "managed 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -310,13 +323,14 @@ dependencies = [
+  "cortex-m 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "cortex-m-log 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "cortex-m-rt 0.6.10 (registry+https://github.com/rust-lang/crates.io-index)",
+- "cortex-m-rtfm 0.5.0-beta.1 (git+https://github.com/japaric/cortex-m-rtfm?rev=da675dc3)",
++ "cortex-m-rtfm 0.5.0-beta.1 (git+https://github.com/rtfm-rs/cortex-m-rtfm?rev=v0.5.0-beta.1)",
+  "heapless 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)",
++ "panic-halt 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+  "panic-semihosting 0.5.3 (registry+https://github.com/rust-lang/crates.io-index)",
+- "serde 1.0.100 (registry+https://github.com/rust-lang/crates.io-index)",
++ "serde 1.0.101 (registry+https://github.com/rust-lang/crates.io-index)",
+  "serde-json-core 0.0.1 (git+https://github.com/quartiq/serde-json-core.git?rev=fc764de)",
+- "smoltcp 0.5.0 (git+https://github.com/m-labs/smoltcp.git?rev=1ada3da)",
++ "smoltcp 0.5.0 (git+https://github.com/m-labs/smoltcp.git?rev=0fedb1d)",
+  "stm32h7 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+ 
+@@ -351,7 +365,7 @@ name = "syn"
+ version = "1.0.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ dependencies = [
+- "proc-macro2 1.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
++ "proc-macro2 1.0.6 (registry+https://github.com/rust-lang/crates.io-index)",
+  "quote 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "unicode-xid 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ ]
+@@ -387,42 +401,44 @@ dependencies = [
+ [metadata]
+ "checksum aligned 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)" = "d3a316c7ea8e1e9ece54862c992def5a7ac14de9f5832b69d71760680efeeefa"
+ "checksum as-slice 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "293dac66b274fab06f95e7efb05ec439a6b70136081ea522d270bc351ae5bb27"
++"checksum autocfg 0.1.7 (registry+https://github.com/rust-lang/crates.io-index)" = "1d49d90015b3c36167a20fe2810c5cd875ad504b39cff3d4eae7977e6b7c1cb2"
+ "checksum bare-metal 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)" = "5deb64efa5bd81e31fcd1938615a6d98c82eafcbcd787162b6f63b91d6bac5b3"
+-"checksum bitflags 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "3d155346769a6855b86399e9bc3814ab343cd3d62c7e985113d46a0ec3c281fd"
++"checksum bitflags 1.2.1 (registry+https://github.com/rust-lang/crates.io-index)" = "cf1de2fe8c75bc145a2f577add951f8134889b4795d47466a54a5c846d691693"
+ "checksum byteorder 1.3.2 (registry+https://github.com/rust-lang/crates.io-index)" = "a7c3dd8985a7111efc5c80b44e23ecdd8c007de8ade3b96595387e812b957cf5"
+-"checksum cfg-if 0.1.9 (registry+https://github.com/rust-lang/crates.io-index)" = "b486ce3ccf7ffd79fdeb678eac06a9e6c09fc88d33836340becb8fffe87c5e33"
++"checksum cfg-if 0.1.10 (registry+https://github.com/rust-lang/crates.io-index)" = "4785bdd1c96b2a846b2bd7cc02e86b6b3dbf14e7e53446c4f54c92a361040822"
+ "checksum cortex-m 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)" = "145da2fc379bbd378ed425e75e1748214add9bbd800d4d5b77abb54ca423dbca"
+ "checksum cortex-m-log 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)" = "978caafe65d1023d38b00c76b83564788fc351d954a5005fb72cf992c0d61458"
+ "checksum cortex-m-rt 0.6.10 (registry+https://github.com/rust-lang/crates.io-index)" = "17805910e3ecf029bdbfcc42b7384d9e3d9e5626153fa810002c1ef9839338ac"
+ "checksum cortex-m-rt-macros 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)" = "d7ae692573e0acccb1579fef1abf5a5bf1d2f3f0149a22b16870ec9309aee25f"
+-"checksum cortex-m-rtfm 0.5.0-beta.1 (git+https://github.com/japaric/cortex-m-rtfm?rev=da675dc3)" = "<none>"
+-"checksum cortex-m-rtfm-macros 0.5.0-alpha.1 (git+https://github.com/japaric/cortex-m-rtfm?rev=da675dc3)" = "<none>"
++"checksum cortex-m-rtfm 0.5.0-beta.1 (git+https://github.com/rtfm-rs/cortex-m-rtfm?rev=v0.5.0-beta.1)" = "<none>"
++"checksum cortex-m-rtfm-macros 0.5.0-beta.1 (git+https://github.com/rtfm-rs/cortex-m-rtfm?rev=v0.5.0-beta.1)" = "<none>"
+ "checksum cortex-m-semihosting 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)" = "113ef0ecffee2b62b58f9380f4469099b30e9f9cbee2804771b4203ba1762cfa"
+ "checksum generic-array 0.12.3 (registry+https://github.com/rust-lang/crates.io-index)" = "c68f0274ae0e023facc3c97b2e00f076be70e254bc851d972503b328db79b2ec"
+ "checksum generic-array 0.13.2 (registry+https://github.com/rust-lang/crates.io-index)" = "0ed1e761351b56f54eb9dcd0cfaca9fd0daecf93918e1cfc01c8a3d26ee7adcd"
+ "checksum hash32 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)" = "12d790435639c06a7b798af9e1e331ae245b7ef915b92f70a39b4cf8c00686af"
+ "checksum heapless 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)" = "f339aa7d51777fc0af6aa7cbeb277dfc6e6c029cbdeda48d0fbb92c2337f0e69"
+-"checksum indexmap 1.2.0 (registry+https://github.com/rust-lang/crates.io-index)" = "a61202fbe46c4a951e9404a720a0180bcf3212c750d735cb5c4ba4dc551299f3"
++"checksum indexmap 1.3.0 (registry+https://github.com/rust-lang/crates.io-index)" = "712d7b3ea5827fcb9d4fda14bf4da5f136f0db2ae9c8f4bd4e2d1c6fde4e6db2"
+ "checksum log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)" = "14b6052be84e6b71ab17edffc2eeabf5c2c3ae1fdb464aae35ac50c67a44e1f7"
+ "checksum managed 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)" = "fdcec5e97041c7f0f1c5b7d93f12e57293c831c646f4cc7a5db59460c7ea8de6"
++"checksum panic-halt 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)" = "de96540e0ebde571dc55c73d60ef407c653844e6f9a1e2fdbd40c07b9252d812"
+ "checksum panic-semihosting 0.5.3 (registry+https://github.com/rust-lang/crates.io-index)" = "c03864ac862876c16a308f5286f4aa217f1a69ac45df87ad3cd2847f818a642c"
+ "checksum proc-macro2 0.4.30 (registry+https://github.com/rust-lang/crates.io-index)" = "cf3d2011ab5c909338f7887f4fc896d35932e29146c12c8d01da6b22a80ba759"
+-"checksum proc-macro2 1.0.3 (registry+https://github.com/rust-lang/crates.io-index)" = "e98a83a9f9b331f54b924e68a66acb1bb35cb01fb0a23645139967abefb697e8"
++"checksum proc-macro2 1.0.6 (registry+https://github.com/rust-lang/crates.io-index)" = "9c9e470a8dc4aeae2dee2f335e8f533e2d4b347e1434e5671afc49b054592f27"
+ "checksum quote 0.6.13 (registry+https://github.com/rust-lang/crates.io-index)" = "6ce23b6b870e8f94f81fb0a363d65d86675884b34a09043c81e5562f11c1f8e1"
+ "checksum quote 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)" = "053a8c8bcc71fcce321828dc897a98ab9760bef03a4fc36693c231e5b3216cfe"
+ "checksum r0 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "e2a38df5b15c8d5c7e8654189744d8e396bddc18ad48041a500ce52d6948941f"
+ "checksum rand 0.5.6 (registry+https://github.com/rust-lang/crates.io-index)" = "c618c47cd3ebd209790115ab837de41425723956ad3ce2e6a7f09890947cacb9"
+ "checksum rand_core 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)" = "7a6fdeb83b075e8266dcc8762c22776f6877a63111121f5f8c7411e5be7eed4b"
+ "checksum rand_core 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)" = "9c33a3c44ca05fa6f1807d8e6743f3824e8509beca625669633be0acbdf509dc"
+-"checksum rtfm-core 0.3.0-alpha.1 (git+https://github.com/japaric/rtfm-core)" = "<none>"
+-"checksum rtfm-syntax 0.4.0-alpha.1 (git+https://github.com/japaric/rtfm-syntax)" = "<none>"
++"checksum rtfm-core 0.3.0-beta.2 (registry+https://github.com/rust-lang/crates.io-index)" = "2bbda0ee6a856c2412aa733bf4afcaaf09f9fe00dd121baf35fd24d152b71fa4"
++"checksum rtfm-syntax 0.4.0-beta.2 (registry+https://github.com/rust-lang/crates.io-index)" = "95f6784b8b1937cf106609e36f5784f2fa0df6fa1b11f24a8d3b59d6c7c3ddf4"
+ "checksum rustc_version 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)" = "138e3e0acb6c9fb258b19b67cb8abd63c00679d2851805ea151465464fe9030a"
+ "checksum semver 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)" = "1d7eb9ef2c18661902cc47e535f9bc51b78acd254da71d375c2f6720d9a40403"
+ "checksum semver-parser 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)" = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
+-"checksum serde 1.0.100 (registry+https://github.com/rust-lang/crates.io-index)" = "f4473e8506b213730ff2061073b48fa51dcc66349219e2e7c5608f0296a1d95a"
++"checksum serde 1.0.101 (registry+https://github.com/rust-lang/crates.io-index)" = "9796c9b7ba2ffe7a9ce53c2287dfc48080f4b2b362fcc245a259b3a7201119dd"
+ "checksum serde-json-core 0.0.1 (git+https://github.com/quartiq/serde-json-core.git?rev=fc764de)" = "<none>"
+-"checksum serde_derive 1.0.100 (registry+https://github.com/rust-lang/crates.io-index)" = "11e410fde43e157d789fc290d26bc940778ad0fdd47836426fbac36573710dbb"
+-"checksum smoltcp 0.5.0 (git+https://github.com/m-labs/smoltcp.git?rev=1ada3da)" = "<none>"
++"checksum serde_derive 1.0.101 (registry+https://github.com/rust-lang/crates.io-index)" = "4b133a43a1ecd55d4086bd5b4dc6c1751c68b1bfbeba7a5040442022c7e7c02e"
++"checksum smoltcp 0.5.0 (git+https://github.com/m-labs/smoltcp.git?rev=0fedb1d)" = "<none>"
+ "checksum stable_deref_trait 1.1.1 (registry+https://github.com/rust-lang/crates.io-index)" = "dba1a27d3efae4351c8051072d619e3ade2820635c3958d826bfea39d59b54c8"
+ "checksum stm32h7 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)" = "63001af508d3332bd2dd81d4212b69e10f45e8f5435b7dab5def36178b9c1c17"
+ "checksum syn 0.15.44 (registry+https://github.com/rust-lang/crates.io-index)" = "9ca4b3b69a77cbe1ffc9e198781b7acb0c7365a883670e8f1c1bc66fba79a5c5"
+diff --git a/Cargo.toml b/Cargo.toml
+index 95aca81..e4d7058 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -27,11 +27,12 @@ features = []
+ default-target = "thumbv7em-none-eabihf"
+ 
+ [dependencies]
+-cortex-m = { version = "0.6", features = ["inline-asm", "const-fn"] }
++cortex-m = { version = "0.6", features = ["const-fn"] }
+ cortex-m-rt = { version = "0.6", features = ["device"] }
+ cortex-m-log = { version = "0.6", features = ["log-integration"] }
+ log = "0.4"
+ panic-semihosting = { version = "0.5", optional = true }
++panic-halt = { version = "0.2" }
+ serde = { version = "1.0", features = ["derive"], default-features = false }
+ heapless = { version = "0.5" }
+ 
+@@ -46,17 +47,18 @@ features = ["stm32h743", "rt"]
+ 
+ [dependencies.smoltcp]
+ git = "https://github.com/m-labs/smoltcp.git"
+-rev = "1ada3da"
+-features = ["proto-ipv4", "socket-tcp"]
++rev = "0fedb1d"
++features = ["ethernet", "proto-ipv4", "socket-tcp"]
+ default-features = false
+ 
+ [dependencies.cortex-m-rtfm]
+-git = "https://github.com/japaric/cortex-m-rtfm"
+-rev = "da675dc3"
++git = "https://github.com/rtfm-rs/cortex-m-rtfm"
++rev = "v0.5.0-beta.1"
+ 
+ [features]
+ semihosting = ["panic-semihosting", "cortex-m-log/semihosting"]
+ bkpt = [ ]
++nightly = ["cortex-m/inline-asm"]
+ 
+ [profile.dev]
+ codegen-units = 1
+diff --git a/README.md b/README.md
+index efd79e5..8efa07e 100644
+--- a/README.md
++++ b/README.md
+@@ -32,7 +32,6 @@ See https://github.com/sinara-hw/Stabilizer
+ 
+ * Clone or download this
+ * Get [rustup](https://rustup.rs/)
+-* `rustup override add nightly`
+ * `rustup target add thumbv7em-none-eabihf`
+ * `cargo build --release`
+ * Do not try the debug (default) mode. It is guaranteed to panic.
+diff --git a/adc_stream.py b/adc_stream.py
+new file mode 100644
+index 0000000..3f8df61
+--- /dev/null
++++ b/adc_stream.py
+@@ -0,0 +1,43 @@
++"""
++Stream ADC samples from Stabilizer and save to file.
++"""
++
++import json
++import serial
++import logging
++import numpy as np
++
++from matplotlib import pyplot as plt
++from artiq.tools import add_common_args, init_logger
++
++logger = logging.getLogger(__name__)
++
++
++if __name__ == "__main__":
++    import argparse
++    p = argparse.ArgumentParser()
++    p.add_argument("-s", "--stabilizer", default="10.255.6.56")
++    p.add_argument("-c", "--channel", default=0, type=int,
++                   help="Stabilizer channel to configure")
++    p.add_argument("-f", "--file", default="adc_log.npy",
++                   help="log file name")
++    p.add_argument("-n", "--n_data", default=int(1e4), type=int,
++                   help="Stabilizer channel to configure")
++    add_common_args(p)  # This adds the -q and -v handling
++    args = p.parse_args()
++    init_logger(args)
++
++    # logging.basicConfig(level=logging.DEBUG)
++
++    n_data = args.n_data
++    with serial.serial_for_url("socket://" + args.stabilizer + ":1236") as s:
++        data_arr = np.frombuffer(s.read(n_data * 2), dtype=np.int16)
++
++    logging.info(data_arr)
++    logging.debug(data_arr.view(np.uint8))
++    logging.debug([bin(i) for i in data_arr.view(np.uint8)])
++
++    np.save(args.file, data_arr)
++
++    plt.plot(data_arr)
++    plt.show()
+diff --git a/openocd.gdb b/openocd.gdb
+index a8602e2..1728d7e 100644
+--- a/openocd.gdb
++++ b/openocd.gdb
+@@ -25,5 +25,5 @@ print *$cc-$t0
+ set var $t0=*$cc
+ continue
+ end
+-set var $t0=*$cc
++#set var $t0=*$cc
+ continue
+diff --git a/plot_adc_log.py b/plot_adc_log.py
+new file mode 100644
+index 0000000..e1d9122
+--- /dev/null
++++ b/plot_adc_log.py
+@@ -0,0 +1,95 @@
++"""Some plotting of adc-logs"""
++
++import numpy as np
++import math
++from matplotlib import pyplot as plt
++from numpy.fft import rfft, rfftfreq
++from scipy.signal import savgol_filter
++
++def normalised_fft(t, y):
++    """Noramlised FFT in signal processing convention"""
++    f = rfftfreq(len(t), t[1]-t[0])
++    y_ = rfft(y)/(max(f)*2)
++    return f, y_
++if False:
++    x = np.linspace(-10,100,10000)
++    y = np.exp(- x*x/2)
++    plt.plot(x, np.sqrt(2*np.pi) * np.exp(-x*x*2*np.pi**2))
++    plt.plot(*np.abs(normalised_fft(x,y)))
++    print(max(np.abs(normalised_fft(x,y))[1]))
++    plt.show()
++
++if __name__=="__main__":
++# if False:
++    plt_every_n = 1
++
++    samples = np.load("adc_log.npy")
++    # samples = np.load("open_loop_noise.npy")
++
++
++    plt.figure(figsize=(10,10))
++    plt.plot(np.arange(samples.shape[0])[::plt_every_n], samples[::plt_every_n],
++             linestyle='', marker='x', markersize=1.5)
++    plt.ylabel("LSB")
++    plt.xlabel(r"$n^{th}$ sample")
++    plt.title(r"stabilizer_current_sense open loop noise")
++    plt.grid()
++    plt.savefig("LSB_log.png", dpi=600)
++    plt.savefig("LSB_log.pdf")
++    # plt.show()
++
++    # LSB to V at ADC
++    v_fact = 2 * 4.096 / 2**16
++    # ADC voltage to input voltage
++    v_fact *= 5 / 2  # /5 op-amp and inverting unity amp on negative side
++    v_fact /= 1  # instrumentation amplifier
++    plt.figure(figsize=(10,10))
++    plt.plot(np.arange(samples.shape[0])[::plt_every_n], v_fact * samples[::plt_every_n],
++             linestyle='', marker='x', markersize=1.5)
++    plt.ylabel("Volt")
++    plt.xlabel(r"$n^{th}$ sample")
++    plt.title(r"stabilizer_current_sense open loop noise")
++    plt.grid()
++    plt.savefig("V_log.png", dpi=600)
++    plt.savefig("V_log.pdf")
++    # plt.show()
++
++    print("np.diff(data).std()/2**.5 in LSB", np.diff(samples).std()/2**.5)
++    print("np.diff(data).std()/2**.5 in V", np.diff(samples).std()/2**.5 *v_fact)
++
++    print("rms in LSB", samples.std())
++    print("rms in V", samples.std() *v_fact)
++
++    sample_rate = 5e5
++    t = np.arange(samples.shape[0]) / sample_rate
++    plt.figure(figsize=(10,10))
++    noise = (samples - samples.mean()) * v_fact
++    f, nsd = normalised_fft(t, noise)
++
++    nsd = np.abs(nsd) / np.sqrt(np.max(t))
++    plt.semilogx(f[::plt_every_n],
++             savgol_filter(nsd,
++                           np.max((plt_every_n, 10))+1,
++                           1)[::plt_every_n]*1e6)
++    # plt.xlim([0,5e3])
++
++    # noise = (samples[:10000] - samples[:10000].mean()) * v_fact
++    # f, nsd = normalised_fft(t[:10000], noise)
++
++    # nsd = np.abs(nsd) / np.sqrt(np.max(t[:10000]))
++    # plt.plot(f[::], nsd[::]/2000)
++
++
++
++    plt.ylabel(r"NSD [$\mu$Volt/sqrt(Hz)]")
++    plt.xlabel(r"frequency /Hz")
++    plt.title(r"stabilizer_current_sense open loop noise")
++    plt.grid()
++    plt.savefig("nsd.png", dpi=600)
++    plt.savefig("nsd.pdf")
++    plt.show()
++    # np.save("noise_spectrum.npy",savgol_filter(nsd,
++                           #np.max((plt_every_n, 10))+1,
++                           #1)[::plt_every_n]*1e6)
++    #np.save("f.npy",f)
++    print("test rms voltage from NSD", np.sqrt(2*(f[1]-f[0])*np.sum(nsd**2)) )
+diff --git a/src/cpu_dac.rs b/src/cpu_dac.rs
+new file mode 100644
+index 0000000..e1aeea2
+--- /dev/null
++++ b/src/cpu_dac.rs
+@@ -0,0 +1,29 @@
++use serde::{Serialize, Deserialize};
++
++#[derive(Copy,Clone,Deserialize,Serialize)]
++pub struct CPU_DAC {
++    pub out: u16,
++    pub en: bool,
++}
++
++#[allow(unused)]
++impl CPU_DAC {
++    pub fn set_scale_out(&mut self, out: f32) -> Result<(), &str> {
++        // out 0 -> 1
++        self.out = (out * (0xfff as f32)) as u16;
++        Ok(())
++    }
++
++    pub fn get_scale_out(&self) -> Result<f32, &str> {
++        Ok( (self.out as f32) / (0xfff as f32))
++    }
++
++    pub fn set_en(&mut self, enable: bool) -> Result<(), &str> {
++        self.en = enable;
++        Ok(())
++    }
++    pub fn get_en(&mut self, enable: bool) -> Result<bool, &str> {
++        Ok(self.en as bool)
++    }
++
++}
+diff --git a/src/eth.rs b/src/eth.rs
+index 1ddd1c8..e3cc496 100644
+--- a/src/eth.rs
++++ b/src/eth.rs
+@@ -1,4 +1,4 @@
+-use core::{slice, cmp};
++use core::{slice, cmp, sync::atomic};
+ use stm32h7::stm32h743 as pac;
+ use smoltcp::Result;
+ use smoltcp::time::Instant;
+@@ -245,6 +245,7 @@ impl RxRing {
+ 
+         let addr = &self.desc_buf[self.cur_desc] as *const _ as u32;
+         assert_eq!(addr & 0x3, 0);
++        atomic::fence(atomic::Ordering::SeqCst);
+         let dma = unsafe { pac::Peripherals::steal().ETHERNET_DMA };
+         dma.dmacrx_dtpr.write(|w| unsafe { w.bits(addr) });
+ 
+@@ -301,6 +302,7 @@ impl TxRing {
+     }
+ 
+     unsafe fn buf_as_slice_mut<'a>(&mut self, len: usize) -> &'a mut [u8] {
++        atomic::fence(atomic::Ordering::SeqCst);
+         let len = cmp::min(len, ETH_BUFFER_SIZE);
+         self.desc_buf[self.cur_desc][2] = EMAC_TDES2_IOC | (len as u32 & EMAC_TDES2_B1L);
+         let addr = &self.pkt_buf[self.cur_desc] as *const _ as *mut u8;
+@@ -314,6 +316,7 @@ impl TxRing {
+ 
+         let addr = &self.desc_buf[self.cur_desc] as *const _ as u32;
+         assert_eq!(addr & 0x3, 0);
++        atomic::fence(atomic::Ordering::SeqCst);
+         let dma = unsafe { pac::Peripherals::steal().ETHERNET_DMA };
+         dma.dmactx_dtpr.write(|w| unsafe { w.bits(addr) });
+     }
+diff --git a/src/main.rs b/src/main.rs
+index 92a3574..6b7fb3c 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,13 +1,13 @@
+ #![no_std]
+ #![no_main]
+-#![feature(asm)]
++#![cfg_attr(feature = "nightly", feature(asm))]
+ // Enable returning `!`
+-#![feature(never_type)]
+-#![feature(core_intrinsics)]
++#![cfg_attr(feature = "nightly", feature(never_type))]
++#![cfg_attr(feature = "nightly", feature(core_intrinsics))]
+ 
+ #[inline(never)]
+ #[panic_handler]
+-#[cfg(not(feature = "semihosting"))]
++#[cfg(all(feature = "nightly", not(feature = "semihosting")))]
+ fn panic(_info: &core::panic::PanicInfo) -> ! {
+     let gpiod = unsafe { &*pac::GPIOD::ptr() };
+     gpiod.odr.modify(|_, w| w.odr6().high().odr12().high());  // FP_LED_1, FP_LED_3
+@@ -17,6 +17,9 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
+ #[cfg(feature = "semihosting")]
+ extern crate panic_semihosting;
+ 
++#[cfg(not(any(feature = "nightly", feature = "semihosting")))]
++extern crate panic_halt;
++
+ #[macro_use]
+ extern crate log;
+ 
+@@ -35,6 +38,11 @@ use serde_json_core::{ser::to_string, de::from_slice};
+ 
+ mod eth;
+ 
++mod cpu_dac;
++use cpu_dac::*;
++
++mod storage;
++
+ mod iir;
+ use iir::*;
+ 
+@@ -189,6 +197,10 @@ fn rcc_pll_setup(rcc: &pac::RCC, flash: &pac::FLASH) {
+          .spi45sel().pll2_q()
+     );
+     rcc.d3ccipr.modify(|_, w| w.spi6sel().pll2_q());
++
++    // // LSI needed for DAC
++    // rcc.csr.modify(|_, w| w.lsion().set_bit());
++    // while rcc.csr.read().lsirdy().is_not_ready() {}
+ }
+ 
+ fn io_compensation_setup(syscfg: &pac::SYSCFG) {
+@@ -200,24 +212,25 @@ fn io_compensation_setup(syscfg: &pac::SYSCFG) {
+     while syscfg.cccsr.read().ready().bit_is_clear() {}
+ }
+ 
+-fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpiod: &pac::GPIOD,
+-              gpioe: &pac::GPIOE, gpiof: &pac::GPIOF, gpiog: &pac::GPIOG) {
+-    // FP_LED0
++fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpioc: &pac::GPIOC,
++              gpiod: &pac::GPIOD, gpioe: &pac::GPIOE, gpiof: &pac::GPIOF,
++              gpiog: &pac::GPIOG) {
++    // FP_LED0 (labelled "L2" on v1.0 front panel)
+     gpiod.otyper.modify(|_, w| w.ot5().push_pull());
+     gpiod.moder.modify(|_, w| w.moder5().output());
+     gpiod.odr.modify(|_, w| w.odr5().low());
+ 
+-    // FP_LED1
++    // FP_LED1 (labelled "L3" on v1.0 front panel)
+     gpiod.otyper.modify(|_, w| w.ot6().push_pull());
+     gpiod.moder.modify(|_, w| w.moder6().output());
+     gpiod.odr.modify(|_, w| w.odr6().low());
+ 
+-    // LED_FP2
++    // FP_LED2 (labelled "L0" on v1.0 front panel)
+     gpiog.otyper.modify(|_, w| w.ot4().push_pull());
+     gpiog.moder.modify(|_, w| w.moder4().output());
+     gpiog.odr.modify(|_, w| w.odr4().low());
+ 
+-    // LED_FP3
++    // FP_LED3 (labelled "L1" on v1.0 front panel)
+     gpiod.otyper.modify(|_, w| w.ot12().push_pull());
+     gpiod.moder.modify(|_, w| w.moder12().output());
+     gpiod.odr.modify(|_, w| w.odr12().low());
+@@ -231,6 +244,7 @@ fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpiod: &pac::GPIOD,
+         w.moder2().output()
+          .moder3().output()
+     );
++    // low, low -> gain = 1
+     gpiog.odr.modify(|_, w|
+         w.odr2().low()
+          .odr3().low()
+@@ -346,6 +360,24 @@ fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpiod: &pac::GPIOD,
+     gpioe.moder.modify(|_, w| w.moder15().output());
+     gpioe.otyper.modify(|_, w| w.ot15().push_pull());
+     gpioe.odr.modify(|_, w| w.odr15().low());
++
++    // SPI3 - current sense board
++    // SCK: PC10
++    gpioc.moder.modify(|_, w| w.moder10().alternate());
++    gpioc.otyper.modify(|_, w| w.ot10().push_pull());
++    gpioc.ospeedr.modify(|_, w| w.ospeedr10().very_high_speed());
++    gpioc.afrh.modify(|_, w| w.afr10().af6());
++    // MOSI: PC12
++    gpioc.moder.modify(|_, w| w.moder12().alternate());
++    gpioc.otyper.modify(|_, w| w.ot12().push_pull());
++    gpioc.ospeedr.modify(|_, w| w.ospeedr12().very_high_speed());
++    gpioc.afrh.modify(|_, w| w.afr12().af6());
++    // MISO: PB4
++    // NSS: PA15
++    gpioa.moder.modify(|_, w| w.moder15().alternate());
++    gpioa.otyper.modify(|_, w| w.ot15().push_pull());
++    gpioa.ospeedr.modify(|_, w| w.ospeedr15().very_high_speed());
++    gpioa.afrh.modify(|_, w| w.afr15().af6());
+ }
+ 
+ // ADC0
+@@ -432,6 +464,7 @@ fn spi2_setup(spi2: &pac::SPI2) {
+ 
+ // DAC1
+ fn spi4_setup(spi4: &pac::SPI4) {
++    // AD5542
+     spi4.cfg1.modify(|_, w|
+         w.mbr().div2()
+          .dsize().bits(16 - 1)
+@@ -458,6 +491,37 @@ fn spi4_setup(spi4: &pac::SPI4) {
+     spi4.cr1.modify(|_, w| w.cstart().started());
+ }
+ 
++// GPIO header SPI
++fn spi3_setup(spi3: &pac::SPI3) {
++    // AD5541
++    // max 25 MHz
++    // 16 bit word
++    spi3.cfg1.modify(|_, w|
++        w.mbr().div8()
++         .dsize().bits(16 - 1)
++         .fthlv().one_frame()
++    );
++    spi3.cfg2.modify(|_, w|
++        w.afcntr().controlled()
++         .ssom().not_asserted()
++         .ssoe().enabled()
++         .ssiop().active_low()
++         .ssm().disabled()
++         .cpol().idle_low()
++         .cpha().first_edge()
++         .lsbfrst().msbfirst()
++         .master().master()
++         .sp().motorola()
++         .comm().transmitter()
++         .ioswp().disabled()
++         .midi().bits(0)
++         .mssi().bits(0)
++    );
++    spi3.cr2.modify(|_, w| w.tsize().bits(0));
++    spi3.cr1.write(|w| w.spe().enabled());
++    spi3.cr1.modify(|_, w| w.cstart().started());
++}
++
+ fn tim2_setup(tim2: &pac::TIM2) {
+     tim2.psc.write(|w| w.psc().bits(200 - 1));  // from 200 MHz
+     tim2.arr.write(|w| unsafe { w.bits(2 - 1) });  // µs
+@@ -516,6 +580,19 @@ fn dma1_setup(dma1: &pac::DMA1, dmamux1: &pac::DMAMUX1, ma: usize, pa0: usize, p
+     dma1.st[1].cr.modify(|_, w| w.en().set_bit());
+ }
+ 
++fn cpu_dac_setup(cpu_dac: &pac::DAC){
++    // (optional) Disable CPU-DAC internal output buffer
++    // cpu_dac.mcr.modify(|_, w| unsafe{
++    //                   w.mode1().bits(0b010)
++    //                    .mode2().bits(0b010)
++    //                    });
++    // enable CPU-DAC outputs 1 and 2
++    cpu_dac.cr.modify(|_, w|
++                      w.en1().set_bit()
++                       .en2().set_bit()
++                       );
++}
++
+ const SCALE: f32 = ((1 << 15) - 1) as f32;
+ 
+ #[link_section = ".sram1.datspi"]
+@@ -543,6 +620,20 @@ const APP: () = {
+         spi: (pac::SPI1, pac::SPI2, pac::SPI4, pac::SPI5),
+         i2c: pac::I2C2,
+         ethernet_periph: (pac::ETHERNET_MAC, pac::ETHERNET_DMA, pac::ETHERNET_MTL),
++        cpu_dac: pac::DAC,
++        #[init([CPU_DAC {out: 0, en: false}; 2])]
++        cpu_dac_ch: [CPU_DAC; 2],
++        gpio_hdr_spi: pac::SPI3,  // different use to spi1/2/4/5
++        // #[init(storage::RingBuffer {
++        //     storage: [0 as u8; storage::STORAGE_SIZE],
++        //     tail: AtomicUsize::new(0),
++        //     head: AtomicUsize::new(0),
++        //     write_lock: AtomicBool::new(false),
++        //     read_lock: AtomicBool::new(false)
++        // })]
++        // adc_buf: RingBuffer<u8>,
++        #[init(0 as u32)]
++        adc_logging: u32,
+         #[init([[0.; 5]; 2])]
+         iir_state: [IIRState; 2],
+         #[init([IIR { ba: [0., 0., 0., 0., 0.], y_offset: 0., y_min: -SCALE - 1., y_max: SCALE }; 2])]
+@@ -584,7 +675,7 @@ const APP: () = {
+             .gpiofen().set_bit()
+             .gpiogen().set_bit()
+         );
+-        gpio_setup(&dp.GPIOA, &dp.GPIOB, &dp.GPIOD, &dp.GPIOE, &dp.GPIOF, &dp.GPIOG);
++        gpio_setup(&dp.GPIOA, &dp.GPIOB, &dp.GPIOC, &dp.GPIOD, &dp.GPIOE, &dp.GPIOF, &dp.GPIOG);
+ 
+         rcc.apb1lenr.modify(|_, w| w.spi2en().set_bit());
+         let spi2 = dp.SPI2;
+@@ -597,13 +688,38 @@ const APP: () = {
+         rcc.apb2enr.modify(|_, w| w.spi1en().set_bit());
+         let spi1 = dp.SPI1;
+         spi1_setup(&spi1);
+-        spi1.ier.write(|w| w.eotie().set_bit());
+-
++        spi1.ier.write(|w| w.eotie().set_bit()
++                       // .rxpie().set_bit()
++                       );
++        info!("spi1 ier: {}", spi1.ier.read().bits());
+         rcc.apb2enr.modify(|_, w| w.spi5en().set_bit());
+         let spi5 = dp.SPI5;
+         spi5_setup(&spi5);
+         // spi5.ier.write(|w| w.eotie().set_bit());
+ 
++        // moveing before DMA configuration fixed broken SPI interrupt loop
++        rcc.apb1lenr.modify(|_, w| w.spi3en().set_bit());
++        let spi3 = dp.SPI3;
++        spi3_setup(&spi3);
++
++        // enable cpu_dac clock
++        rcc.apb1lenr.modify(|_, w| w.dac12en().set_bit());
++        // manual suggests wait for domain to leave standby/sleep
++        while rcc.cr.read().d2ckrdy().is_not_ready() {}
++
++        // configure cpu_dac
++        let cpu_dacx = dp.DAC;
++        cpu_dac_setup(&cpu_dacx);
++
++        // // read cpu_dac output registers
++        let dac1_out = cpu_dacx.dor1.read().dacc1dor().bits();
++        let dac2_out = cpu_dacx.dor2.read().dacc2dor().bits();
++        info!("dor1:2 {:x}:{:x}", dac1_out, dac2_out);
++
++        let d: u16 = 0x0000;
++        let txdr = &spi3.txdr as *const _ as *mut u16;
++        unsafe { ptr::write_volatile(txdr, d) };
++
+         rcc.ahb2enr.modify(|_, w|
+             w
+                 .sram1en().set_bit()
+@@ -637,30 +753,39 @@ const APP: () = {
+ 
+         // c.schedule.tick(Instant::now()).unwrap();
+ 
++
+         init::LateResources {
+             spi: (spi1, spi2, spi4, spi5),
+             i2c: i2c2,
+             ethernet_periph: (dp.ETHERNET_MAC, dp.ETHERNET_DMA, dp.ETHERNET_MTL),
++            cpu_dac: cpu_dacx,
++            gpio_hdr_spi: spi3,
+         }
+     }
+ 
+-    #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c])]
++    // #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c])]
++    #[idle(resources = [ethernet, ethernet_periph, cpu_dac, cpu_dac_ch,
++                        iir_state, iir_ch, i2c, gpio_hdr_spi, adc_logging])]
++    // #[idle(resources = [ethernet, ethernet_periph,
++    //                     iir_state, iir_ch, i2c, gpio_hdr_spi, adc_logging])]
+     fn idle(c: idle::Context) -> ! {
+         let (MAC, DMA, MTL) = c.resources.ethernet_periph;
+ 
+         let hardware_addr = match eeprom::read_eui48(c.resources.i2c) {
+             Err(_) => {
+                 info!("Could not read EEPROM, using default MAC address");
+-                net::wire::EthernetAddress([0x10, 0xE2, 0xD5, 0x00, 0x03, 0x00])
++                net::wire::EthernetAddress([0xb0, 0xd5, 0xcc, 0xfc, 0xfb, 0xf6])
++
+             },
+-            Ok(raw_mac) => net::wire::EthernetAddress(raw_mac)
++            // Ok(raw_mac) => net::wire::EthernetAddress(raw_mac)
++            Ok(raw_mac) => net::wire::EthernetAddress([0xb0, 0xd5, 0xcc, 0xfc, 0xfb, 0xf6])
+         };
+         info!("MAC: {}", hardware_addr);
+ 
+         unsafe { c.resources.ethernet.init(hardware_addr, MAC, DMA, MTL) };
+         let mut neighbor_cache_storage = [None; 8];
+         let neighbor_cache = net::iface::NeighborCache::new(&mut neighbor_cache_storage[..]);
+-        let local_addr = net::wire::IpAddress::v4(10, 0, 16, 99);
++        let local_addr = net::wire::IpAddress::v4(10, 255, 6, 56);
+         let mut ip_addrs = [net::wire::IpCidr::new(local_addr, 24)];
+         let mut iface = net::iface::EthernetInterfaceBuilder::new(c.resources.ethernet)
+                     .ethernet_addr(hardware_addr)
+@@ -670,7 +795,8 @@ const APP: () = {
+         let mut socket_set_entries: [_; 8] = Default::default();
+         let mut sockets = net::socket::SocketSet::new(&mut socket_set_entries[..]);
+         create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle0);
+-        create_socket!(sockets, tcp_rx_storage0, tcp_tx_storage0, tcp_handle1);
++        create_socket!(sockets, tcp_rx_storage1, tcp_tx_storage1, tcp_handle1);
++        create_socket!(sockets, tcp_rx_storage2, tcp_tx_storage2, tcp_handle2);
+ 
+         // unsafe { eth::enable_interrupt(DMA); }
+         let mut time = 0u32;
+@@ -679,6 +805,10 @@ const APP: () = {
+         let mut server = Server::new();
+         let mut iir_state: resources::iir_state = c.resources.iir_state;
+         let mut iir_ch: resources::iir_ch = c.resources.iir_ch;
++        let mut cpu_dac_ch = c.resources.cpu_dac_ch;
++        let mut gpio_hdr_spi = c.resources.gpio_hdr_spi;
++        // let mut adc_buf = c.resources.adc_buf;
++        let mut adc_logging = c.resources.adc_logging;
+         loop {
+             // if ETHERNET_PENDING.swap(false, Ordering::Relaxed) { }
+             let tick = Instant::now() > next_ms;
+@@ -693,13 +823,15 @@ const APP: () = {
+                 } else if !(socket.is_open() || socket.is_listening()) {
+                     socket.listen(1234).unwrap_or_else(|e| warn!("TCP listen error: {:?}", e));
+                 } else if tick && socket.can_send() {
+-                    let s = iir_state.lock(|iir_state| Status {
++                    let mut buf = [0u8; 10];
++                    unsafe {storage::ADC_BUF.dequeue_into(&mut buf)};
++                    let s = iir_state.lock(|iir_state| (Status {
+                         t: time,
+                         x0: iir_state[0][0],
+                         y0: iir_state[0][2],
+                         x1: iir_state[1][0],
+                         y1: iir_state[1][2]
+-                    });
++                    }, buf));
+                     json_reply(socket, &s);
+                 }
+             }
+@@ -712,12 +844,40 @@ const APP: () = {
+                 } else {
+                     server.poll(socket, |req: &Request| {
+                         if req.channel < 2 {
++                            cpu_dac_ch[req.channel as usize] = req.cpu_dac;
+                             iir_ch.lock(|iir_ch| iir_ch[req.channel as usize] = req.iir);
++                            let word: u16 = req.gpio_hdr_spi;
++                            let txdr = &gpio_hdr_spi.txdr as *const _ as *mut u16;
++                            unsafe { ptr::write_volatile(txdr, word) };
++
++                            let gpiod = unsafe { &*pac::GPIOD::ptr() };
++                            gpiod.odr.modify(|_, w| w.odr6().low().odr12().low().odr5().high());  // FP_LED_1, FP_LED_3
+                         }
+                     });
+                 }
+             }
+-
++            {
++                let socket = &mut *sockets.get::<net::socket::TcpSocket>(tcp_handle2);
++                if socket.state() == net::socket::TcpState::CloseWait {
++                    socket.close();
++                    info!("close");
++                } else if !(socket.is_open() || socket.is_listening()) {
++                    socket.listen(1236).unwrap_or_else(|e| warn!("TCP listen error: {:?}", e));
++                    adc_logging.lock(|adc_logging| {*adc_logging = 0; unsafe { storage::ADC_BUF.clear() }});
++                    info!("clear buf");
++                } else if socket.can_send() {
++                    socket.send(|buf| unsafe {
++                        let sent = storage::ADC_BUF.dequeue_into(buf);
++                        (sent, sent)
++                    }).unwrap();
++
++                    adc_logging.lock(|adc_logging|
++                                     if *adc_logging == 0 {
++                                        info!("start logging");
++                                        *adc_logging = 1;
++                                     })
++                }
++            }
+             if !match iface.poll(&mut sockets, net::time::Instant::from_millis(time as i64)) {
+                 Ok(changed) => changed,
+                 Err(net::Error::Unrecognized) => true,
+@@ -725,6 +885,22 @@ const APP: () = {
+             } {
+                 // cortex_m::asm::wfi();
+             }
++
++            c.resources.cpu_dac.cr.modify(|_, w| {
++                let mut temp = match cpu_dac_ch[0].en{
++                    true => w.en1().set_bit(),
++                    false => w.en1().clear_bit(),
++                };
++                match cpu_dac_ch[1].en{
++                    true => temp.en2().set_bit(),
++                    false => temp.en2().clear_bit(),
++                }
++            });
++
++            c.resources.cpu_dac.dhr12r1.write(|w| unsafe {
++                w.dacc1dhr().bits(cpu_dac_ch[0].out)});
++            c.resources.cpu_dac.dhr12r2.write(|w| unsafe {
++                w.dacc2dhr().bits(cpu_dac_ch[1].out)});
+         }
+     }
+ 
+@@ -738,15 +914,26 @@ const APP: () = {
+ 
+     // seems to slow it down
+     // #[link_section = ".data.spi1"]
+-    #[task(binds = SPI1, resources = [spi, iir_state, iir_ch], priority = 2)]
++    #[task(binds = SPI1, resources = [spi, iir_state, iir_ch, adc_logging], priority = 2)]
+     fn spi1(c: spi1::Context) {
+         #[cfg(feature = "bkpt")]
+         cortex_m::asm::bkpt();
++
++        // Keep FP_LED0 ("L2") on, and toggle FP_LED2 ("L0"). Consequently, the
++        // latter will be on, but appear slightly more dim if the ADC poll loop
++        // is still working as it should, and continuously bright/dark if it
++        // has stopped.
++        let gpiod = unsafe { &*pac::GPIOD::ptr() };
++        gpiod.odr.modify(|r, w| w.odr5().high());
++        let gpiog = unsafe { &*pac::GPIOG::ptr() };
++        gpiog.odr.modify(|r, w| w.odr4().bit(!r.odr4().bit_is_set()));
++
+         let (spi1, spi2, spi4, spi5) = c.resources.spi;
+         let iir_ch = c.resources.iir_ch;
+         let iir_state = c.resources.iir_state;
+-
++        let mut adc_logging = c.resources.adc_logging;
+         let sr = spi1.sr.read();
++        // *adc_logging = sr.bits();
+         if sr.eot().bit_is_set() {
+             spi1.ifcr.write(|w| w.eotc().set_bit());
+         }
+@@ -758,6 +945,16 @@ const APP: () = {
+             let d = y0 as i16 as u16 ^ 0x8000;
+             let txdr = &spi2.txdr as *const _ as *mut u16;
+             unsafe { ptr::write_volatile(txdr, d) };
++
++            if *adc_logging == 1 {
++                 unsafe {
++                        let sample = [a as u8, (a >> 8) as u8];
++                        storage::ADC_BUF.enqueue_slice(&sample).unwrap_or_else(|_| {
++                            *adc_logging = 2;
++                            error!("storage full");
++                        });
++                    }
++            }
+         }
+ 
+         let sr = spi5.sr.read();
+@@ -768,11 +965,13 @@ const APP: () = {
+             let rxdr = &spi5.rxdr as *const _ as *const u16;
+             let a = unsafe { ptr::read_volatile(rxdr) };
+             let x0 = f32::from(a as i16);
+-            let y0 = iir_ch[1].update(&mut iir_state[1], x0);
+-            let d = y0 as i16 as u16 ^ 0x8000;
+-            let txdr = &spi4.txdr as *const _ as *mut u16;
+-            unsafe { ptr::write_volatile(txdr, d) };
++            // let y0 = iir_ch[1].update(&mut iir_state[1], x0);
++            // let d = y0 as i16 as u16 ^ 0x8000;
+         }
++        // work around for stabilizer_current_sense issue #9
++        let d = 0xff as u16;
++        let txdr = &spi4.txdr as *const _ as *mut u16;
++        unsafe { ptr::write_volatile(txdr, d) };
+         #[cfg(feature = "bkpt")]
+         cortex_m::asm::bkpt();
+     }
+@@ -799,6 +998,8 @@ const APP: () = {
+ struct Request {
+     channel: u8,
+     iir: IIR,
++    cpu_dac: CPU_DAC,
++    gpio_hdr_spi: u16,
+ }
+ 
+ #[derive(Serialize)]
+@@ -836,7 +1037,7 @@ impl Server {
+         where
+             T: DeserializeOwned,
+             F: FnOnce(&T) -> R,
+-    {
++    {// attempts to run f on received data, returns option of f(response)
+         while socket.can_recv() {
+             let found = socket.recv(|buf| {
+                 let (len, found) = match buf.iter().position(|&c| c as char == '\n') {
+@@ -847,7 +1048,7 @@ impl Server {
+                     self.discard = true;
+                     self.data.clear();
+                 } else if !self.discard && len > 0 {
+-                    self.data.extend_from_slice(&buf[..len - 1]).unwrap();
++                    self.data.extend_from_slice(&buf[..len]).unwrap();
+                 }
+                 (len, found)
+             }).unwrap();
+@@ -857,12 +1058,12 @@ impl Server {
+                     json_reply(socket, &Response { code: 520, message: "command buffer overflow" });
+                     self.data.clear();
+                 } else {
+-                    let r = from_slice::<T>(&self.data);
+-                    self.data.clear();
++                    let r = from_slice::<T>(&self.data[..self.data.len()-1]);
+                     match r {
+                         Ok(res) => {
+                             let r = f(&res);
+                             json_reply(socket, &Response { code: 200, message: "ok" });
++                            self.data.clear();
+                             return Some(r);
+                         },
+                         Err(err) => {
+@@ -870,6 +1071,7 @@ impl Server {
+                             json_reply(socket, &Response { code: 550, message: "parse error" });
+                         },
+                     }
++                    self.data.clear();
+                 }
+             }
+         }
+diff --git a/src/storage.rs b/src/storage.rs
+new file mode 100644
+index 0000000..97df74b
+--- /dev/null
++++ b/src/storage.rs
+@@ -0,0 +1,146 @@
++use core::sync::atomic;
++use core::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
++use core::default::Default;
++use core::marker::Copy;
++use core::cmp::min;
++
++
++pub const STORAGE_SIZE: usize = 1024;
++
++// move to main.rs once const fns work with trait bounds...
++// #[link_section = ".sram2.adc_buf"]
++pub static mut ADC_BUF: RingBuffer<u8> = RingBuffer {
++    storage: [0 as u8; STORAGE_SIZE],
++    tail: AtomicUsize::new(0),
++    head: AtomicUsize::new(0),
++    write_lock: AtomicBool::new(false),
++    read_lock: AtomicBool::new(false),
++};
++
++/// Thread-safe ring buffer.
++///
++/// # Notes
++/// - The buffer can only be written from one thread at a time
++/// - The buffer can only be read from one thread at a time
++/// - Reading and writing simultaneously from different threads is allowed
++/// - Clearing is both a read and a write
++/// - Currently, this contract is enforced using Atomic-based critical sections.
++///   This is a bit heavy-handed and likely to be removed in a future version...
++///
++/// # To do:
++/// - Make STORAGE_SIZE a template param when stable
++/// - Tests!
++pub struct RingBuffer<T> where T: Default + Copy
++{
++    storage: [T; STORAGE_SIZE],
++    tail: AtomicUsize,  // location of next write
++    head: AtomicUsize,  // location of next read
++    write_lock: AtomicBool,
++    read_lock: AtomicBool,
++}
++
++#[allow(dead_code)]
++impl<T> RingBuffer<T> where T: Default + Copy {
++
++    /// should be const, but doesn't yet work with trait bounds...
++    pub fn new() -> Self
++    {
++        Self {
++            storage: [Default::default(); STORAGE_SIZE],
++            tail: AtomicUsize::new(0),
++            head: AtomicUsize::new(0),
++            write_lock: AtomicBool::new(false),
++            read_lock: AtomicBool::new(false),
++        }
++    }
++
++    /// Clear the buffer
++    ///
++    /// # Panics
++    ///
++    /// Panics if the buffer is locked for read/write access
++    pub fn clear(&mut self) {
++        // FIXME: This shouldn't happen!
++        // let wl = self.write_lock.compare_and_swap(false, true, Ordering::Acquire);
++        // if wl {
++        //     panic!("Attempt to clear a write-locked buffer.")
++        // }
++        let rl = self.read_lock.compare_and_swap(false, true, Ordering::Acquire);
++        if rl {
++            panic!("Attempt to clear a read-locked buffer.")
++        }
++        self.tail.store(self.head.load(Ordering::Acquire), Ordering::Release);
++        self.write_lock.store(false, Ordering::Release);
++        self.read_lock.store(false, Ordering::Release);
++    }
++
++    /// Enqueues a value
++    ///
++    /// # Returns Err(()) if the buffer is full.
++    ///
++    /// # Panics
++    ///
++    /// Panics if the buffer is locked for write access
++    pub fn enqueue(&mut self, data: T) -> Result<(), ()> {
++        if false != self.write_lock.compare_and_swap(false, true, Ordering::Acquire) {
++            panic!("Attempt to write to locked buffer.")
++        }
++        let tail = self.tail.load(Ordering::Relaxed);
++        let head = self.head.load(Ordering::Acquire);
++        if (tail + 1) % STORAGE_SIZE == head {
++            return Err(())
++        }
++        self.storage[tail] = data;
++        self.tail.store((tail + 1) % STORAGE_SIZE, Ordering::Release);
++        self.write_lock.store(false, Ordering::Release);
++        Ok(())
++    }
++
++    /// Enqueues a slice
++    ///
++    /// # Returns Err(()) if the buffer is full.
++    ///
++    /// # Panics
++    ///
++    /// Panics if the buffer is locked for write access
++    pub fn enqueue_slice(&mut self, data: &[T]) -> Result<(), ()> {
++        if false != self.write_lock.compare_and_swap(false, true, Ordering::Acquire) {
++            panic!("Attempt to write to locked buffer.")
++        }
++        let tail = self.tail.load(Ordering::Relaxed);
++        let head = self.head.load(Ordering::Acquire);
++        let space = (STORAGE_SIZE + head - tail - 1) % STORAGE_SIZE;
++        if data.len() > space {
++            return Err(())
++        }
++        let size1 = min(STORAGE_SIZE, tail + data.len()) - tail;
++        let size2 = data.len() - size1;
++        self.storage[tail..tail+size1].copy_from_slice(&data[..size1]);
++        self.storage[0..size2].copy_from_slice(&data[size1..]);
++        self.tail.store((tail + data.len()) % STORAGE_SIZE, Ordering::Release);
++        self.write_lock.store(false, Ordering::Release);
++        Ok(())
++    }
++
++    /// Dequeues elements into a slice, returning the number of elements written
++    ///
++    /// # Panics
++    ///
++    /// Panics if the buffer is locked for read access
++    pub fn dequeue_into(&mut self, buf: &mut [T]) -> usize {
++        if false != self.read_lock.compare_and_swap(false, true, Ordering::Acquire) {
++            panic!("Attempt to read from locked buffer.")
++        }
++        let tail = self.tail.load(Ordering::Acquire);
++        let head = self.head.load(Ordering::Relaxed);
++        let available = (STORAGE_SIZE + tail - head) % STORAGE_SIZE;
++        let to_copy = min(available, buf.len());
++
++        let size1 = min(head + to_copy, STORAGE_SIZE) - head;
++        buf[..size1].copy_from_slice(&self.storage[head..head+size1]);
++        buf[size1..to_copy].copy_from_slice(&self.storage[..to_copy-size1]);
++        self.head.store((head + to_copy) % STORAGE_SIZE, Ordering::Release);
++        self.read_lock.store(false, Ordering::Release);
++        to_copy
++    }
++}
+diff --git a/stabilizer.py b/stabilizer.py
+index 0b1e86a..760c91d 100644
+--- a/stabilizer.py
++++ b/stabilizer.py
+@@ -1,3 +1,5 @@
++"""Remote setting of the PID loop parameters as well as CPU-&SPI- DACs"""
++
+ import json
+ import asyncio
+ from collections import OrderedDict as OD
+@@ -16,8 +18,9 @@ class StabilizerConfig:
+     async def connect(self, host, port=1235):
+         self.reader, self.writer = await asyncio.open_connection(host, port)
+ 
+-    async def set(self, channel, iir):
+-        up = OD([("channel", channel), ("iir", iir.as_dict())])
++    async def set(self, channel, iir, dac, gpio_hdr_word):
++        up = OD([("channel", channel), ("iir", iir.as_dict()),
++                ("cpu_dac", dac.as_dict()), ("gpio_hdr_spi", gpio_hdr_word)])
+         s = json.dumps(up, separators=(",", ":"))
+         assert "\n" not in s
+         logger.debug("send %s", s)
+@@ -75,10 +78,48 @@ class IIR:
+         self.y_offset = b*o
+ 
+ 
++class CPU_DAC:
++    full_scale = 0xfff
++
++    def __init__(self):
++        self.en = True
++        self.out = np.zeros(1, np.float32)
++
++    def set_out(self, out):
++        assert out >= 0 and out <= 0xfff, "cpu dac setting out of range"
++        self.out = out
++
++    def set_out_scaled(self, out):
++        assert out >= 0. and out <= 1.0, "cpu dac setting out of range"
++        self.out = int(out*0xfff)
++
++    def set_en(self, en):
++        self.en = en
++
++    def as_dict(self):
++        dac = OD()
++        dac["out"] = int(self.out)
++        dac["en"] = bool(self.en)
++        return dac
++
++
++
+ if __name__ == "__main__":
+     import argparse
++
++    def str2bool(v):
++        if isinstance(v, bool):
++           return v
++        if v.lower() in ('yes', 'true', 't', 'y', '1'):
++            return True
++        elif v.lower() in ('no', 'false', 'f', 'n', '0'):
++            return False
++        else:
++            raise argparse.ArgumentTypeError('Boolean value expected.')
++
++
+     p = argparse.ArgumentParser()
+-    p.add_argument("-s", "--stabilizer", default="10.0.16.99")
++    p.add_argument("-s", "--stabilizer", default="10.255.6.56")
+     p.add_argument("-c", "--channel", default=0, type=int,
+                    help="Stabilizer channel to configure")
+     p.add_argument("-o", "--offset", default=0., type=float,
+@@ -88,6 +129,13 @@ if __name__ == "__main__":
+     p.add_argument("-i", "--integral-gain", default=0., type=float,
+                    help="Integral gain, in units of Hz, "
+                         "sign taken from proportional-gain")
++    p.add_argument("-e", "--cpu-dac-en", default=True, type=str2bool,
++                   help="CPU-DAC enable, 0 for off")
++    p.add_argument("-d", "--cpu-dac-out", default=0, type=int,
++                   help="CPU-DAC output, as u12 from GND to 2.04 V ")
++    p.add_argument("-g", "--gpio_hdr_word", default=0,
++                   type=lambda x: int(x, 0),
++                   help="16 bit word for gpio_hdr_spi")
+ 
+     args = p.parse_args()
+ 
+@@ -96,12 +144,16 @@ if __name__ == "__main__":
+     logging.basicConfig(level=logging.DEBUG)
+ 
+     async def main():
++        d = CPU_DAC()
++        d.set_out(args.cpu_dac_out)
++        d.set_en(args.cpu_dac_en)
+         i = IIR()
+         i.configure_pi(args.proportional_gain, args.integral_gain)
+         i.set_x_offset(args.offset)
+         s = StabilizerConfig()
+         await s.connect(args.stabilizer)
+         assert args.channel in range(2)
+-        r = await s.set(args.channel, i)
++        r = await s.set(args.channel, i, d, args.gpio_hdr_word)
+ 
+     loop.run_until_complete(main())
++
+diff --git a/stabilizer_sync.py b/stabilizer_sync.py
+new file mode 100644
+index 0000000..7ba93c1
+--- /dev/null
++++ b/stabilizer_sync.py
+@@ -0,0 +1,154 @@
++import json
++import asyncio
++from collections import OrderedDict as OD
++import logging
++
++import numpy as np
++import serial
++
++logger = logging.getLogger()
++
++
++class StabilizerError(Exception):
++    pass
++
++
++class StabilizerConfig:
++    def connect(self, host, port=1235):
++        self.dev = serial.serial_for_url("socket://"+host+":"+str(port))
++
++    def set(self, channel, iir, dac):
++        up = OD([("channel", channel), ("iir", iir.as_dict()), ("cpu_dac", dac.as_dict())])
++        s = json.dumps(up, separators=(",", ":"))
++        assert "\n" not in s
++        logger.debug("send %s", s)
++        self.dev.write(s.encode() + b"\n")
++        r = (self.dev.readline()).decode()
++        logger.debug("recv %s", r)
++        ret = json.loads(r, object_pairs_hook=OD)
++        if ret["code"] != 200:
++            raise StabilizerError(ret)
++        return ret
++
++
++class IIR:
++    t_update = 2e-6
++    full_scale = float((1 << 15) - 1)
++
++    def __init__(self):
++        self.ba = np.zeros(5, np.float32)
++        self.y_offset = 0.
++        self.y_min = -self.full_scale - 1
++        self.y_max = self.full_scale
++
++    def as_dict(self):
++        iir = OD()
++        iir["ba"] = [float(_) for _ in self.ba]
++        iir["y_offset"] = self.y_offset
++        iir["y_min"] = self.y_min
++        iir["y_max"] = self.y_max
++        return iir
++
++    def configure_pi(self, kp, ki, g=0.):
++        ki = np.copysign(ki, kp)*self.t_update*2
++        g = np.copysign(g, kp)
++        eps = np.finfo(np.float32).eps
++        if abs(ki) < eps:
++            a1, b0, b1 = 0., kp, 0.
++        else:
++            if abs(g) < eps:
++                c = 1.
++            else:
++                c = 1./(1. + ki/g)
++            a1 = 2*c - 1.
++            b0 = ki*c + kp
++            b1 = ki*c - a1*kp
++            if abs(b0 + b1) < eps:
++                raise ValueError("low integrator gain and/or gain limit")
++        self.ba[0] = b0
++        self.ba[1] = b1
++        self.ba[2] = 0.
++        self.ba[3] = a1
++        self.ba[4] = 0.
++
++    def set_x_offset(self, o):
++        b = self.ba[:3].sum()*self.full_scale
++        self.y_offset = b*o
++
++
++class CPU_DAC:
++    full_scale = 0xfff
++
++    def __init__(self):
++        self.en = True
++        self.out = np.zeros(1, np.float32)
++
++    def set_out(self, out):
++        assert out >= 0 and out <= 0xfff, "cpu dac setting out of range"
++        self.out = out
++
++    def set_out_scaled(self, out):
++        assert out >= 0. and out <= 1.0, "cpu dac setting out of range"
++        self.out = int(out*0xfff)
++
++    def set_en(self, en):
++        self.en = en
++
++    def as_dict(self):
++        dac = OD()
++        dac["out"] = int(self.out)
++        dac["en"] = bool(self.en)
++        return dac
++
++
++if __name__ == "__main__":
++    import argparse
++
++    def str2bool(v):
++        if isinstance(v, bool):
++           return v
++        if v.lower() in ('yes', 'true', 't', 'y', '1'):
++            return True
++        elif v.lower() in ('no', 'false', 'f', 'n', '0'):
++            return False
++        else:
++            raise argparse.ArgumentTypeError('Boolean value expected.')
++
++
++    p = argparse.ArgumentParser()
++    p.add_argument("-s", "--stabilizer", default="10.255.6.169")
++    p.add_argument("-c", "--channel", default=0, type=int,
++                   help="Stabilizer channel to configure")
++    p.add_argument("-o", "--offset", default=0., type=float,
++                   help="input offset, in units of full scale")
++    p.add_argument("-p", "--proportional-gain", default=1., type=float,
++                   help="Proportional gain, in units of 1")
++    p.add_argument("-i", "--integral-gain", default=0., type=float,
++                   help="Integral gain, in units of Hz, "
++                        "sign taken from proportional-gain")
++    p.add_argument("-e", "--cpu-dac-en", default=True, type=str2bool,
++                   help="CPU-DAC enable, 0 for off")
++    p.add_argument("-d", "--cpu-dac-out", default=0, type=int,
++                   help="CPU-DAC output, as u12 from GND to 2.04 V ")
++
++    args = p.parse_args()
++
++    loop = asyncio.get_event_loop()
++    # loop.set_debug(True)
++    logging.basicConfig(level=logging.DEBUG)
++
++    def main():
++        d = CPU_DAC()
++        d.set_out(args.cpu_dac_out)
++        d.set_en(args.cpu_dac_en)
++        i = IIR()
++        i.configure_pi(args.proportional_gain, args.integral_gain)
++        i.set_x_offset(args.offset)
++        s = StabilizerConfig()
++        s.connect(args.stabilizer)
++        assert args.channel in range(2)
++        r = s.set(args.channel, i, d)
++
++
++    main()
++

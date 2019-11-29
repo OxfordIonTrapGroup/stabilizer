@@ -409,6 +409,37 @@ fn spi4_setup(spi4: &pac::SPI4) {
     spi4.cr1.modify(|_, w| w.cstart().started());
 }
 
+// GPIO header SPI
+fn spi3_setup(spi3: &pac::SPI3) {
+    // AD5541
+    // max 25 MHz
+    // 16 bit word
+    spi3.cfg1.modify(|_, w|
+        w.mbr().div8()
+         .dsize().bits(16 - 1)
+         .fthlv().one_frame()
+    );
+    spi3.cfg2.modify(|_, w|
+        w.afcntr().controlled()
+         .ssom().not_asserted()
+         .ssoe().enabled()
+         .ssiop().active_low()
+         .ssm().disabled()
+         .cpol().idle_low()
+         .cpha().first_edge()
+         .lsbfrst().msbfirst()
+         .master().master()
+         .sp().motorola()
+         .comm().transmitter()
+         .ioswp().disabled()
+         .midi().bits(0)
+         .mssi().bits(0)
+    );
+    spi3.cr2.modify(|_, w| w.tsize().bits(0));
+    spi3.cr1.write(|w| w.spe().enabled());
+    spi3.cr1.modify(|_, w| w.cstart().started());
+}
+
 fn tim2_setup(tim2: &pac::TIM2) {
     tim2.psc.write(|w| w.psc().bits(200 - 1));  // from 200 MHz
     tim2.arr.write(|w| unsafe { w.bits(2 - 1) });  // µs
@@ -467,6 +498,19 @@ fn dma1_setup(dma1: &pac::DMA1, dmamux1: &pac::DMAMUX1, ma: usize, pa0: usize, p
     dma1.st[1].cr.modify(|_, w| w.en().set_bit());
 }
 
+fn cpu_dac_setup(cpu_dac: &pac::DAC){
+    // (optional) Disable CPU-DAC internal output buffer
+    // cpu_dac.mcr.modify(|_, w| unsafe{
+    //                   w.mode1().bits(0b010)
+    //                    .mode2().bits(0b010)
+    //                    });
+    // enable CPU-DAC outputs 1 and 2
+    cpu_dac.cr.modify(|_, w|
+                      w.en1().set_bit()
+                       .en2().set_bit()
+                       );
+}
+
 fn tim1_setup(tim1: &pac::TIM1) {
     tim1.arr.write(|w| unsafe { w.bits(feedforward::TMR_ARR_NOMINAL) });
     tim1.dier.write(|w| w.uie().set_bit()); // Interrupt on overflow
@@ -487,7 +531,7 @@ fn tim1_setup(tim1: &pac::TIM1) {
 static mut DAT: u32 = 0x201;  // EN | CSTART
 
 pub fn init() {
-    let mut cp = unsafe{ cortex_m::Peripherals::steal() }; 
+    let mut cp = unsafe{ cortex_m::Peripherals::steal() };
     let dp = unsafe{ pac::Peripherals::steal()};
 
     let rcc = dp.RCC;
@@ -530,6 +574,15 @@ pub fn init() {
     let spi5 = dp.SPI5;
     spi5_setup(&spi5);
     // spi5.ier.write(|w| w.eotie().set_bit());
+
+    // moveing before DMA configuration fixed broken SPI interrupt loop
+    rcc.apb1lenr.modify(|_, w| w.spi3en().set_bit());
+    let spi3 = dp.SPI3;
+    spi3_setup(&spi3);
+
+    // configure cpu_dac
+    let cpu_dacx = dp.DAC;
+    cpu_dac_setup(&cpu_dacx);
 
     rcc.ahb2enr.modify(|_, w|
         w
