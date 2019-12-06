@@ -4,6 +4,7 @@ import json
 import asyncio
 from collections import OrderedDict as OD
 import logging
+import math
 
 import numpy as np
 
@@ -18,9 +19,9 @@ class StabilizerConfig:
     async def connect(self, host, port=1235):
         self.reader, self.writer = await asyncio.open_connection(host, port)
 
-    async def set(self, channel, iir, dac, gpio_hdr_word):
+    async def set(self, channel, iir, dac, gpio_hdr):
         up = OD([("channel", channel), ("iir", iir.as_dict()),
-                ("cpu_dac", dac.as_dict()), ("gpio_hdr_spi", gpio_hdr_word)])
+                ("cpu_dac", dac.as_dict()), ("gpio_hdr_spi", gpio_hdr.gpio_hdr_word)])
         s = json.dumps(up, separators=(",", ":"))
         assert "\n" not in s
         logger.debug("send %s", s)
@@ -36,6 +37,8 @@ class StabilizerConfig:
 class IIR:
     t_update = 2e-6
     full_scale = float((1 << 15) - 1)
+    I_set_range = 21 # mA
+
 
     def __init__(self):
         self.ba = np.zeros(5, np.float32)
@@ -80,18 +83,16 @@ class IIR:
 
 class CPU_DAC:
     full_scale = 0xfff
+    cpu_dac_range = 48 # mA
+    conversion_factor = full_scale/cpu_dac_range
 
     def __init__(self):
         self.en = True
         self.out = np.zeros(1, np.float32)
 
     def set_out(self, out):
-        assert out >= 0 and out <= 0xfff, "cpu dac setting out of range"
-        self.out = out
-
-    def set_out_scaled(self, out):
-        assert out >= 0. and out <= 1.0, "cpu dac setting out of range"
-        self.out = int(out*0xfff)
+        assert out >= 0 and out <= 48, "cpu dac setting out of range"
+        self.out = self.conversion_factor*out
 
     def set_en(self, en):
         self.en = en
@@ -102,6 +103,14 @@ class CPU_DAC:
         dac["en"] = bool(self.en)
         return dac
 
+class GPIO_HDR_SPI:
+    full_scale = 0xffff
+    cpu_dac_range = 250 # mA
+    conversion_factor = full_scale/cpu_dac_range
+
+    def set_gpio_hdr(self, gpio_hdr_word):
+        assert gpio_hdr_word>= 0 and gpio_hdr_word<= 0xffff, "GPIO_HDR_SPI setting out of range"
+        self.gpio_hdr_word = math.ceil(gpio_hdr_word*self.conversion_factor)
 
 
 if __name__ == "__main__":
@@ -119,7 +128,7 @@ if __name__ == "__main__":
 
 
     p = argparse.ArgumentParser()
-    p.add_argument("-s", "--stabilizer", default="10.255.6.56")
+    p.add_argument("-s", "--stabilizer", default="10.255.6.1")
     p.add_argument("-c", "--channel", default=0, type=int,
                    help="Stabilizer channel to configure")
     p.add_argument("-o", "--offset", default=0., type=float,
@@ -132,10 +141,10 @@ if __name__ == "__main__":
     p.add_argument("-e", "--cpu-dac-en", default=True, type=str2bool,
                    help="CPU-DAC enable, 0 for off")
     p.add_argument("-d", "--cpu-dac-out", default=0, type=int,
-                   help="CPU-DAC output, as u12 from GND to 2.04 V ")
+                   help="CPU-DAC output, in mA [0, 48 mA]")
     p.add_argument("-g", "--gpio_hdr_word", default=0,
                    type=lambda x: int(x, 0),
-                   help="16 bit word for gpio_hdr_spi")
+                   help="Frontend offset, in mA [0, 250 mA]")
 
     args = p.parse_args()
 
@@ -150,10 +159,12 @@ if __name__ == "__main__":
         i = IIR()
         i.configure_pi(args.proportional_gain, args.integral_gain)
         i.set_x_offset(args.offset)
+        g = GPIO_HDR_SPI()
+        g.set_gpio_hdr(args.gpio_hdr_word)
         s = StabilizerConfig()
         await s.connect(args.stabilizer)
         assert args.channel in range(2)
-        r = await s.set(args.channel, i, d, args.gpio_hdr_word)
+        r = await s.set(args.channel, i, d, g)
 
     loop.run_until_complete(main())
 

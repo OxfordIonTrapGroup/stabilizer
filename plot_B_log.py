@@ -38,42 +38,39 @@ if __name__=="__main__":
     plt.savefig("LSB_log.pdf")
     # plt.show()
 
-    # LSB to V at ADC
-    v_fact = 2 * 4.096 / 2**16
-    # ADC voltage to input voltage
-    v_fact *= 5 / 2  # /5 op-amp and inverting unity amp on negative side
-    v_fact /= 1  # instrumentation amplifier
+    # LSB to B (nT)
+    B_fact = 15.26*0.5605/250
     plt.figure(figsize=(10,10))
-    plt.plot(np.arange(samples.shape[0])[::plt_every_n], v_fact * samples[::plt_every_n],
+    plt.plot(np.arange(samples.shape[0])[::plt_every_n], B_fact * samples[::plt_every_n],
              linestyle='', marker='x', markersize=1.5)
-    plt.ylabel("Volt")
+    plt.ylabel("nT")
     plt.xlabel(r"$n^{th}$ sample")
-    plt.title(r"stabilizer_current_sense open loop noise")
+    plt.title(r"Magnetic field noise from PSU")
     plt.grid()
-    plt.savefig("V_log.png", dpi=600)
-    plt.savefig("V_log.pdf")
+    plt.savefig("B_log.png", dpi=600)
+    plt.savefig("B_log.pdf")
     # plt.show()
 
     print("np.diff(data).std()/2**.5 in LSB", np.diff(samples).std()/2**.5)
-    print("np.diff(data).std()/2**.5 in V", np.diff(samples).std()/2**.5 *v_fact)
+    print("np.diff(data).std()/2**.5 in B", np.diff(samples).std()/2**.5 *B_fact)
 
     print("rms in LSB", samples.std())
-    print("rms in V", samples.std() *v_fact)
+    print("rms in B", samples.std() *B_fact)
 
     sample_rate = 5e5
     t = np.arange(samples.shape[0]) / sample_rate
     plt.figure(figsize=(10,10))
-    noise = (samples - samples.mean()) * v_fact
+    noise = (samples - samples.mean()) * B_fact
     f, nsd = normalised_fft(t, noise)
 
     nsd = np.abs(nsd) / np.sqrt(np.max(t))
     plt.semilogx(f[::plt_every_n],
              savgol_filter(nsd,
                            np.max((plt_every_n, 10))+1,
-                           1)[::plt_every_n]*1e6)
+                           1)[::plt_every_n])
     # plt.xlim([0,5e3])
 
-    # noise = (samples[:10000] - samples[:10000].mean()) * v_fact
+    # noise = (samples[:10000] - samples[:10000].mean()) * B_fact
     # f, nsd = normalised_fft(t[:10000], noise)
 
     # nsd = np.abs(nsd) / np.sqrt(np.max(t[:10000]))
@@ -81,9 +78,9 @@ if __name__=="__main__":
 
 
 
-    plt.ylabel(r"NSD [$\mu$Volt/sqrt(Hz)]")
+    plt.ylabel(r"NSD [nT/sqrt(Hz)]")
     plt.xlabel(r"frequency /Hz")
-    plt.title(r"stabilizer_current_sense open loop noise")
+    plt.title(r"Magnetic field noise from PSU")
     plt.grid()
     plt.savefig("nsd.png", dpi=600)
     plt.savefig("nsd.pdf")
@@ -92,4 +89,4 @@ if __name__=="__main__":
                            #np.max((plt_every_n, 10))+1,
                            #1)[::plt_every_n]*1e6)
     #np.save("f.npy",f)
-    print("test rms voltage from NSD", np.sqrt(2*(f[1]-f[0])*np.sum(nsd**2)) )
+    print("test rms B-field from NSD", np.sqrt(2*(f[1]-f[0])*np.sum(nsd**2)) )

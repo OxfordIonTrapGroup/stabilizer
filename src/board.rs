@@ -137,7 +137,7 @@ fn io_compensation_setup(syscfg: &pac::SYSCFG) {
     while syscfg.cccsr.read().ready().bit_is_clear() {}
 }
 
-fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpiod: &pac::GPIOD,
+fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpioc: &pac::GPIOC, gpiod: &pac::GPIOD,
               gpioe: &pac::GPIOE, gpiof: &pac::GPIOF, gpiog: &pac::GPIOG) {
     // FP_LED0
     gpiod.otyper.modify(|_, w| w.ot5().push_pull());
@@ -297,6 +297,25 @@ fn gpio_setup(gpioa: &pac::GPIOA, gpiob: &pac::GPIOB, gpiod: &pac::GPIOD,
     // Enable PA8 as AF input
     gpioa.moder.modify(|_, w| w.moder8().alternate()); // moder0 corresponds to pin 0 on GPIOA
     gpioa.afrh.modify(|_, w| w.afr8().af1()); // AF1 = TIM1_CH1
+
+    // SPI3 - current sense board
+    // SCK: PC10
+    gpioc.moder.modify(|_, w| w.moder10().alternate());
+    gpioc.otyper.modify(|_, w| w.ot10().push_pull());
+    gpioc.ospeedr.modify(|_, w| w.ospeedr10().very_high_speed());
+    gpioc.afrh.modify(|_, w| w.afr10().af6());
+    // MOSI: PC12
+    gpioc.moder.modify(|_, w| w.moder12().alternate());
+    gpioc.otyper.modify(|_, w| w.ot12().push_pull());
+    gpioc.ospeedr.modify(|_, w| w.ospeedr12().very_high_speed());
+    gpioc.afrh.modify(|_, w| w.afr12().af6());
+    // MISO: PB4
+    // NSS: PA15
+    gpioa.moder.modify(|_, w| w.moder15().alternate());
+    gpioa.otyper.modify(|_, w| w.ot15().push_pull());
+    gpioa.ospeedr.modify(|_, w| w.ospeedr15().very_high_speed());
+    gpioa.afrh.modify(|_, w| w.afr15().af6());
+
 }
 
 // ADC0
@@ -526,6 +545,45 @@ fn tim1_setup(tim1: &pac::TIM1) {
         w.cen().set_bit());  // enable
 }
 
+fn usart3_setup(usart3: &pac::USART3)
+{
+    let baudrate = 1_000_000;
+    let sysclk = 100_000_000;
+
+    // Calculate baudrate divisor
+    let usartdiv = sysclk / baudrate;
+
+    // 16 times oversampling, OVER8 = 0
+    let brr = usartdiv as u16;
+    usart3.brr.write(|w| { w.brr().bits(brr) });
+
+    // Reset registers to disable advanced USART features
+    usart3.cr2.reset();
+    usart3.cr3.reset();
+
+    // Enable transmission and receiving
+    // and configure frame
+    usart3.cr1.write(|w| {
+        w.fifoen().set_bit() // FIFO mode enabled
+        .over8().oversampling16() // Oversampling by 16
+        .ue().enabled()
+        .te().enabled()
+        .re().enabled()
+    });
+}
+
+fn usart3_write(byte: u8) {
+    let usart3 = unsafe{&*pac::USART3::ptr()};
+    loop {
+        let isr = usart3.isr.read();
+
+        if isr.txe().bit_is_set() {
+            break;
+        }
+    }
+    usart3.tdr.write(|w| unsafe { w.bits(byte as u32)});
+}
+
 
 #[link_section = ".sram1.datspi"]
 static mut DAT: u32 = 0x201;  // EN | CSTART
@@ -541,6 +599,13 @@ pub fn init() {
     rcc.apb4enr.modify(|_, w| w.syscfgen().set_bit());
     io_compensation_setup(&dp.SYSCFG);
 
+    // Set up USART debugger
+    rcc.apb1lenr.modify(|_, w| w.usart3en().set_bit());
+    rcc.apb1lrstr.modify(|_, w| w.usart3rst().set_bit());
+    rcc.apb1lrstr.modify(|_, w| w.usart3rst().clear_bit());
+    let usart3 = dp.USART3;
+    usart3_setup(&usart3);
+
     cp.SCB.enable_icache();
     // TODO: ETH DMA coherence issues
     // cp.SCB.enable_dcache(&mut cp.CPUID);
@@ -555,7 +620,7 @@ pub fn init() {
         .gpiofen().set_bit()
         .gpiogen().set_bit()
     );
-    gpio_setup(&dp.GPIOA, &dp.GPIOB, &dp.GPIOD, &dp.GPIOE, &dp.GPIOF, &dp.GPIOG);
+    gpio_setup(&dp.GPIOA, &dp.GPIOB, &dp.GPIOC, &dp.GPIOD, &dp.GPIOE, &dp.GPIOF, &dp.GPIOG);
 
     rcc.apb1lenr.modify(|_, w| w.spi2en().set_bit());
     let spi2 = dp.SPI2;
@@ -579,6 +644,11 @@ pub fn init() {
     rcc.apb1lenr.modify(|_, w| w.spi3en().set_bit());
     let spi3 = dp.SPI3;
     spi3_setup(&spi3);
+
+    // enable cpu_dac clock
+    rcc.apb1lenr.modify(|_, w| w.dac12en().set_bit());
+    // manual suggests wait for domain to leave standby/sleep
+    while rcc.cr.read().d2ckrdy().is_not_ready() {}
 
     // configure cpu_dac
     let cpu_dacx = dp.DAC;
