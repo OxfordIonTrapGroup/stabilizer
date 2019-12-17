@@ -217,7 +217,7 @@ const APP: () = {
             info!("Using DHCP");
             net::wire::Ipv4Address::UNSPECIFIED.into()
         } else {
-            let static_ip = net::wire::IpAddress::v4(10, 255, 6, 56);
+            let static_ip = net::wire::IpAddress::v4(0, 0, 0, 0);
             info!("Using static IP: {}", static_ip);
             static_ip
         };
