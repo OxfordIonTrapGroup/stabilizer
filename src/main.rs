@@ -149,7 +149,7 @@ const APP: () = {
         i2c: pac::I2C2,
         ethernet_periph: (pac::ETHERNET_MAC, pac::ETHERNET_DMA, pac::ETHERNET_MTL),
         cpu_dac: pac::DAC,
-        #[init([CPU_DAC {out: 0, en: false}; 2])]
+        #[init([CPU_DAC {out: 0, en: true}; 2])]
         cpu_dac_ch: [CPU_DAC; 2],
         gpio_hdr_spi: pac::SPI3,  // different use to spi1/2/4/5
         // #[init(storage::RingBuffer {
