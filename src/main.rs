@@ -196,15 +196,11 @@ const APP: () = {
         }
     }
 
-
-    // #[idle(resources = [ethernet, ethernet_periph, iir_state, iir_ch, i2c])]
     #[idle(resources = [ethernet, ethernet_periph, cpu_dac, cpu_dac_ch,
                         iir_state, iir_ch, i2c, gpio_hdr_spi, adc_logging, ff_state, ff_waveform])]
-    // #[idle(resources = [ethernet, ethernet_periph,
-    //                     iir_state, iir_ch, i2c, gpio_hdr_spi, adc_logging])]
     fn idle(c: idle::Context) -> ! {
         let (MAC, DMA, MTL) = c.resources.ethernet_periph;
-        let use_dhcp = false;
+        let use_dhcp = true;
 
         board::late_init();
 
@@ -212,10 +208,8 @@ const APP: () = {
             Err(_) => {
                 info!("Could not read EEPROM, using default MAC address");
                 net::wire::EthernetAddress([0xb0, 0xd5, 0xcc, 0xfc, 0xfb, 0xf6])
-
             },
-            // Ok(raw_mac) => net::wire::EthernetAddress(raw_mac)
-            Ok(raw_mac) => net::wire::EthernetAddress([0xb0, 0xd5, 0xcc, 0xfc, 0xfb, 0xf6])
+            Ok(raw_mac) => net::wire::EthernetAddress(raw_mac)
         };
         info!("MAC: {}", hardware_addr);
 
