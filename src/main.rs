@@ -586,7 +586,7 @@ fn json_reply<T: Serialize>(socket: &mut net::socket::TcpSocket, msg: &T) {
 }
 
 struct Server {
-    data: Vec<u8, U256>,
+    data: Vec<u8, U512>,
     discard: bool,
 }
 
