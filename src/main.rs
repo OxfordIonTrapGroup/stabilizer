@@ -118,67 +118,7 @@ impl log::Log for SerialLog {
     fn flush(&self) {}
 }
 
-// Pull in build information (from `built` crate)
-mod build_info {
-    #![allow(dead_code)]
-    // include!(concat!(env!("OUT_DIR"), "/built.rs"));
-}
-
-fn usart3_setup(usart3: &pac::USART3)
-{
-    let baudrate = 1_000_000;
-    let sysclk = 100_000_000;
-
-    // Calculate baudrate divisor
-    let usartdiv = sysclk / baudrate;
-
-    // 16 times oversampling, OVER8 = 0
-    let brr = usartdiv as u16;
-    usart3.brr.write(|w| { w.brr().bits(brr) });
-
-    // Reset registers to disable advanced USART features
-    usart3.cr2.reset();
-    usart3.cr3.reset();
-
-    // Enable transmission and receiving
-    // and configure frame
-    usart3.cr1.write(|w| {
-        w.fifoen().set_bit() // FIFO mode enabled
-        .over8().oversampling16() // Oversampling by 16
-        .ue().enabled()
-        .te().enabled()
-        .re().enabled()
-    });
-}
-
-fn usart3_write(byte: u8) {
-    let usart3 = unsafe{&*pac::USART3::ptr()};
-    loop {
-        let isr = usart3.isr.read();
-
-        if isr.txe().bit_is_set() {
-            break;
-        }
-    }
-    usart3.tdr.write(|w| unsafe { w.bits(byte as u32)});
-}
-
-
-fn cpu_dac_setup(cpu_dac: &pac::DAC){
-    // (optional) Disable CPU-DAC internal output buffer
-    // cpu_dac.mcr.modify(|_, w| unsafe{
-    //                   w.mode1().bits(0b010)
-    //                    .mode2().bits(0b010)
-    //                    });
-    // enable CPU-DAC outputs 1 and 2
-    cpu_dac.cr.modify(|_, w|
-                      w.en1().set_bit()
-                       .en2().set_bit()
-                       );
-}
-
 const SCALE: f32 = ((1 << 15) - 1) as f32;
-
 #[link_section = ".sram1.datspi"]
 static mut DAT: u32 = 0x201;  // EN | CSTART
 
@@ -237,25 +177,14 @@ const APP: () = {
     #[init(schedule = [tick])]
     fn init(c: init::Context) -> init::LateResources {
         board::init();
-
         let dp = unsafe { pac::Peripherals::steal() };
-        let rcc = dp.RCC;
-        rcc.apb1lenr.modify(|_, w| w.usart3en().set_bit());
-        rcc.apb1lrstr.modify(|_, w| w.usart3rst().set_bit());
-        rcc.apb1lrstr.modify(|_, w| w.usart3rst().clear_bit());
-        let usart3 = dp.USART3;
-        usart3_setup(&usart3);
+        let ff_waveform = feedforward::Waveform::new();
 
         init_log();
         // info!("Version {} {}", build_info::PKG_VERSION, build_info::GIT_VERSION.unwrap());
         // info!("Built on {}", build_info::BUILT_TIME_UTC);
         // info!("{} {}", build_info::RUSTC_VERSION, build_info::TARGET);
 
-        // c.schedule.tick(Instant::now()).unwrap();
-
-        let ff_waveform = feedforward::Waveform::new();
-
-        // c.schedule.tick(Instant::now()).unwrap();
         init::LateResources {
             spi: (dp.SPI1, dp.SPI2, dp.SPI4, dp.SPI5),
             tim: dp.TIM1,
@@ -594,7 +523,7 @@ const APP: () = {
                     }
             }
         }
-
+        /*
         let sr = spi5.sr.read();
         if sr.eot().bit_is_set() {
             spi5.ifcr.write(|w| w.eotc().set_bit());
@@ -612,6 +541,7 @@ const APP: () = {
         unsafe { ptr::write_volatile(txdr, d) };
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
+        */
     }
 
     /*
