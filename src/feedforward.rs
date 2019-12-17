@@ -2,7 +2,7 @@ use serde::{Serialize, Deserialize};
 use libm;
 
 pub const N_HARMONICS: usize = 5;
-pub const N_LOOKUP: usize = 120;
+pub const N_LOOKUP: usize = 300;
 
 const LINE_FREQ: u32 = 50; // Hz
 const TMR_CLK_FREQ: u32 = 200000000; // Hz
