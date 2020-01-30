@@ -128,19 +128,19 @@ if __name__ == "__main__":
 
 
     p = argparse.ArgumentParser()
-    p.add_argument("-s", "--stabilizer", default="10.255.6.1")
+    p.add_argument("-s", "--stabilizer", default="10.255.6.58")
     p.add_argument("-c", "--channel", default=0, type=int,
                    help="Stabilizer channel to configure")
     p.add_argument("-o", "--offset", default=0., type=float,
                    help="input offset, in units of full scale")
-    p.add_argument("-p", "--proportional-gain", default=1., type=float,
+    p.add_argument("-p", "--proportional_gain", default=1., type=float,
                    help="Proportional gain, in units of 1")
-    p.add_argument("-i", "--integral-gain", default=0., type=float,
+    p.add_argument("-i", "--integral_gain", default=0., type=float,
                    help="Integral gain, in units of Hz, "
                         "sign taken from proportional-gain")
-    p.add_argument("-e", "--cpu-dac-en", default=True, type=str2bool,
+    p.add_argument("-e", "--cpu_dac_en", default=True, type=str2bool,
                    help="CPU-DAC enable, 0 for off")
-    p.add_argument("-d", "--cpu-dac-out", default=0, type=int,
+    p.add_argument("-d", "--cpu_dac_out", default=0, type=int,
                    help="CPU-DAC output, in mA [0, 48 mA]")
     p.add_argument("-g", "--gpio_hdr_word", default=0,
                    type=lambda x: int(x, 0),

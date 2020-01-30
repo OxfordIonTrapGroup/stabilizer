@@ -67,7 +67,7 @@ if __name__ == "__main__":
     import argparse
 
     p = argparse.ArgumentParser()
-    p.add_argument("-s", "--stabilizer", default="10.255.6.1")
+    p.add_argument("-s", "--stabilizer", default="10.255.6.54")
     p.add_argument("-S", "--sin_amps", nargs='+', default=[0.]*5, type=float,
                    help="Sin amplitudes as [50Hz 100Hz 150Hz 200Hz 250Hz] in units of full scale")
     p.add_argument("-C", "--cos_amps", nargs='+', default=[0.]*5, type=float,
