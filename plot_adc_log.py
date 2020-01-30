@@ -42,7 +42,7 @@ if __name__=="__main__":
     plt.title(r"stabilizer_current_sense open loop noise")
     plt.grid()
 
-    # Convert LSB to B (nT)
+    # Convert LSB to B (nT) and plot
     # CHECK CONVERSION
     B_fact = 15.26*0.5605/250
     plt.figure(figsize=(10,10))
@@ -80,3 +80,41 @@ if __name__=="__main__":
     plt.show()
 
     print("test rms B-field from NSD", np.sqrt(2*(f[1]-f[0])*np.sum(nsd**2)) )
+
+    # Convert LSB to uV and plot
+    # CHECK CONVERSION
+    V_fact = 1e6*20.2/65535
+    plt.figure(figsize=(10,10))
+    plt.plot(np.arange(samples.shape[0])[::plt_every_n], V_fact * samples[::plt_every_n],
+             linestyle='', marker='x', markersize=1.5)
+    plt.ylabel("uV")
+    plt.xlabel(r"$n^{th}$ sample")
+    plt.title(r"Magnetic field noise from PSU")
+    plt.grid()
+
+    print("np.diff(data).std()/2**.5 in LSB", np.diff(samples).std()/2**.5)
+    print("np.diff(data).std()/2**.5 in uV", np.diff(samples).std()/2**.5 *V_fact)
+
+    print("rms in LSB", samples.std())
+    print("rms in uV", samples.std() *V_fact)
+
+    # Compute the noise spectral density
+    sample_rate = 5e5
+    t = np.arange(samples.shape[0]) / sample_rate
+    plt.figure(figsize=(10,10))
+    noise = (samples - samples.mean()) * V_fact
+    f, nsd = normalised_fft(t, noise)
+
+    nsd = np.abs(nsd) / np.sqrt(np.max(t))
+    plt.loglog(f[::plt_every_n],
+             savgol_filter(nsd,
+                           np.max((plt_every_n, 10))+1,
+                           1)[::plt_every_n])
+
+    plt.ylabel(r"NSD [uV/sqrt(Hz)]")
+    plt.xlabel(r"frequency /Hz")
+    plt.title(r"Noise from PSU")
+    plt.grid()
+    plt.show()
+
+    print("test uV rms from NSD", np.sqrt(2*(f[1]-f[0])*np.sum(nsd**2)) )
