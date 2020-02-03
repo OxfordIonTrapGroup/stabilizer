@@ -38,7 +38,7 @@ if __name__=="__main__":
         V_fact = 1e6*20.2/65535
 
         # Compute the noise spectral density
-        plt_every_n = 1
+        plt_every_n = 200
         sample_rate = 5e5
         t = np.arange(samples.shape[0]) / sample_rate
         noise = (samples - samples.mean()) * V_fact
@@ -50,9 +50,8 @@ if __name__=="__main__":
                                np.max((plt_every_n, 10))+1,
                                1)[::plt_every_n])
 
-    # plt.ylabel(r"NSD [uV/sqrt(Hz)]")
-    # plt.xlabel(r"frequency /Hz")
-    # plt.title(r"Noise from PSU")
-    # plt.grid()
-
+    plt.ylabel(r"NSD [uV/sqrt(Hz)]")
+    plt.xlabel(r"frequency /Hz")
+    plt.title(r"Noise from PSU")
+    plt.grid()
     plt.show()
