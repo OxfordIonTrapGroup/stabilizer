@@ -2,7 +2,7 @@ use serde::{Serialize, Deserialize};
 use libm;
 
 pub const N_HARMONICS: usize = 5;
-pub const N_LOOKUP: usize = 200;
+pub const N_LOOKUP: usize = 300;
 
 const LINE_FREQ: u32 = 50; // Hz
 const TMR_CLK_FREQ: u32 = 200000000; // Hz
@@ -29,11 +29,6 @@ pub struct Waveform {
 }
 
 impl Waveform {
-    pub fn new() -> Waveform
-    {
-        Waveform{ amplitude: [0; N_LOOKUP] }
-    }
-
     // Calculates the feedforward signal. This is called whenever the Fourier
     // coefficients are changed, so that in the interrupt loop we do the minimal
     // amount of work

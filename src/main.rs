@@ -120,9 +120,7 @@ impl log::Log for SerialLog {
 
 const SCALE: f32 = ((1 << 15) - 1) as f32;
 #[link_section = ".sram1.datspi"]
-//static mut DAT: u32 = 0x201;  // EN | CSTART
-
-// static ETHERNET_PENDING: AtomicBool = AtomicBool::new(true);
+static mut FF_WAVEFORM: feedforward::Waveform = feedforward::Waveform{amplitude: [0; feedforward::N_LOOKUP]};
 
 const TCP_RX_BUFFER_SIZE: usize = 8192;
 const TCP_TX_BUFFER_SIZE: usize = 8192;
@@ -152,21 +150,13 @@ const APP: () = {
         #[init([CpuDac {out: 0, en: true}; 2])]
         cpu_dac_ch: [CpuDac; 2],
         gpio_hdr_spi: pac::SPI3,  // different use to spi1/2/4/5
-        // #[init(storage::RingBuffer {
-        //     storage: [0 as u8; storage::STORAGE_SIZE],
-        //     tail: AtomicUsize::new(0),
-        //     head: AtomicUsize::new(0),
-        //     write_lock: AtomicBool::new(false),
-        //     read_lock: AtomicBool::new(false)
-        // })]
-        // adc_buf: RingBuffer<u8>,
+
         #[init(0 as u32)]
         adc_logging: u32,
         #[init([[0.; 5]; 2])]
         iir_state: [IIRState; 2],
         #[init([IIR { ba: [0., 0., 0., 0., 0.], y_offset: 0., y_min: -SCALE - 1., y_max: SCALE }; 2])]
         iir_ch: [IIR; 2],
-        ff_waveform: feedforward::Waveform,
         #[init(feedforward::State{id:0, n_coarse:0, period_correction:0, phase:0})]
         ff_state: feedforward::State,
         #[link_section = ".sram3.eth"]
@@ -178,7 +168,6 @@ const APP: () = {
     fn init(_c: init::Context) -> init::LateResources {
         board::init();
         let dp = unsafe { pac::Peripherals::steal() };
-        let ff_waveform = feedforward::Waveform::new();
 
         init_log();
         // info!("Version {} {}", build_info::PKG_VERSION, build_info::GIT_VERSION.unwrap());
@@ -189,7 +178,6 @@ const APP: () = {
             spi: (dp.SPI1, dp.SPI2, dp.SPI4, dp.SPI5),
             tim: dp.TIM1,
             i2c: dp.I2C2,
-            ff_waveform: ff_waveform,
             ethernet_periph: (dp.ETHERNET_MAC, dp.ETHERNET_DMA, dp.ETHERNET_MTL),
             cpu_dac: dp.DAC,
             gpio_hdr_spi: dp.SPI3,
@@ -197,7 +185,7 @@ const APP: () = {
     }
 
     #[idle(resources = [ethernet, ethernet_periph, cpu_dac, cpu_dac_ch,
-                        iir_state, iir_ch, i2c, gpio_hdr_spi, adc_logging, ff_state, ff_waveform])]
+                        iir_state, iir_ch, i2c, gpio_hdr_spi, adc_logging, ff_state])]
     fn idle(c: idle::Context) -> ! {
         let (MAC, DMA, MTL) = c.resources.ethernet_periph;
         let use_dhcp = true;
@@ -265,12 +253,10 @@ const APP: () = {
         let mut server = Server::new();
         let mut iir_state: resources::iir_state = c.resources.iir_state;
         let mut iir_ch: resources::iir_ch = c.resources.iir_ch;
-        let mut ff_waveform: resources::ff_waveform = c.resources.ff_waveform;
         let mut ff_state: resources::ff_state = c.resources.ff_state;
         let mut last_id: u32 = 0;
         let cpu_dac_ch = c.resources.cpu_dac_ch;
         let gpio_hdr_spi = c.resources.gpio_hdr_spi;
-        // let mut adc_buf = c.resources.adc_buf;
         let mut adc_logging = c.resources.adc_logging;
 
         loop {
@@ -342,7 +328,7 @@ const APP: () = {
                     socket.listen(1237).unwrap_or_else(|e| warn!("TCP listen error: {:?}", e));
                 } else {
                     server.poll(socket, |req: &feedforward::Settings| {
-                        ff_waveform.lock(|wav| wav.update(req));
+                        unsafe { FF_WAVEFORM.update(req);}
                     });
                 }
             }
@@ -435,19 +421,17 @@ const APP: () = {
 
     // seems to slow it down
     // #[link_section = ".data.spi1"]
-    #[task(binds = SPI1, resources = [spi, iir_state, iir_ch,adc_logging, tim, ff_state, ff_waveform], priority = 3)]
+    #[task(binds = SPI1, resources = [spi, iir_state, iir_ch,adc_logging, tim, ff_state], priority = 3)]
     fn spi1(c: spi1::Context) {
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
 
         static mut N: u32 = 0;
-        static mut COUNTER: u16 = 0;
         static mut ID: u32 = 0;
         static mut PHASE_INT: i32 = 0;
 
         let tim1 = c.resources.tim;
         let ff_state = c.resources.ff_state;
-        let waveform = c.resources.ff_waveform;
 
         let gpiod = unsafe { &*pac::GPIOD::ptr() };
         gpiod.odr.modify(|_r, w| w.odr5().high());
@@ -471,7 +455,7 @@ const APP: () = {
                     N = 0;
                 }
             }
-            let y = waveform.amplitude[unsafe{N as usize}];
+            let y = unsafe{FF_WAVEFORM.amplitude[N as usize]};
             let dac_val = y as u16;
 
             let rxdr = &spi1.rxdr as *const _ as *const u16;
