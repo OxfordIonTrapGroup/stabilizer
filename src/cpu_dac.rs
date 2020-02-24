@@ -1,13 +1,13 @@
 use serde::{Serialize, Deserialize};
 
 #[derive(Copy,Clone,Deserialize,Serialize)]
-pub struct CPU_DAC {
+pub struct CpuDac {
     pub out: u16,
     pub en: bool,
 }
 
 #[allow(unused)]
-impl CPU_DAC {
+impl CpuDac {
     pub fn set_scale_out(&mut self, out: f32) -> Result<(), &str> {
         // out 0 -> 1
         self.out = (out * (0xfff as f32)) as u16;

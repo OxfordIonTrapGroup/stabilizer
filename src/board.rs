@@ -572,17 +572,17 @@ fn usart3_setup(usart3: &pac::USART3)
     });
 }
 
-fn usart3_write(byte: u8) {
-    let usart3 = unsafe{&*pac::USART3::ptr()};
-    loop {
-        let isr = usart3.isr.read();
+// fn usart3_write(byte: u8) {
+//     let usart3 = unsafe{&*pac::USART3::ptr()};
+//     loop {
+//         let isr = usart3.isr.read();
 
-        if isr.txe().bit_is_set() {
-            break;
-        }
-    }
-    usart3.tdr.write(|w| unsafe { w.bits(byte as u32)});
-}
+//         if isr.txe().bit_is_set() {
+//             break;
+//         }
+//     }
+//     usart3.tdr.write(|w| unsafe { w.bits(byte as u32)});
+// }
 
 
 #[link_section = ".sram1.datspi"]

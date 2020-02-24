@@ -28,7 +28,7 @@ class FeedfowardConfig:
         return ret
 """
 class Feedforward:
-	feedforward_range = 19 # mA
+	feedforward_range = 21 # mA
 	conversion_factor = feedforward_range/2 # [-1,1] maps to [-range/2,range/2]
 	def __init__(self):
 		pass

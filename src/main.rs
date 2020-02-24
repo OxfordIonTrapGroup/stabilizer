@@ -120,7 +120,7 @@ impl log::Log for SerialLog {
 
 const SCALE: f32 = ((1 << 15) - 1) as f32;
 #[link_section = ".sram1.datspi"]
-static mut DAT: u32 = 0x201;  // EN | CSTART
+//static mut DAT: u32 = 0x201;  // EN | CSTART
 
 // static ETHERNET_PENDING: AtomicBool = AtomicBool::new(true);
 
@@ -149,8 +149,8 @@ const APP: () = {
         i2c: pac::I2C2,
         ethernet_periph: (pac::ETHERNET_MAC, pac::ETHERNET_DMA, pac::ETHERNET_MTL),
         cpu_dac: pac::DAC,
-        #[init([CPU_DAC {out: 0, en: true}; 2])]
-        cpu_dac_ch: [CPU_DAC; 2],
+        #[init([CpuDac {out: 0, en: true}; 2])]
+        cpu_dac_ch: [CpuDac; 2],
         gpio_hdr_spi: pac::SPI3,  // different use to spi1/2/4/5
         // #[init(storage::RingBuffer {
         //     storage: [0 as u8; storage::STORAGE_SIZE],
@@ -175,7 +175,7 @@ const APP: () = {
     }
 
     #[init(schedule = [tick])]
-    fn init(c: init::Context) -> init::LateResources {
+    fn init(_c: init::Context) -> init::LateResources {
         board::init();
         let dp = unsafe { pac::Peripherals::steal() };
         let ff_waveform = feedforward::Waveform::new();
@@ -268,8 +268,8 @@ const APP: () = {
         let mut ff_waveform: resources::ff_waveform = c.resources.ff_waveform;
         let mut ff_state: resources::ff_state = c.resources.ff_state;
         let mut last_id: u32 = 0;
-        let mut cpu_dac_ch = c.resources.cpu_dac_ch;
-        let mut gpio_hdr_spi = c.resources.gpio_hdr_spi;
+        let cpu_dac_ch = c.resources.cpu_dac_ch;
+        let gpio_hdr_spi = c.resources.gpio_hdr_spi;
         // let mut adc_buf = c.resources.adc_buf;
         let mut adc_logging = c.resources.adc_logging;
 
@@ -378,7 +378,7 @@ const APP: () = {
             }
 
             c.resources.cpu_dac.cr.modify(|_, w| {
-                let mut temp = match cpu_dac_ch[0].en{
+                let temp = match cpu_dac_ch[0].en{
                     true => w.en1().set_bit(),
                     false => w.en1().clear_bit(),
                 };
@@ -433,75 +433,51 @@ const APP: () = {
         c.schedule.tick(c.scheduled + PERIOD.cycles()).unwrap();
     }
 
-    #[task(binds = TIM1_UP, resources = [tim, ff_state, ff_waveform], priority = 2) ]
-    fn feedforward_timer(c: feedforward_timer::Context) {
+    // seems to slow it down
+    // #[link_section = ".data.spi1"]
+    #[task(binds = SPI1, resources = [spi, iir_state, iir_ch,adc_logging, tim, ff_state, ff_waveform], priority = 3)]
+    fn spi1(c: spi1::Context) {
+        #[cfg(feature = "bkpt")]
+        cortex_m::asm::bkpt();
+
         static mut N: u32 = 0;
+        static mut COUNTER: u16 = 0;
         static mut ID: u32 = 0;
         static mut PHASE_INT: i32 = 0;
 
         let tim1 = c.resources.tim;
         let ff_state = c.resources.ff_state;
         let waveform = c.resources.ff_waveform;
-        let sr = tim1.sr.read();
-
-        if sr.uif().bit_is_set() {
-            tim1.sr.write(|w| w.uif().clear_bit() );
-            *N += 1;
-            if *N == feedforward::N_LOOKUP as u32 {
-                *N = 0;
-            }
-            let y = waveform.amplitude[*N as usize];
-            let dac_val = y as u16 ^ 0x8000;
-            let spi = unsafe { &*pac::SPI4::ptr() };
-            let txdr = &spi.txdr as *const _ as *mut u16;
-            unsafe { ptr::write_volatile(txdr, dac_val) };
-        }
-
-        if sr.cc1if().bit_is_set() {
-            tim1.sr.write(|w| w.cc1if().clear_bit() );
-            *ID += 1;
-            let n_fine = tim1.ccr1.read().bits();
-            let phase = n_fine + (*N)*feedforward::TMR_ARR_NOMINAL;
-            let phase_error = phase as i32 - (feedforward::N_LOOKUP as i32 + 1)*(feedforward::TMR_ARR_NOMINAL as i32)/2;
-            ff_state.id = *ID;
-            ff_state.n_coarse = *N;
-            ff_state.phase = phase_error;
-
-            *PHASE_INT += phase_error;
-            let mut period_correction: i32 = *PHASE_INT/10000 + phase_error/500;
-            if period_correction > 1000 {period_correction=1000;}
-            if period_correction < -1000 {period_correction=-1000;}
-            ff_state.period_correction = period_correction;
-            let period = feedforward::TMR_ARR_NOMINAL as i32 + period_correction;
-            tim1.arr.write(|w| unsafe { w.bits(period as u32) });
-        }
-
-    }
-
-    // seems to slow it down
-    // #[link_section = ".data.spi1"]
-    #[task(binds = SPI1, resources = [spi, iir_state, iir_ch,adc_logging], priority = 3)]
-    fn spi1(c: spi1::Context) {
-        #[cfg(feature = "bkpt")]
-        cortex_m::asm::bkpt();
 
         let gpiod = unsafe { &*pac::GPIOD::ptr() };
-        gpiod.odr.modify(|r, w| w.odr5().high());
+        gpiod.odr.modify(|_r, w| w.odr5().high());
         let gpiog = unsafe { &*pac::GPIOG::ptr() };
         gpiog.odr.modify(|r, w| w.odr4().bit(!r.odr4().bit_is_set()));
-        let (spi1, spi2, spi4, spi5) = c.resources.spi;
+        let (spi1, spi2, _spi4, _spi5) = c.resources.spi;
         let iir_ch = c.resources.iir_ch;
         let iir_state = c.resources.iir_state;
-        let mut adc_logging = c.resources.adc_logging;
+        let adc_logging = c.resources.adc_logging;
         let sr = spi1.sr.read();
         // *adc_logging = sr.bits();
+
         if sr.eot().bit_is_set() {
             spi1.ifcr.write(|w| w.eotc().set_bit());
         }
+        // FIXME: Overuse of unsafe blocks, should make use of dereferencing
         if sr.rxp().bit_is_set() {
+            unsafe{
+                N += 1;
+                if N == feedforward::N_LOOKUP as u32 {
+                    N = 0;
+                }
+            }
+            let y = waveform.amplitude[unsafe{N as usize}];
+            let dac_val = y as u16;
+
             let rxdr = &spi1.rxdr as *const _ as *const u16;
             let a = unsafe { ptr::read_volatile(rxdr) };
-            let x0 = f32::from(a as i16);
+            let x00 = f32::from(a as i16);
+            let x0 = x00 + f32::from(dac_val);
             let y0 = iir_ch[0].update(&mut iir_state[0], x0);
             let d = y0 as i16 as u16 ^ 0x8000;
             let txdr = &spi2.txdr as *const _ as *mut u16;
@@ -517,35 +493,29 @@ const APP: () = {
                     }
             }
         }
-        /*
-        let sr = spi5.sr.read();
-        if sr.eot().bit_is_set() {
-            spi5.ifcr.write(|w| w.eotc().set_bit());
-        }
-        if sr.rxp().bit_is_set() {
-            let rxdr = &spi5.rxdr as *const _ as *const u16;
-            let a = unsafe { ptr::read_volatile(rxdr) };
-            let x0 = f32::from(a as i16);
-            // let y0 = iir_ch[1].update(&mut iir_state[1], x0);
-            // let d = y0 as i16 as u16 ^ 0x8000;
-        }
-        // work around for stabilizer_current_sense issue #9
-        let d = 0xff as u16;
-        let txdr = &spi4.txdr as *const _ as *mut u16;
-        unsafe { ptr::write_volatile(txdr, d) };
-        #[cfg(feature = "bkpt")]
-        cortex_m::asm::bkpt();
-        */
-    }
+        // FIXME: Overuse of unsafe blocks, should make use of dereferencing
+        let sr = tim1.sr.read();
+        if sr.cc1if().bit_is_set() {
+            tim1.sr.write(|w| w.cc1if().clear_bit() );
+            unsafe{ID += 1};
+            let n_fine = tim1.ccr1.read().bits();
+            let phase = unsafe{n_fine + (N)*feedforward::TMR_ARR_NOMINAL};
+            let phase_error = phase as i32 - (feedforward::N_LOOKUP as i32 + 1)*(feedforward::TMR_ARR_NOMINAL as i32)/2;
+            unsafe{
+                ff_state.id = ID;
+                ff_state.n_coarse = N;
+                ff_state.phase = phase_error;
+            }
 
-    /*
-    #[task(binds = ETH, resources = [ethernet_periph], priority = 1)]
-    fn eth(c: eth::Context) {
-        let dma = &c.resources.ethernet_periph.1;
-        ETHERNET_PENDING.store(true, Ordering::Relaxed);
-        unsafe { eth::interrupt_handler(dma) }
+            unsafe{PHASE_INT += phase_error;}
+            let mut period_correction: i32 = unsafe{PHASE_INT/10000 + phase_error/500};
+            if period_correction > 1000 {period_correction=1000;}
+            if period_correction < -1000 {period_correction=-1000;}
+            ff_state.period_correction = period_correction;
+            let period = feedforward::TMR_ARR_NOMINAL as i32 + period_correction;
+            tim1.arr.write(|w| unsafe { w.bits(period as u32) });
+        }
     }
-    */
 
     extern "C" {
         // hw interrupt handlers for RTFM to use for scheduling tasks
@@ -560,7 +530,7 @@ const APP: () = {
 struct Request {
     channel: u8,
     iir: IIR,
-    cpu_dac: CPU_DAC,
+    cpu_dac: CpuDac,
     gpio_hdr_spi: u16,
 }
 

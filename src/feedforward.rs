@@ -2,7 +2,7 @@ use serde::{Serialize, Deserialize};
 use libm;
 
 pub const N_HARMONICS: usize = 5;
-pub const N_LOOKUP: usize = 300;
+pub const N_LOOKUP: usize = 200;
 
 const LINE_FREQ: u32 = 50; // Hz
 const TMR_CLK_FREQ: u32 = 200000000; // Hz
@@ -53,8 +53,8 @@ impl Waveform {
             let harmonic_phase = phase*((i+1) as f32);
             sum += s.sin_amplitudes[i] * libm::sinf(harmonic_phase);
             sum += s.cos_amplitudes[i] * libm::cosf(harmonic_phase);
-            sum += s.offset * 0.2_f32;
         }
+        sum += s.offset;
         return (0x7fff as f32 * sum) as i16;
     }
 }
