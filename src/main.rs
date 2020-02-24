@@ -429,6 +429,8 @@ const APP: () = {
         static mut N: u32 = 0;
         static mut ID: u32 = 0;
         static mut PHASE_INT: i32 = 0;
+        static mut INTERPOLATOR: i16 = 0;
+        static mut DAC_VAL: u16 = 0;
 
         let tim1 = c.resources.tim;
         let ff_state = c.resources.ff_state;
@@ -442,26 +444,27 @@ const APP: () = {
         let iir_state = c.resources.iir_state;
         let adc_logging = c.resources.adc_logging;
         let sr = spi1.sr.read();
-        // *adc_logging = sr.bits();
+        let sr1 = tim1.sr.read();
 
-        if sr.eot().bit_is_set() {
-            spi1.ifcr.write(|w| w.eotc().set_bit());
-        }
-        // FIXME: Overuse of unsafe blocks, should make use of dereferencing
-        if sr.rxp().bit_is_set() {
+        if sr1.uif().bit_is_set() {
+            tim1.sr.write(|w| w.uif().clear_bit() );
             unsafe{
                 N += 1;
                 if N == feedforward::N_LOOKUP as u32 {
                     N = 0;
                 }
+                let y = FF_WAVEFORM.amplitude[N as usize];
+                DAC_VAL = y as u16;
             }
-            let y = unsafe{FF_WAVEFORM.amplitude[N as usize]};
-            let dac_val = y as u16;
-
+        }
+        if sr.eot().bit_is_set() {
+            spi1.ifcr.write(|w| w.eotc().set_bit());
+        }
+        if sr.rxp().bit_is_set() {
             let rxdr = &spi1.rxdr as *const _ as *const u16;
             let a = unsafe { ptr::read_volatile(rxdr) };
             let x00 = f32::from(a as i16);
-            let x0 = x00 + f32::from(dac_val);
+            let x0 = unsafe{x00 + DAC_VAL as f32};
             let y0 = iir_ch[0].update(&mut iir_state[0], x0);
             let d = y0 as i16 as u16 ^ 0x8000;
             let txdr = &spi2.txdr as *const _ as *mut u16;
@@ -477,9 +480,7 @@ const APP: () = {
                     }
             }
         }
-        // FIXME: Overuse of unsafe blocks, should make use of dereferencing
-        let sr = tim1.sr.read();
-        if sr.cc1if().bit_is_set() {
+        if sr1.cc1if().bit_is_set() {
             tim1.sr.write(|w| w.cc1if().clear_bit() );
             unsafe{ID += 1};
             let n_fine = tim1.ccr1.read().bits();
@@ -598,7 +599,7 @@ impl Server {
 
 #[exception]
 fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
-    panic!("HardFault at {:#?}", ef);
+    panic!("HardFault at {:?}", ef);
 }
 
 #[exception]
