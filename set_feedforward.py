@@ -28,17 +28,16 @@ class FeedfowardConfig:
         return ret
 """
 class Feedforward:
-	feedforward_range = 21 # mA
-	conversion_factor = feedforward_range/2 # [-1,1] maps to [-range/2,range/2]
+	conversion_factor = 1/500 # [0, 500uA] maps to [0, 1]
 	def __init__(self):
 		pass
 
 	def set_amplitudes(self, amplitudes):
-		amplitudes = [a/self.conversion_factor for a in amplitudes]
+		amplitudes = [a * self.conversion_factor for a in amplitudes]
 		return amplitudes
 
 	def set_offset(self, offset):
-		offset = offset/self.conversion_factor
+		offset = offset * self.conversion_factor
 		return offset
 
 class Stabilizer:
@@ -67,13 +66,13 @@ if __name__ == "__main__":
     import argparse
 
     p = argparse.ArgumentParser()
-    p.add_argument("-s", "--stabilizer", default="10.255.6.54")
+    p.add_argument("-s", "--stabilizer", default="10.255.6.58")
     p.add_argument("-S", "--sin_amps", nargs='+', default=[0.]*5, type=float,
-                   help="Sin amplitudes as [50Hz 100Hz 150Hz 200Hz 250Hz] in units of full scale")
+                   help="Sin amplitudes as [50Hz 100Hz 150Hz 200Hz 250Hz] in micro-amps, [0, 500uA].")
     p.add_argument("-C", "--cos_amps", nargs='+', default=[0.]*5, type=float,
-                   help="Cos amplitudes as [50Hz 100Hz 150Hz 200Hz 250Hz] in units of full scale")
+                   help="Cos amplitudes as [50Hz 100Hz 150Hz 200Hz 250Hz] in micro-amps, [0, 500uA].")
     p.add_argument("-o", "--offset", default=0., type=float,
-                   help="Feed forward offset")
+                   help="Feed forward offset, in micro-amps, [0, 500uA].")
     args = p.parse_args()
 
     loop = asyncio.get_event_loop()
