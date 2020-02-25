@@ -6,14 +6,16 @@ pub const N_LOOKUP: usize = 300;
 
 const LINE_FREQ: u32 = 50; // Hz
 const TMR_CLK_FREQ: u32 = 200000000; // Hz
+const SPI_CLK_FREQ: u32 = 500000; // Hz
 pub const TMR_ARR_NOMINAL: u32 = TMR_CLK_FREQ / (LINE_FREQ* (N_LOOKUP as u32));
+pub const NUM_FINE_TICKS: u32 = SPI_CLK_FREQ / (LINE_FREQ* (N_LOOKUP as u32));
 
 #[derive(Serialize)]
 pub struct State {
     pub id: u32,
     pub n_coarse: u32,
     pub period_correction: i32,
-    pub phase: i32
+    pub phase: i32,
 }
 
 #[derive(Debug,Deserialize,Serialize)]
@@ -51,5 +53,6 @@ impl Waveform {
         }
         sum += s.offset;
         return (0x7fff as f32 * sum) as i16;
+        // return (n % 2) as i16 * 1000 as i16;
     }
 }

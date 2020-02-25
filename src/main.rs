@@ -426,11 +426,14 @@ const APP: () = {
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
 
+
         static mut N: u32 = 0;
         static mut ID: u32 = 0;
         static mut PHASE_INT: i32 = 0;
-        static mut INTERPOLATOR: i16 = 0;
-        static mut DAC_VAL: u16 = 0;
+        static mut DAC_VAL: i16 = 0;
+        static mut NEXT_VAL: i16 = 0;
+        static mut DIFF: f32 = 0.0;
+        static mut COUNTER: i16 = 0;
 
         let tim1 = c.resources.tim;
         let ff_state = c.resources.ff_state;
@@ -450,21 +453,24 @@ const APP: () = {
             tim1.sr.write(|w| w.uif().clear_bit() );
             unsafe{
                 N += 1;
+                COUNTER = 0;
                 if N == feedforward::N_LOOKUP as u32 {
                     N = 0;
                 }
-                let y = FF_WAVEFORM.amplitude[N as usize];
-                DAC_VAL = y as u16;
+                DAC_VAL = FF_WAVEFORM.amplitude[N as usize];
+                NEXT_VAL = FF_WAVEFORM.amplitude[((N+1) % feedforward::N_LOOKUP as  u32) as usize];
+                DIFF = (NEXT_VAL - DAC_VAL) as f32;
             }
         }
         if sr.eot().bit_is_set() {
             spi1.ifcr.write(|w| w.eotc().set_bit());
         }
         if sr.rxp().bit_is_set() {
+            unsafe{COUNTER += 1};
             let rxdr = &spi1.rxdr as *const _ as *const u16;
             let a = unsafe { ptr::read_volatile(rxdr) };
-            let x00 = f32::from(a as i16);
-            let x0 = unsafe{x00 + DAC_VAL as f32};
+            let x00 = a as i16;
+            let x0 = unsafe{(x00 + DAC_VAL) as f32 + DIFF * (COUNTER as f32) / (feedforward::NUM_FINE_TICKS as f32)};
             let y0 = iir_ch[0].update(&mut iir_state[0], x0);
             let d = y0 as i16 as u16 ^ 0x8000;
             let txdr = &spi2.txdr as *const _ as *mut u16;
@@ -599,7 +605,7 @@ impl Server {
 
 #[exception]
 fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
-    panic!("HardFault at {:?}", ef);
+    panic!("HardFault at {:#?}", ef);
 }
 
 #[exception]
