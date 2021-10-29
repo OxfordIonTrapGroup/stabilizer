@@ -155,8 +155,12 @@ const APP: () = {
         adc_logging: u32,
         #[init([[0.; 5]; 2])]
         iir_state: [IIRState; 2],
+        #[init([[0.; 5]; 2])]
+        iir_state_notch: [IIRState; 2],
         #[init([IIR { ba: [0., 0., 0., 0., 0.], y_offset: 0., y_min: -SCALE - 1., y_max: SCALE }; 2])]
         iir_ch: [IIR; 2],
+        #[init([IIR { ba: [0.5036527732087793, -0.98754583322327, 0.5036527732087793, 0.98754583322327, -0.007305546417558594], y_offset: 0., y_min: -SCALE - 1., y_max: SCALE }; 2])]
+        iir_ch_notch: [IIR; 2],
         #[init(feedforward::State{id:0, n_coarse:0, period_correction:0, phase:0})]
         ff_state: feedforward::State,
         #[link_section = ".sram3.eth"]
@@ -421,7 +425,7 @@ const APP: () = {
 
     // seems to slow it down
     // #[link_section = ".data.spi1"]
-    #[task(binds = SPI1, resources = [spi, iir_state, iir_ch,adc_logging, tim, ff_state], priority = 3)]
+    #[task(binds = SPI1, resources = [spi, iir_state, iir_state_notch, iir_ch, iir_ch_notch, adc_logging, tim, ff_state], priority = 3)]
     fn spi1(c: spi1::Context) {
         #[cfg(feature = "bkpt")]
         cortex_m::asm::bkpt();
@@ -444,7 +448,9 @@ const APP: () = {
         gpiog.odr.modify(|r, w| w.odr4().bit(!r.odr4().bit_is_set()));
         let (spi1, spi2, _spi4, _spi5) = c.resources.spi;
         let iir_ch = c.resources.iir_ch;
+        let iir_ch_notch = c.resources.iir_ch_notch;
         let iir_state = c.resources.iir_state;
+        let iir_state_notch = c.resources.iir_state_notch;
         let adc_logging = c.resources.adc_logging;
         let sr = spi1.sr.read();
         let sr1 = tim1.sr.read();
@@ -471,7 +477,9 @@ const APP: () = {
             let a = unsafe { ptr::read_volatile(rxdr) };
             let x00 = a as i16;
             let x0 = unsafe{(x00 + DAC_VAL) as f32 + DIFF * (COUNTER as f32) / (feedforward::NUM_FINE_TICKS as f32)};
-            let y0 = iir_ch[0].update(&mut iir_state[0], x0);
+            let y00 = iir_ch_notch[0].update(&mut iir_state_notch[0], x0);
+            let y0 = iir_ch[0].update(&mut iir_state[0], y00);
+
             let d = y0 as i16 as u16 ^ 0x8000;
             let txdr = &spi2.txdr as *const _ as *mut u16;
             unsafe { ptr::write_volatile(txdr, d) };
