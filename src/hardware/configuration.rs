@@ -544,7 +544,7 @@ pub fn setup(
     );
     info!("MAC address: {}", mac_addr);
 
-    if mac_addr != smoltcp::wire::EthernetAddress([0x80, 0x00, 0x10, 0x4d, 0x03, 0x8b]) {
+    if mac_addr != smoltcp::wire::EthernetAddress([0x80, 0x1f, 0x12, 0x5d, 0x47, 0xdf]) {
         panic!("Unexpected MAC address: {}", mac_addr);
     }
 
@@ -573,7 +573,7 @@ pub fn setup(
         let store = unsafe { &mut NET_STORE };
 
         store.ip_addrs[0] = smoltcp::wire::IpCidr::new(
-            smoltcp::wire::IpAddress::v4(10, 255, 6, 176),
+            smoltcp::wire::IpAddress::v4(10, 255, 6, 74),
             24,
         );
 
