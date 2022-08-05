@@ -417,7 +417,7 @@ dependencies = [
 [[package]]
 name = "mcp23017"
 version = "0.1.1"
-source = "git+https://github.com/mrd0ll4r/mcp23017.git#61933f857abe5a837800493a5f58e91a3c9435ec"
+source = "git+https://github.com/mrd0ll4r/mcp23017.git#08947b94f1978eb8ddf56b6026948acbc9a5ea7b"
 dependencies = [
  "embedded-hal",
 ]
