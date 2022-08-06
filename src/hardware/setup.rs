@@ -17,7 +17,8 @@ use super::{
     eeprom, input_stamper::InputStamper, pounder,
     pounder::dds_output::DdsOutput, shared_adc::SharedAdc, timers,
     DigitalInput0, DigitalInput1, EthernetPhy, NetworkStack, SystemTimer,
-    Systick, AFE0, AFE1,
+    Systick, AFE0, AFE1, EemDigitalInput0, EemDigitalInput1,
+    EemDigitalOutput0, EemDigitalOutput1
 };
 
 const NUM_TCP_SOCKETS: usize = 4;
@@ -100,6 +101,14 @@ pub struct NetworkDevices {
     pub mac_address: smoltcp::wire::EthernetAddress,
 }
 
+/// The GPIO pins available on the EEM connector, if Pounder is not present.
+pub struct EemGpioDevices {
+    pub lvds4: EemDigitalInput0,
+    pub lvds5: EemDigitalInput1,
+    pub lvds6: EemDigitalOutput0,
+    pub lvds7: EemDigitalOutput1,
+}
+
 /// The available hardware interfaces on Stabilizer.
 pub struct StabilizerDevices {
     pub systick: Systick,
@@ -112,6 +121,7 @@ pub struct StabilizerDevices {
     pub timestamp_timer: timers::TimestampTimer,
     pub net: NetworkDevices,
     pub digital_inputs: (DigitalInput0, DigitalInput1),
+    pub eem_gpio: Option<EemGpioDevices>,
 }
 
 /// The available Pounder-specific hardware interfaces.
@@ -774,7 +784,7 @@ pub fn setup(
     // Measure the Pounder PGOOD output to detect if pounder is present on Stabilizer.
     let pounder_pgood = gpiob.pb13.into_pull_down_input();
     delay.delay_ms(2u8);
-    let pounder = if pounder_pgood.is_high() {
+    let (pounder, eem_gpio) = if pounder_pgood.is_high() {
         log::info!("Found Pounder");
 
         let i2c1 = {
@@ -962,15 +972,20 @@ pub fn setup(
             )
         };
 
-        Some(PounderDevices {
+        (Some(PounderDevices {
             pounder: pounder_devices,
             dds_output,
 
             #[cfg(not(feature = "pounder_v1_0"))]
             timestamper: pounder_stamper,
-        })
+        }), None)
     } else {
-        None
+        (None, Some(EemGpioDevices {
+            lvds4: gpiod.pd1.into_floating_input(),
+            lvds5: gpiod.pd2.into_floating_input(),
+            lvds6: gpiod.pd3.into_push_pull_output(),
+            lvds7: gpiod.pd4.into_push_pull_output(),
+        }))
     };
 
     let stabilizer = StabilizerDevices {
@@ -986,6 +1001,7 @@ pub fn setup(
         adc_dac_timer: sampling_timer,
         timestamp_timer,
         digital_inputs,
+        eem_gpio,
     };
 
     // info!("Version {} {}", build_info::PKG_VERSION, build_info::GIT_VERSION.unwrap());
