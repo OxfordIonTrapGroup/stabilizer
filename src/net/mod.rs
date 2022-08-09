@@ -17,7 +17,7 @@ use crate::hardware::{EthernetPhy, NetworkManager, NetworkStack, SystemTimer};
 use data_stream::{DataStream, FrameGenerator};
 use minimq::embedded_nal::IpAddr;
 use network_processor::NetworkProcessor;
-use telemetry::TelemetryClient;
+use telemetry::{TelemetryClient, HandleUnknown};
 
 use core::fmt::Write;
 use heapless::String;
@@ -142,12 +142,15 @@ where
 
     /// Update and process all of the network users state.
     ///
+    /// # Args
+    /// * `handle_unknown` - Callback for unknown message topics.
+    ///
     /// # Returns
     /// An indication if any of the network users indicated a state change.
     /// The SettingsChanged option contains the path of the settings that changed.
-    pub fn update(&mut self) -> NetworkState {
+    pub fn update(&mut self, handle_unknown: Option<HandleUnknown>) -> NetworkState {
         // Update the MQTT clients.
-        self.telemetry.update();
+        self.telemetry.update(handle_unknown.unwrap_or(|_a, _b, _c, _d| {}));
 
         // Update the data stream.
         if self.generator.is_none() {

@@ -391,7 +391,7 @@ mod app {
     #[idle(shared=[network])]
     fn idle(mut c: idle::Context) -> ! {
         loop {
-            match c.shared.network.lock(|net| net.update()) {
+            match c.shared.network.lock(|net| net.update(None)) {
                 NetworkState::SettingsChanged(_path) => {
                     settings_update::spawn().unwrap()
                 }

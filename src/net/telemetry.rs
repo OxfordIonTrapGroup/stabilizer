@@ -18,6 +18,15 @@ use super::NetworkReference;
 use crate::hardware::{adc::AdcCode, afe::Gain, dac::DacCode, SystemTimer};
 use minimq::embedded_nal::IpAddr;
 
+use minimq::{Property, mqtt_client::MqttClient};
+
+pub type HandleUnknown = for<'a> fn(
+    &mut MqttClient<NetworkReference, SystemTimer, 512, 1>,
+    &'a str,
+    &[u8],
+    &[Property<'a>]);
+
+
 /// The telemetry client for reporting telemetry data over MQTT.
 pub struct TelemetryClient<T: Serialize> {
     mqtt: minimq::Minimq<NetworkReference, SystemTimer, 512, 1>,
@@ -155,8 +164,8 @@ impl<T: Serialize> TelemetryClient<T> {
     /// This function is provided to force the underlying MQTT state machine to process incoming
     /// and outgoing messages. Without this, the client will never connect to the broker. This
     /// should be called regularly.
-    pub fn update(&mut self) {
-        match self.mqtt.poll(|_client, _topic, _message, _properties| {}) {
+    pub fn update(&mut self, handle_unknown: HandleUnknown) {
+        match self.mqtt.poll(handle_unknown) {
             Err(minimq::Error::Network(
                 smoltcp_nal::NetworkError::NoIpAddress,
             )) => {}
