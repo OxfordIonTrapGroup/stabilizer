@@ -367,9 +367,9 @@ dependencies = [
 [[package]]
 name = "idsp"
 version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a978f7c533b86cabab1a431b8abedfd667a62f4fed91f5a42bb950128ff8b77"
+source = "git+https://github.com/OxfordIonTrapGroup/idsp.git?branch=main#ad4571778b451454b7ae09637a8db93c3ef0e06f"
 dependencies = [
+ "libm",
  "miniconf",
  "num-complex 0.4.2",
  "num-traits",
@@ -394,9 +394,9 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libm"
-version = "0.2.3"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da83a57f3f5ba3680950aa3cbc806fc297bc0b289d42e8942ed528ace71b8145"
+checksum = "292a948cd991e376cf75541fe5b97a1081d713c618b4f1b9500f8844e49eb565"
 
 [[package]]
 name = "lm75"
