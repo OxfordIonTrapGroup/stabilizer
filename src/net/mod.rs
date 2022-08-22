@@ -148,9 +148,9 @@ where
     /// # Returns
     /// An indication if any of the network users indicated a state change.
     /// The SettingsChanged option contains the path of the settings that changed.
-    pub fn update(&mut self, handle_unknown: Option<HandleUnknown>) -> NetworkState {
+    pub fn update(&mut self, handle_unknown: Option<&HandleUnknown>) -> NetworkState {
         // Update the MQTT clients.
-        self.telemetry.update(handle_unknown.unwrap_or(|_a, _b, _c, _d| {}));
+        self.telemetry.update(handle_unknown.unwrap_or(&|_a, _b, _c, _d| {}));
 
         // Update the data stream.
         if self.generator.is_none() {

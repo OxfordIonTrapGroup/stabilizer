@@ -18,9 +18,9 @@ use mutex_trait::prelude::*;
 use stabilizer::{
     hardware::{
         self,
-        adc::{Adc0Input, Adc1Input},
+        adc::{Adc0Input, Adc1Input, AdcCode},
         afe::Gain,
-        dac::{Dac0Output, Dac1Output},
+        dac::{Dac0Output, Dac1Output, DacCode},
         hal,
         timers::SamplingTimer,
         SystemTimer, Systick, AFE0, AFE1,
@@ -30,7 +30,7 @@ use stabilizer::{
         miniconf::Miniconf,
         serde::{Serialize, Deserialize},
         telemetry::{Telemetry, TelemetryBuffer},
-        NetworkUsers,
+        NetworkState, NetworkUsers,
     },
 };
 
@@ -310,6 +310,7 @@ mod app {
             adc1_filtered,
             gain_ramp,
             lock_detect,
+            telemetry,
         } = c.shared;
 
         let process::LocalResources {
@@ -327,7 +328,7 @@ mod app {
             y as u16 ^ 0x8000
         }
 
-        (iir_ch, adc1_routing, adc1_filtered, gain_ramp, lock_detect).lock(
+        (iir_ch, adc1_routing, adc1_filtered, gain_ramp, lock_detect, telemetry).lock(
             |iir_ch, adc1_routing, adc1_filtered, gain_ramp, lock_detect, telemetry| {
                 (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
                     let adc_samples = [adc0, adc1];
@@ -418,20 +419,20 @@ mod app {
         let mut adc1_filtered = c.shared.adc1_filtered;
         let mut subscribed = false;
         loop {
-            match c.shared.network.lock(|net|
+            match c.shared.network.lock(|net| {
                 if !subscribed {
                     match net.telemetry.mqtt.client.subscribe(ADC1_FILTERED_TOPIC, &[]) {
                         Ok(_) => {subscribed = true;},
                         Err(_) => {}
-                    })
+                    }
                 }
+                let filtered_int: i32 = adc1_filtered.lock(|a| *a);
                 net.update(
-                    Some(|client, topic, _message, properties| {
+                    Some(&move |client, topic, _message, properties| {
                         let mut payload_buf: String<64> = String::new();
                         let payload = match topic {
                             ADC1_FILTERED_TOPIC => {
-                                let filtered_int: i32 =
-                                    adc1_filtered.lock(|a| *a);
+
                                 // 16 signed ADC bits (set to 1V full-range).
                                 const FULL_RANGE: i32 =
                                     1 << (15 + ADC1_LOWPASS_SHIFT);
@@ -453,7 +454,7 @@ mod app {
                         // );
                     })
                 )
-            ) {
+            }) {
                 NetworkState::SettingsChanged(_path) => {
                     settings_update::spawn().unwrap()
                 }
@@ -626,7 +627,7 @@ mod app {
         let telemetry: TelemetryBuffer =
             c.shared.telemetry.lock(|telemetry| *telemetry);
 
-        let telemetry_period = c.shared.settings.lock(|settings| *settings.telemetry_period);
+        let telemetry_period = c.shared.settings.lock(|settings| settings.telemetry_period);
 
         c.shared.network.lock(|net| {
             net.telemetry.publish(&telemetry.finalize(

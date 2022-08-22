@@ -20,7 +20,7 @@ use minimq::embedded_nal::IpAddr;
 
 use minimq::{Property, mqtt_client::MqttClient};
 
-pub type HandleUnknown = for<'a> fn(
+pub type HandleUnknown = dyn for<'a> Fn(
     &mut MqttClient<NetworkReference, SystemTimer, 512, 1>,
     &'a str,
     &[u8],
@@ -29,7 +29,7 @@ pub type HandleUnknown = for<'a> fn(
 
 /// The telemetry client for reporting telemetry data over MQTT.
 pub struct TelemetryClient<T: Serialize> {
-    mqtt: minimq::Minimq<NetworkReference, SystemTimer, 512, 1>,
+    pub mqtt: minimq::Minimq<NetworkReference, SystemTimer, 512, 1>,
     telemetry_topic: String<128>,
     _telemetry: core::marker::PhantomData<T>,
 }
@@ -164,7 +164,7 @@ impl<T: Serialize> TelemetryClient<T> {
     /// This function is provided to force the underlying MQTT state machine to process incoming
     /// and outgoing messages. Without this, the client will never connect to the broker. This
     /// should be called regularly.
-    pub fn update(&mut self, handle_unknown: HandleUnknown) {
+    pub fn update(&mut self, handle_unknown: &HandleUnknown) {
         match self.mqtt.poll(handle_unknown) {
             Err(minimq::Error::Network(
                 smoltcp_nal::NetworkError::NoIpAddress,
