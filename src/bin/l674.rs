@@ -12,6 +12,7 @@ use core::sync::atomic::{fence, Ordering};
 
 use fugit::ExtU64;
 use mutex_trait::prelude::*;
+use minimq::{QoS, Retain, Property};
 
 // Replace `hal` by `stabilizer::hardware::hal`
 // `CycleCounterClock` -> `Systick`
@@ -197,9 +198,8 @@ mod app {
             BATCH_SIZE,
             SAMPLE_TICKS,
         );
-        // eem_gpio
 
-        let mut network = NetworkUsers::new(
+        let network = NetworkUsers::new(
             stabilizer.net.stack,
             stabilizer.net.phy,
             clock,
@@ -416,44 +416,70 @@ mod app {
     fn idle(mut c: idle::Context) -> ! {
         info!("Starting idle task...");
 
-        let mut adc1_filtered = c.shared.adc1_filtered;
         let mut subscribed = false;
+        let mut adc1_filtered = c.shared.adc1_filtered;
+
         loop {
             match c.shared.network.lock(|net| {
-                if !subscribed {
-                    match net.telemetry.mqtt.client.subscribe(ADC1_FILTERED_TOPIC, &[]) {
-                        Ok(_) => {subscribed = true;},
-                        Err(_) => {}
+                // Take ownership of telemetry.
+                let mut telemetry = net.telemetry.take().unwrap();
+
+                // Skips the telemetry update because we took ownership.
+                let settings_result = net.update();
+                let mqtt_result = {
+                    let mqtt = telemetry.mqtt();
+
+                    if !subscribed {
+                        match mqtt.client.subscribe(ADC1_FILTERED_TOPIC, &[]) {
+                            Ok(_) => { subscribed = true; },
+                            Err(_) => {}
+                        }
                     }
-                }
-                let filtered_int: i32 = adc1_filtered.lock(|a| *a);
-                net.update(
-                    Some(&move |client, topic, _message, properties| {
+
+                    mqtt.poll(|client, topic, _message, properties| {
                         let mut payload_buf: String<64> = String::new();
                         let payload = match topic {
                             ADC1_FILTERED_TOPIC => {
-
+                                let filtered_int: i32 = adc1_filtered.lock(|a| *a);
                                 // 16 signed ADC bits (set to 1V full-range).
-                                const FULL_RANGE: i32 =
-                                    1 << (15 + ADC1_LOWPASS_SHIFT);
+                                const FULL_RANGE: i32 = 1 << (15 + ADC1_LOWPASS_SHIFT);
                                 write!(
                                     &mut payload_buf,
                                     "{}",
                                     (filtered_int as f32) / (FULL_RANGE as f32)
-                                )
-                                .unwrap();
+                                ).unwrap();
                                 payload_buf.as_bytes()
                             }
                             _ => "Unexpected topic".as_bytes(),
                         };
-                        // miniconf::MqttInterface::respond(
-                        //     client,
-                        //     properties,
-                        //     "dt/sinara/stabilizer/l674/log",
-                        //     payload,
-                        // );
+
+                        let response_property = properties
+                            .iter()
+                            .find(|&prop| matches!(*prop, Property::ResponseTopic(_)));
+                        // Make a best-effort attempt to send the response. If we get a failure,
+                        // we may have disconnected or the peer provided an invalid topic to
+                        // respond to. Ignore the failure in these cases.
+                        if let Some(Property::ResponseTopic(response_topic)) = response_property {
+                            client.publish(
+                                response_topic,
+                                payload,
+                                QoS::AtMostOnce,
+                                Retain::NotRetained,
+                                &[])
+                            .ok();
+                        }
                     })
-                )
+                };
+                // Move telemetry back into NetworkUsers.
+                net.telemetry.replace(telemetry);
+
+                if let Err(_) = mqtt_result {
+                    if subscribed {
+                        warn!("MQTT broker connection lost.");
+                    }
+                    subscribed = false;
+                }
+                settings_result
             }) {
                 NetworkState::SettingsChanged(_path) => {
                     settings_update::spawn().unwrap()
@@ -461,26 +487,6 @@ mod app {
                 NetworkState::Updated => {}
                 NetworkState::NoChange => cortex_m::asm::wfi(),
             }
-
-///////////////////////////////
-            //     Ok(updated) => {
-            //         if updated {
-            //             c.spawn.settings_update().unwrap()
-            //         } else if sleep {
-            //             cortex_m::asm::wfi();
-            //         }
-            //     }
-            //     Err(miniconf::MqttError::Disconnected) => {
-            //         if subscribed {
-            //             warn!("MQTT broker connection lost.");
-            //         }
-            //         subscribed = false;
-            //     }
-            //     Err(e) => {
-            //         warn!("Miniconf update failure: {:?}", e)
-            //     }
-            // }
-/////////////////////////
         }
     }
 
@@ -630,7 +636,7 @@ mod app {
         let telemetry_period = c.shared.settings.lock(|settings| settings.telemetry_period);
 
         c.shared.network.lock(|net| {
-            net.telemetry.publish(&telemetry.finalize(
+            net.telemetry.as_mut().unwrap().publish(&telemetry.finalize(
                 c.local.afes.0.get_gain(),
                 c.local.afes.1.get_gain(),
                 c.local.cpu_temp_sensor.get_temperature().unwrap(),
