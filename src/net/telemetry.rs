@@ -20,7 +20,7 @@ use minimq::embedded_nal::IpAddr;
 
 /// The telemetry client for reporting telemetry data over MQTT.
 pub struct TelemetryClient<T: Serialize> {
-    mqtt: Option<minimq::Minimq<NetworkReference, SystemTimer, 512, 1>>,
+    mqtt: minimq::Minimq<NetworkReference, SystemTimer, 512, 1>,
     telemetry_topic: String<128>,
     _telemetry: core::marker::PhantomData<T>,
 }
@@ -114,7 +114,7 @@ impl<T: Serialize> TelemetryClient<T> {
         broker: IpAddr,
     ) -> Self {
         let mqtt =
-            minimq::Minimq::new(broker, client_id, stack, clock).ok();
+            minimq::Minimq::new(broker, client_id, stack, clock).unwrap();
 
         let mut telemetry_topic: String<128> = String::from(prefix);
         telemetry_topic.push_str("/telemetry").unwrap();
@@ -126,23 +126,11 @@ impl<T: Serialize> TelemetryClient<T> {
         }
     }
 
-    /// Take ownership and responsibility over MQTT
-    pub fn take_mqtt(&mut self) -> Option<minimq::Minimq<NetworkReference, SystemTimer, 512, 1>> {
-        self.mqtt.take()
-    }
-
-    /// Return ownership and responsibility over MQTT
-    pub fn insert_mqtt(&mut self, mqtt: minimq::Minimq<NetworkReference, SystemTimer, 512, 1>) {
-        self.mqtt.insert(mqtt);
-    }
-
     /// Publish telemetry over MQTT
     ///
     /// # Note
     /// Telemetry is reported in a "best-effort" fashion. Failure to transmit telemetry will cause
     /// it to be silently dropped.
-    ///
-    /// # Panic if self does not own mqtt.
     ///
     /// # Args
     /// * `telemetry` - The telemetry to report
@@ -150,8 +138,6 @@ impl<T: Serialize> TelemetryClient<T> {
         let telemetry: Vec<u8, 512> =
             serde_json_core::to_vec(telemetry).unwrap();
         self.mqtt
-            .as_mut()
-            .unwrap()
             .client
             .publish(
                 &self.telemetry_topic,
@@ -169,18 +155,14 @@ impl<T: Serialize> TelemetryClient<T> {
     /// This function is provided to force the underlying MQTT state machine to process incoming
     /// and outgoing messages. Without this, the client will never connect to the broker. This
     /// should be called regularly.
-    ///
-    /// If mqtt is not owned by self, the owner is responsible for polling.
     pub fn update(&mut self) {
-        if let Some(mqtt) = &mut self.mqtt {
-            match mqtt.poll(|_client, _topic, _message, _properties| {}) {
-                Err(minimq::Error::Network(
-                    smoltcp_nal::NetworkError::NoIpAddress,
-                )) => {}
+        match self.mqtt.poll(|_client, _topic, _message, _properties| {}) {
+            Err(minimq::Error::Network(
+                smoltcp_nal::NetworkError::NoIpAddress,
+            )) => {}
 
-                Err(error) => log::info!("Unexpected error: {:?}", error),
-                _ => {}
-            }
+            Err(error) => log::info!("Unexpected error: {:?}", error),
+            _ => {}
         }
     }
 }
