@@ -37,12 +37,12 @@ pub enum UpdateState {
     Updated,
 }
 
+#[derive(Copy, Clone, PartialEq)]
 pub enum NetworkState {
-    SettingsChanged(String<64>),
+    SettingsChanged,
     Updated,
     NoChange,
 }
-
 /// A structure of Stabilizer's default network users.
 pub struct NetworkUsers<S: Default + Miniconf + Clone, T: Serialize> {
     pub miniconf: miniconf::MqttClient<S, NetworkReference, SystemTimer, 512>,
@@ -144,7 +144,6 @@ where
     ///
     /// # Returns
     /// An indication if any of the network users indicated a state change.
-    /// The SettingsChanged option contains the path of the settings that changed.
     pub fn update(&mut self) -> NetworkState {
         // Update the MQTT clients.
         if let Some(telemetry) = &mut self.telemetry {
@@ -162,13 +161,8 @@ where
             UpdateState::Updated => NetworkState::Updated,
         };
 
-        let mut settings_path = String::new();
-        match self.miniconf.handled_update(|path, old, new| {
-            settings_path.push_str(path).unwrap();
-            *old = new.clone();
-            Result::<(), &'static str>::Ok(())
-        }) {
-            Ok(true) => NetworkState::SettingsChanged(settings_path),
+        match self.miniconf.update() {
+            Ok(true) => NetworkState::SettingsChanged,
             _ => poll_result,
         }
     }
