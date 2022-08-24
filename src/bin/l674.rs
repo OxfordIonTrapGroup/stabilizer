@@ -114,8 +114,6 @@ pub struct Settings {
     lock_detect: LockDetectConfig,
 
     aux_ttl_out: bool,
-
-    telemetry_period: u16,
 }
 
 impl Default for Settings {
@@ -131,7 +129,6 @@ impl Default for Settings {
             adc1_routing: ADC1Routing::Ignore,
             lock_detect: Default::default(),
             aux_ttl_out: false,
-            telemetry_period: 10,
         }
     }
 }
@@ -628,12 +625,10 @@ mod app {
         }
     }
 
-    #[task(priority = 1, shared=[network, settings, telemetry], local=[cpu_temp_sensor, afes])]
+    #[task(priority = 1, shared=[network, telemetry], local=[cpu_temp_sensor, afes])]
     fn telemetry(mut c: telemetry::Context) {
         let telemetry: TelemetryBuffer =
             c.shared.telemetry.lock(|telemetry| *telemetry);
-
-        let telemetry_period = c.shared.settings.lock(|settings| settings.telemetry_period);
 
         c.shared.network.lock(|net| {
             net.telemetry.as_mut().unwrap().publish(&telemetry.finalize(
@@ -644,7 +639,7 @@ mod app {
         });
 
         // Schedule the telemetry task in the future.
-        telemetry::Monotonic::spawn_after((telemetry_period as u64).secs())
+        telemetry::Monotonic::spawn_after(10.secs())
             .unwrap();
     }
 }
