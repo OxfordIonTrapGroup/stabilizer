@@ -157,7 +157,6 @@ mod app {
     #[shared]
     struct Shared {
         network: NetworkUsers<Settings, Telemetry>,
-        settings: Settings,
         telemetry: TelemetryBuffer,
 
         iir_ch: [[iir::IIR<f32>; IIR_CASCADE_LENGTH]; 2],
@@ -224,7 +223,6 @@ mod app {
 
         let shared = Shared {
             network,
-            settings: Settings::default(),
             telemetry: TelemetryBuffer::default(),
             iir_ch: [[iir::IIR::new(1., -SCALE, SCALE); IIR_CASCADE_LENGTH]; 2],
             adc1_routing: ADC1Routing::Ignore,
@@ -495,10 +493,9 @@ mod app {
         }
     }
 
-    #[task(priority = 1, shared=[settings, iir_ch, gain_ramp, lock_detect, adc1_routing, network], local=[current_mode, aux_ttl_out])]
+    #[task(priority = 1, shared=[iir_ch, gain_ramp, lock_detect, adc1_routing, network], local=[current_mode, aux_ttl_out])]
     fn settings_update(mut c: settings_update::Context) {
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());
-        c.shared.settings.lock(|current| *current = settings);
 
         let clk: hal::time::MegaHertz =
             hardware::design_parameters::TIMER_FREQUENCY;
