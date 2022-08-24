@@ -4,7 +4,7 @@
 //
 // ADC1 can be summed to the first ADC0 IIR filter input or output for testing.
 
-// #![deny(warnings)]
+#![deny(warnings)]
 #![no_std]
 #![no_main]
 
@@ -14,8 +14,6 @@ use fugit::ExtU64;
 use mutex_trait::prelude::*;
 use minimq::{QoS, Retain, Property};
 
-// Replace `hal` by `stabilizer::hardware::hal`
-// `CycleCounterClock` -> `Systick`
 use stabilizer::{
     hardware::{
         self,
