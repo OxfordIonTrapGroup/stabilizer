@@ -37,18 +37,17 @@ use core::fmt::Write;
 use heapless::String;
 use log::{info, warn};
 
-use idsp::{iir, Lowpass};
+use idsp::{iir, Lowpass, abs};
 
-// The logarithm of the number of samples in each batch process. This corresponds with 2^3 samples
-// per batch = 8 samples
+// The logarithm of the number of 100MHz timer ticks between each sample. With a value of 2^7 =
+// 128, there is 1.28uS per sample, corresponding to a sampling frequency of 781.25 KHz.
 const SAMPLE_TICKS_LOG2: u8 = 7;
 const SAMPLE_TICKS: u32 = 1 << SAMPLE_TICKS_LOG2;
+const SAMPLE_PERIOD: f32 =
+    SAMPLE_TICKS as f32 * hardware::design_parameters::TIMER_PERIOD;
 
-// The logarithm of the number of 100MHz timer ticks between each sample. This corresponds with a
-// sampling period of 2^7 = 128 ticks. At 100MHz, 10ns per tick, this corresponds to a sampling
-// period of 1.28 uS or 781.25 KHz.
-const BATCH_SIZE_LOG2: u8 = 3;
-const BATCH_SIZE: usize = 1 << BATCH_SIZE_LOG2;
+// The number of samples in each batch process
+const BATCH_SIZE: usize = 8;
 
 const SCALE: f32 = i16::MAX as _;
 
@@ -70,46 +69,50 @@ pub enum ADC1Routing {
     SumWithIIR0Output,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Miniconf, PartialEq)]
-pub enum LockMode {
-    Disabled,
-    RampPassThrough,
-    Enabled,
-}
-
-#[derive(Debug, Copy, Clone, Default, Deserialize, Miniconf)]
-pub struct Gains {
-    proportional: f32,
-    integral: f32,
-}
-
-#[derive(Debug, Copy, Clone, Default, Deserialize, Miniconf)]
-pub struct Notch {
-    frequency: f32,
-    quality_factor: f32,
-}
-
-#[derive(Debug, Copy, Clone, Default, Deserialize, Miniconf)]
-pub struct LockDetectConfig {
-    adc1_threshold: f32,
-    reset_time: f32,
-}
 
 #[derive(Debug, Copy, Clone, Deserialize, Miniconf)]
 pub struct Settings {
-    lock_mode: LockMode,
+    /// Configure the Analog Front End (AFE) gain.
+    ///
+    /// # Path
+    /// `afe/<n>`
+    ///
+    /// * <n> specifies which channel to configure. <n> := [0, 1]
+    ///
+    /// # Value
+    /// Any of the variants of [Gain] enclosed in double quotes.
+    afe: [Gain; 2],
+
+    /// Configure the IIR filter parameters.
+    ///
+    /// # Path
+    /// `iir_ch/<n>/<m>`
+    ///
+    /// * <n> specifies which channel to configure. <n> := [0, 1]
+    /// * <m> specifies which cascade to configure. <m> := [0, 1]
+    ///
+    /// # Value
+    /// See [iir::IIR#miniconf]
+    iir_ch: [[iir::IIR<f32>; IIR_CASCADE_LENGTH]; 2],
+
+    /// Configure the gain ramp time.
     gain_ramp_time: f32,
 
-    fast_gains: Gains,
-
-    fast_notch: Notch,
-    fast_notch_enable: bool,
-
-    slow_gains: Gains,
-    slow_enable: bool,
-
+    /// Configure routing of ADC1 signal.
+    ///
+    /// # Path
+    /// `adc1_routing`
+    ///
+    /// # Value
+    /// Any of the variants of [ADC1Routing] enclosed in double quotes.
     adc1_routing: ADC1Routing,
-    lock_detect: LockDetectConfig,
+
+    /// Specifies the ADC1 input voltage threshold in volts.
+    ///
+    /// # Path
+    /// `ld_threshold`
+    ld_threshold: f32,
+    ld_reset_time: f32,
 
     aux_ttl_out: bool,
 }
@@ -117,15 +120,12 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            lock_mode: LockMode::Disabled,
+            afe: [Gain::G1, Gain::G10],
+            iir_ch: [[iir::IIR::new(1., -SCALE, SCALE); IIR_CASCADE_LENGTH]; 2],
             gain_ramp_time: 0.0,
-            fast_gains: Default::default(),
-            fast_notch: Default::default(),
-            fast_notch_enable: false,
-            slow_gains: Default::default(),
-            slow_enable: false,
             adc1_routing: ADC1Routing::Ignore,
-            lock_detect: Default::default(),
+            ld_threshold: 0.0,
+            ld_reset_time: 0.0,
             aux_ttl_out: false,
         }
     }
@@ -136,14 +136,75 @@ pub struct GainRampState {
     increment: f32,
 }
 
+impl GainRampState {
+    pub fn update(&mut self) {
+        if self.current < 1.0 {
+            self.current += self.increment;
+            if self.current > 1.0 {
+                self.current = 1.0;
+            }
+        }
+    }
+
+    pub fn reset(&mut self, ramp_time: f32) {
+        if ramp_time > 0.0 {
+            self.current = 0.0;
+            self.increment = SAMPLE_PERIOD / ramp_time;
+        } else {
+            self.current = 1.0;
+            self.increment = 0.0;
+        }
+    }
+}
+
 pub struct LockDetectState {
+    adc1_filtered: i32,
     decrement: u32,
     counter: u32,
     threshold: i16,
     ///< in units of ADC1 codes
+    adc1_filter: Lowpass<4>,
     pin: hal::gpio::gpiod::PD3<hal::gpio::Output<hal::gpio::PushPull>>,
 }
 
+impl LockDetectState {
+    pub fn update(&mut self, sample: i16) {
+        // Lock detect.
+        self.adc1_filtered = self.adc1_filter.update(
+            (sample as i32) << ADC1_LOWPASS_SHIFT,
+            ADC1_LOWPASS_LOG2_TC,
+        );
+        if sample < self.threshold {
+            self.pin.set_low();
+            self.counter = u32::MAX;
+        } else if self.counter > 0 {
+            self.counter = self.counter.saturating_sub(self.decrement);
+            if self.counter == 0 {
+                self.pin.set_high();
+            }
+        }
+    }
+
+    pub fn reset(&mut self, threshold: f32, reset_time: f32) {
+        if let Ok(thres) = AdcCode::try_from(threshold) {
+            self.threshold = i16::from(thres);
+        } else {
+            warn!("Ignoring invalid lock detect threshold: {}", threshold);
+        }
+
+        let mut reset_samples = reset_time / SAMPLE_PERIOD;
+        if reset_samples < 1.0 {
+            warn!("Lock detect reset time too small, clamping: {}", reset_time);
+            reset_samples = 1.0;
+        }
+        let mut decrement = ((u32::MAX as f32) / reset_samples) as u32;
+        if decrement == 0 {
+            warn!("Lock detect reset time too large, clamping: {}", reset_time);
+            decrement = 1;
+        }
+        self.decrement = decrement;
+    }
+}
 
 #[rtic::app(device=stabilizer::hardware::hal::stm32, peripherals=true, dispatchers=[DCMI, JPEG, SDMMC])]
 mod app {
@@ -155,12 +216,11 @@ mod app {
     #[shared]
     struct Shared {
         network: NetworkUsers<Settings, Telemetry>,
+
+        settings: Settings,
         telemetry: TelemetryBuffer,
 
-        iir_ch: [[iir::IIR<f32>; IIR_CASCADE_LENGTH]; 2],
-        adc1_routing: ADC1Routing,
         gain_ramp: GainRampState,
-        adc1_filtered: i32,
         lock_detect: LockDetectState,
     }
 
@@ -171,10 +231,7 @@ mod app {
         adcs: (Adc0Input, Adc1Input),
         dacs: (Dac0Output, Dac1Output),
 
-        // Format: iir_state[ch][cascade-no][coeff]
         iir_state: [[iir::Vec5<f32>; IIR_CASCADE_LENGTH]; 2],
-        current_mode: LockMode,
-        adc1_filter: Lowpass<4>,
         aux_ttl_out: EemDigitalOutput1,
 
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
@@ -213,19 +270,19 @@ mod app {
         };
         lock_detect_output.set_low();
         let lock_detect = LockDetectState {
+            adc1_filtered: 0,
             decrement: 1,
             counter: 0,
             threshold: i16::MAX,
+            adc1_filter: Lowpass::default(),
             pin: lock_detect_output,
         };
 
         let shared = Shared {
             network,
+            settings: Settings::default(),
             telemetry: TelemetryBuffer::default(),
-            iir_ch: [[iir::IIR::new(1., -SCALE, SCALE); IIR_CASCADE_LENGTH]; 2],
-            adc1_routing: ADC1Routing::Ignore,
             gain_ramp: GainRampState { current: 1.0, increment: 0.0 },
-            adc1_filtered: 0,
             lock_detect,
         };
 
@@ -235,16 +292,9 @@ mod app {
             adcs: stabilizer.adcs,
             dacs: stabilizer.dacs,
             iir_state: [[[0.; 5]; IIR_CASCADE_LENGTH]; 2],
-            current_mode: LockMode::Disabled,
-            adc1_filter: Lowpass::default(),
             aux_ttl_out,
             cpu_temp_sensor: stabilizer.temperature_sensor,
         };
-
-        // We hard-code gains here to save some complexity w.r.t. converting the
-        // lock detect threshold from volts to codes.
-        local.afes.0.set_gain(Gain::G1);
-        local.afes.1.set_gain(Gain::G10);
 
         // Enable ADC/DAC events
         local.adcs.0.start();
@@ -267,17 +317,6 @@ mod app {
         c.local.sampling_timer.start();
     }
 
-    #[task(binds = ETH, priority = 1)]
-    fn eth(_: eth::Context) {
-        unsafe { hal::ethernet::interrupt_handler() }
-    }
-
-    #[task(priority = 1, shared=[network])]
-    fn ethernet_link(mut c: ethernet_link::Context) {
-        c.shared.network.lock(|net| net.processor.handle_link());
-        ethernet_link::Monotonic::spawn_after(1.secs()).unwrap();
-    }
-
     /// Main DSP processing routine for Stabilizer.
     ///
     /// # Note
@@ -294,23 +333,20 @@ mod app {
     ///
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
-    #[task(binds=DMA1_STR4, shared=[iir_ch, adc1_routing, adc1_filtered, gain_ramp, lock_detect, telemetry],
-           local=[adcs, dacs, iir_state, adc1_filter], priority=2)]
+    #[task(binds=DMA1_STR4, shared=[settings, telemetry, gain_ramp, lock_detect],
+           local=[adcs, dacs, iir_state], priority=2)]
     fn process(c: process::Context) {
         let process::SharedResources {
-            iir_ch,
-            adc1_routing,
-            adc1_filtered,
+            settings,
+            telemetry,
             gain_ramp,
             lock_detect,
-            telemetry,
         } = c.shared;
 
         let process::LocalResources {
             adcs: (adc0, adc1),
             dacs: (dac0, dac1),
             iir_state,
-            adc1_filter,
         } = c.local;
 
         fn to_dac(val: f32) -> u16 {
@@ -318,74 +354,58 @@ mod app {
             // The truncation introduces 1/2 LSB distortion.
             let y: i16 = unsafe { val.to_int_unchecked() };
             // Convert to DAC code
-            y as u16 ^ 0x8000
+            DacCode::from(y).0
         }
 
-        (iir_ch, adc1_routing, adc1_filtered, gain_ramp, lock_detect, telemetry).lock(
-            |iir_ch, adc1_routing, adc1_filtered, gain_ramp, lock_detect, telemetry| {
+        (settings, telemetry, gain_ramp, lock_detect).lock(
+            |settings, telemetry, gain_ramp, lock_detect| {
                 (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
                     let adc_samples = [adc0, adc1];
-                    let dac_samples = [dac0, dac1];
+                    // let dac_samples = [dac0, dac1];
 
                     // Preserve instruction and data ordering w.r.t. DMA flag access.
                     fence(Ordering::SeqCst);
 
-                    for sample_idx in 0..adc_samples[0].len() {
-                        let adc1_int = adc_samples[1][sample_idx] as i16;
-                        *adc1_filtered = adc1_filter.update(
-                            (adc1_int as i32) << ADC1_LOWPASS_SHIFT,
-                            ADC1_LOWPASS_LOG2_TC,
-                        );
+                    adc_samples[0]
+                        .iter()
+                        .zip(adc_samples[1].iter())
+                        .zip(dac0.iter_mut())
+                        .zip(dac1.iter_mut())
+                        .map(|(((a0, a1), d0), d1)| {
+                            let adc1_int = *a1 as i16;
 
-                        {
-                            // Lock detect.
-                            let ld = &mut *lock_detect;
-                            if adc1_int < ld.threshold {
-                                ld.pin.set_low();
-                                ld.counter = u32::MAX;
-                            } else if ld.counter > 0 {
-                                ld.counter = ld.counter.saturating_sub(ld.decrement);
-                                if ld.counter == 0 {
-                                    ld.pin.set_high();
+                            lock_detect.update(adc1_int);
+
+                            // Cascaded PID controllers.
+                            let adc1_float = f32::from(adc1_int);
+                            let mut x = f32::from(*a0 as i16) * gain_ramp.current;
+                            if let ADC1Routing::SumWithADC0 = settings.adc1_routing {
+                                x += adc1_float;
+                            }
+
+                            let y0 = {
+                                let mut y = settings.iir_ch[0][0]
+                                    .update(&mut iir_state[0][0], x, false);
+                                if let ADC1Routing::SumWithIIR0Output = settings.adc1_routing
+                                {
+                                    y += adc1_float;
                                 }
-                            }
-                        }
+                                settings.iir_ch[0][1]
+                                    .update(&mut iir_state[0][1], y, false)
+                            };
+                            *d0 = to_dac(y0);
 
-                        // Cascaded PID controllers.
-                        let adc1_float = f32::from(adc1_int);
-                        let mut x = f32::from(adc_samples[0][sample_idx] as i16)
-                            * gain_ramp.current;
-                        if let ADC1Routing::SumWithADC0 = adc1_routing {
-                            x += adc1_float;
-                        }
+                            let y1 = {
+                                let y = settings.iir_ch[1][0]
+                                    .update(&mut iir_state[1][0], y0, false);
+                                settings.iir_ch[1][1]
+                                    .update(&mut iir_state[1][1], y, false)
+                            };
+                            *d1 = to_dac(y1);
 
-                        let y0 = {
-                            let mut y = iir_ch[0][0]
-                                .update(&mut iir_state[0][0], x, false);
-                            if let ADC1Routing::SumWithIIR0Output = adc1_routing
-                            {
-                                y += adc1_float;
-                            }
-                            iir_ch[0][1]
-                                .update(&mut iir_state[0][1], y, false)
-                        };
-                        dac_samples[0][sample_idx] = to_dac(y0);
-
-                        let y1 = {
-                            let y = iir_ch[1][0]
-                                .update(&mut iir_state[1][0], y0, false);
-                            iir_ch[1][1]
-                                .update(&mut iir_state[1][1], y, false)
-                        };
-                        dac_samples[1][sample_idx] = to_dac(y1);
-
-                        if gain_ramp.current < 1.0 {
-                            gain_ramp.current += gain_ramp.increment;
-                            if gain_ramp.current > 1.0 {
-                                gain_ramp.current = 1.0;
-                            }
-                        }
-                    }
+                            gain_ramp.update();
+                        })
+                        .last();
 
                     // Update telemetry measurements.
                     telemetry.adcs = [
@@ -394,8 +414,8 @@ mod app {
                     ];
 
                     telemetry.dacs = [
-                        DacCode(dac_samples[0][0]),
-                        DacCode(dac_samples[1][0]),
+                        DacCode(dac0[0]),
+                        DacCode(dac1[0]),
                     ];
 
                     // Preserve instruction and data ordering w.r.t. DMA flag access.
@@ -405,12 +425,11 @@ mod app {
         );
     }
 
-    #[idle(shared=[network, adc1_filtered])]
+    #[idle(shared=[network, lock_detect])]
     fn idle(mut c: idle::Context) -> ! {
         info!("Starting idle task...");
 
         let mut subscribed = false;
-        let mut adc1_filtered = c.shared.adc1_filtered;
         let adc1_filtered_topic = c.shared.network.lock(|net| {
             net.telemetry.as_ref().unwrap().topic(ADC1_FILTERED_TOPIC)
         });
@@ -439,14 +458,19 @@ mod app {
                         let mut payload_buf: String<64> = String::new();
 
                         let payload = if topic == adc1_filtered_topic {
-                            let filtered_int: i32 = adc1_filtered.lock(|a| *a);
+                            // Todo: move to impl LockDetectState
                             // 16 signed ADC bits (set to 1V full-range).
                             const FULL_RANGE: i32 = 1 << (15 + ADC1_LOWPASS_SHIFT);
+                            let filtered_int = c.shared.lock_detect.lock(|ld| {
+                                ld.adc1_filtered
+                            });
                             write!(
                                 &mut payload_buf,
                                 "{}",
                                 (filtered_int as f32) / (FULL_RANGE as f32)
-                            ).unwrap();
+                            ).unwrap_or_else(|_| {
+                                payload_buf.push_str("0.0").unwrap();
+                            });
                             info!("Received ADC1_FILTERED_TOPIC");
                             payload_buf.as_bytes()
                         } else {
@@ -454,22 +478,27 @@ mod app {
                             "Unexpected topic".as_bytes()
                         };
 
-                        let topic_property = properties
+                        let property = properties
                             .iter()
-                            .find(|&prop| matches!(*prop, Property::ResponseTopic(_)));
-                        // Make a best-effort attempt to send the response. If we get a failure,
-                        // we may have disconnected or the peer provided an invalid topic to
-                        // respond to. Ignore the failure in these cases.
-                        if let Some(Property::ResponseTopic(response_topic)) = topic_property {
+                            .find(|&prop| {
+                                matches!(*prop, Property::ResponseTopic(_))
+                            });
+                        // Make a best-effort attempt to send the response.
+                        // If we get a failure, we may have disconnected or the
+                        // peer provided an invalid topic to respond to.
+                        // Ignore the failure in these cases.
+                        if let Some(Property::ResponseTopic(topic)) = property {
                             // Send back any correlation data with the response.
                             let response_properties = properties
                                 .iter()
-                                .find(|&prop| matches!(*prop, Property::CorrelationData(_)))
+                                .find(|&prop| {
+                                    matches!(*prop, Property::CorrelationData(_))
+                                })
                                 .map(core::slice::from_ref)
                                 .unwrap_or(&[]);
 
                             client.publish(
-                                response_topic,
+                                topic,
                                 payload,
                                 QoS::AtMostOnce,
                                 Retain::NotRetained,
@@ -493,131 +522,56 @@ mod app {
             }) {
                 NetworkState::SettingsChanged(_path) => {
                     settings_update::spawn().unwrap()
-                }
-                NetworkState::Updated => {}
+                },
+                NetworkState::Updated => {},
                 NetworkState::NoChange => cortex_m::asm::wfi(),
             }
         }
     }
 
-    #[task(priority = 1, shared=[iir_ch, gain_ramp, lock_detect, adc1_routing, network], local=[current_mode, aux_ttl_out])]
+    #[task(priority = 1, shared=[network, settings, gain_ramp, lock_detect],
+           local=[aux_ttl_out, afes])]
     fn settings_update(mut c: settings_update::Context) {
+
+        fn lock_enabled(iir: [[iir::IIR<f32>; IIR_CASCADE_LENGTH]; 2]) -> bool {
+            const EPS: f32 = f32::EPSILON;
+            abs(iir[0][0].get_k()) < EPS && abs(iir[1][0].get_k()) < EPS
+        }
+
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());
 
-        let clk: hal::time::MegaHertz =
-            hardware::design_parameters::TIMER_FREQUENCY;
-        let sample_freq = (clk.to_Hz() as f32) / (SAMPLE_TICKS as f32);
-        let freq_factor = 2.0 / sample_freq;
-
-        c.shared.iir_ch.lock(|iir| {
-            match settings.lock_mode {
-                LockMode::Disabled => {
-                    iir[0][0].set_pi(0.0, 0.0, 0.0).unwrap();
-                    iir[1][0].set_pi(0.0, 0.0, 0.0).unwrap();
-                }
-                LockMode::RampPassThrough => {
-                    // Gain 5 gives approximately ±10 V when driven using the
-                    // Vescent servo box ramp.
-                    iir[0][0].set_pi(5.0, 0.0, 0.0).unwrap();
-                    iir[1][0].set_pi(0.0, 0.0, 0.0).unwrap();
-                }
-                LockMode::Enabled => {
-                    // Negative sign in fast branch to match AOM lock; both PZTs
-                    // have same sign.
-                    let fast_p = {
-                        // KLUDGE: For whatever reason, copysign()-ing the I gain
-                        // doesn't work for signed zero, so lower-bound P gain to
-                        // just above zero.
-                        let mut p = settings.fast_gains.proportional;
-                        if p == 0.0 {
-                            p = f32::MIN_POSITIVE;
-                        }
-                        p
-                    };
-                    iir[0][0]
-                        .set_pi(
-                            -fast_p,
-                            freq_factor * settings.fast_gains.integral,
-                            0.0,
-                        )
-                        .unwrap();
-                    iir[1][0]
-                        .set_pi(
-                            settings.slow_gains.proportional,
-                            freq_factor * settings.slow_gains.integral,
-                            0.0,
-                        )
-                        .unwrap();
-                }
-            }
+        let en_before = c.shared.settings.lock(|current| {
+            let en_before = lock_enabled(current.iir_ch);
+            *current = settings;
+            en_before
         });
-        if settings.lock_mode != *c.local.current_mode {
-            c.shared.gain_ramp.lock(|gr| {
-                if settings.lock_mode == LockMode::Enabled
-                    && settings.gain_ramp_time > 0.0
-                {
-                    gr.current = 0.0;
-                    gr.increment =
-                        1.0 / (sample_freq * settings.gain_ramp_time);
-                } else {
-                    gr.current = 1.0;
-                    gr.increment = 0.0;
-                }
-            });
-        }
-        *c.local.current_mode = settings.lock_mode;
+        let en_after = lock_enabled(settings.iir_ch);
 
-        {
-            let threshold = settings.lock_detect.adc1_threshold * 32768.0;
-            if threshold < -32768.0 || threshold > 32767.0 {
-                warn!("Ignoring invalid lock detect threshold: {}", threshold);
+        // AFE Gains
+        c.local.afes.0.set_gain(settings.afe[0]);
+        c.local.afes.1.set_gain(settings.afe[1]);
+
+
+        c.local.afes.0.set_gain(settings.afe[0]);
+        c.local.afes.1.set_gain(settings.afe[1]);
+
+        // IIR gain ramp
+        if en_before != en_after {
+            let gain_ramp_time = if en_after {
+                settings.gain_ramp_time
             } else {
-                c.shared.lock_detect.lock(|state| {
-                    state.threshold = threshold as i16;
-                });
-            }
-
-            let mut reset_samples =
-                settings.lock_detect.reset_time * sample_freq;
-            if reset_samples < 1.0 {
-                warn!(
-                    "Lock detect reset time too small, clamping: {}",
-                    settings.lock_detect.reset_time
-                );
-                reset_samples = 1.0;
-            }
-            let mut decrement = ((u32::MAX as f32) / reset_samples) as u32;
-            if decrement == 0 {
-                warn!(
-                    "Lock detect reset time too large, clamping: {}",
-                    settings.lock_detect.reset_time
-                );
-                decrement = 1;
-            }
-            c.shared.lock_detect.lock(|state| {
-                state.decrement = decrement;
-            });
+                0.0
+            };
+            c.shared.gain_ramp.lock(|gr| gr.reset(gain_ramp_time));
         }
 
-        c.shared.iir_ch.lock(|iir| {
-            if settings.fast_notch_enable {
-                iir[0][1]
-                    .set_notch(
-                        freq_factor * settings.fast_notch.frequency,
-                        settings.fast_notch.quality_factor,
-                    )
-                    .unwrap();
-            } else {
-                iir[0][1].set_scale(1.0).unwrap();
-            }
+        // Lock detect
+        c.shared.lock_detect.lock(|state| {
+            state.reset(settings.ld_threshold, settings.ld_reset_time);
         });
 
-        c.shared.iir_ch.lock(|iir| {
-            // Second IIR on slow PZT unused - optional low-pass filter?
-            iir[1][1].set_scale(1.0).unwrap();
-        });
-
-        let iir = c.shared.iir_ch.lock(|iir| *iir);
+        // Print IIR settings
+        let iir = c.shared.settings.lock(|settings| settings.iir_ch);
         {
             info!("IIR settings:");
             info!(" [0][0]: {:?}", iir[0][0]);
@@ -626,10 +580,7 @@ mod app {
             info!(" [1][1]: {:?}", iir[1][1]);
         }
 
-        c.shared
-            .adc1_routing
-            .lock(|r| *r = settings.adc1_routing);
-
+        // Set auxiliary output TTL
         if settings.aux_ttl_out {
             c.local.aux_ttl_out.set_high();
         } else {
@@ -637,15 +588,17 @@ mod app {
         }
     }
 
-    #[task(priority = 1, shared=[network, telemetry], local=[cpu_temp_sensor, afes])]
+    #[task(priority = 1, shared=[settings, network, telemetry], local=[cpu_temp_sensor])]
     fn telemetry(mut c: telemetry::Context) {
         let telemetry: TelemetryBuffer =
             c.shared.telemetry.lock(|telemetry| *telemetry);
 
+        let gains = c.shared.settings.lock(|settings| settings.afe);
+
         c.shared.network.lock(|net| {
             net.telemetry.as_mut().unwrap().publish(&telemetry.finalize(
-                c.local.afes.0.get_gain(),
-                c.local.afes.1.get_gain(),
+                gains[0],
+                gains[1],
                 c.local.cpu_temp_sensor.get_temperature().unwrap(),
             ))
         });
@@ -653,5 +606,16 @@ mod app {
         // Schedule the telemetry task in the future.
         telemetry::Monotonic::spawn_after(10.secs())
             .unwrap();
+    }
+
+    #[task(binds = ETH, priority = 1)]
+    fn eth(_: eth::Context) {
+        unsafe { hal::ethernet::interrupt_handler() }
+    }
+
+    #[task(priority = 1, shared=[network])]
+    fn ethernet_link(mut c: ethernet_link::Context) {
+        c.shared.network.lock(|net| net.processor.handle_link());
+        ethernet_link::Monotonic::spawn_after(1.secs()).unwrap();
     }
 }
