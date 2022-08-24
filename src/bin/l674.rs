@@ -354,11 +354,11 @@ mod app {
                         }
 
                         // Cascaded PID controllers.
-                        let adc1 = f32::from(adc1_int);
+                        let adc1_float = f32::from(adc1_int);
                         let mut x = f32::from(adc_samples[0][sample_idx] as i16)
                             * gain_ramp.current;
                         if let ADC1Routing::SumWithADC0 = adc1_routing {
-                            x += adc1;
+                            x += adc1_float;
                         }
 
                         let y0 = {
@@ -366,7 +366,7 @@ mod app {
                                 .update(&mut iir_state[0][0], x, false);
                             if let ADC1Routing::SumWithIIR0Output = adc1_routing
                             {
-                                y += adc1;
+                                y += adc1_float;
                             }
                             iir_ch[0][1]
                                 .update(&mut iir_state[0][1], y, false)
@@ -456,20 +456,29 @@ mod app {
                             "Unexpected topic".as_bytes()
                         };
 
-                        let response_property = properties
+                        let topic_property = properties
                             .iter()
                             .find(|&prop| matches!(*prop, Property::ResponseTopic(_)));
                         // Make a best-effort attempt to send the response. If we get a failure,
                         // we may have disconnected or the peer provided an invalid topic to
                         // respond to. Ignore the failure in these cases.
-                        if let Some(Property::ResponseTopic(response_topic)) = response_property {
+                        if let Some(Property::ResponseTopic(response_topic)) = topic_property {
+                            // Send back any correlation data with the response.
+                            let response_properties = properties
+                                .iter()
+                                .find(|&prop| matches!(*prop, Property::CorrelationData(_)))
+                                .map(core::slice::from_ref)
+                                .unwrap_or(&[]);
+
                             client.publish(
                                 response_topic,
                                 payload,
                                 QoS::AtMostOnce,
                                 Retain::NotRetained,
-                                &[])
+                                response_properties)
                             .ok();
+                        } else {
+                            warn!("No response topic");
                         }
                     })
                 };
