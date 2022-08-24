@@ -63,7 +63,7 @@ const ADC1_LOWPASS_SHIFT: u8 = 14;
 /// log2 of time constant of ADC1 lowpass filter in sample units, about 10 ms.
 const ADC1_LOWPASS_LOG2_TC: u32 = 13;
 
-const ADC1_FILTERED_TOPIC: &str = "dt/sinara/stabilizer/l674/read_adc1_filtered";
+const ADC1_FILTERED_TOPIC: &str = "read_adc1_filtered";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Miniconf)]
 pub enum ADC1Routing {
@@ -415,6 +415,9 @@ mod app {
 
         let mut subscribed = false;
         let mut adc1_filtered = c.shared.adc1_filtered;
+        let adc1_filtered_topic = c.shared.network.lock(|net| {
+            net.telemetry.as_ref().unwrap().topic(ADC1_FILTERED_TOPIC)
+        });
 
         loop {
             match c.shared.network.lock(|net| {
@@ -427,27 +430,32 @@ mod app {
                     let mqtt = telemetry.mqtt();
 
                     if !subscribed {
-                        match mqtt.client.subscribe(ADC1_FILTERED_TOPIC, &[]) {
-                            Ok(_) => { subscribed = true; },
+                        match mqtt.client.subscribe(&adc1_filtered_topic, &[]) {
+                            Ok(_) => {
+                                subscribed = true;
+                                info!("Subscribed to ADC1_FILTERED_TOPIC");
+                            },
                             Err(_) => {}
                         }
                     }
 
                     mqtt.poll(|client, topic, _message, properties| {
                         let mut payload_buf: String<64> = String::new();
-                        let payload = match topic {
-                            ADC1_FILTERED_TOPIC => {
-                                let filtered_int: i32 = adc1_filtered.lock(|a| *a);
-                                // 16 signed ADC bits (set to 1V full-range).
-                                const FULL_RANGE: i32 = 1 << (15 + ADC1_LOWPASS_SHIFT);
-                                write!(
-                                    &mut payload_buf,
-                                    "{}",
-                                    (filtered_int as f32) / (FULL_RANGE as f32)
-                                ).unwrap();
-                                payload_buf.as_bytes()
-                            }
-                            _ => "Unexpected topic".as_bytes(),
+
+                        let payload = if topic == adc1_filtered_topic {
+                            let filtered_int: i32 = adc1_filtered.lock(|a| *a);
+                            // 16 signed ADC bits (set to 1V full-range).
+                            const FULL_RANGE: i32 = 1 << (15 + ADC1_LOWPASS_SHIFT);
+                            write!(
+                                &mut payload_buf,
+                                "{}",
+                                (filtered_int as f32) / (FULL_RANGE as f32)
+                            ).unwrap();
+                            info!("Received ADC1_FILTERED_TOPIC");
+                            payload_buf.as_bytes()
+                        } else {
+                            warn!("Unexpected topic");
+                            "Unexpected topic".as_bytes()
                         };
 
                         let response_property = properties
