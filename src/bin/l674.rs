@@ -43,8 +43,7 @@ use idsp::{iir, Lowpass, abs};
 // 128, there is 1.28uS per sample, corresponding to a sampling frequency of 781.25 KHz.
 const SAMPLE_TICKS_LOG2: u8 = 7;
 const SAMPLE_TICKS: u32 = 1 << SAMPLE_TICKS_LOG2;
-const SAMPLE_PERIOD: f32 =
-    SAMPLE_TICKS as f32 * hardware::design_parameters::TIMER_PERIOD;
+const SAMPLE_PERIOD: f32 = SAMPLE_TICKS as f32 * hardware::design_parameters::TIMER_PERIOD;
 
 // The number of samples in each batch process
 const BATCH_SIZE: usize = 8;
@@ -366,15 +365,11 @@ mod app {
         (settings, telemetry, gain_ramp, lock_detect).lock(
             |settings, telemetry, gain_ramp, lock_detect| {
                 (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
-                    let adc_samples = [adc0, adc1];
-                    // let dac_samples = [dac0, dac1];
-
                     // Preserve instruction and data ordering w.r.t. DMA flag access.
                     fence(Ordering::SeqCst);
 
-                    adc_samples[0]
-                        .iter()
-                        .zip(adc_samples[1].iter())
+                    adc0.iter()
+                        .zip(adc1.iter())
                         .zip(dac0.iter_mut())
                         .zip(dac1.iter_mut())
                         .map(|(((a0, a1), d0), d1)| {
@@ -396,16 +391,14 @@ mod app {
                                 {
                                     y += adc1_float;
                                 }
-                                settings.iir_ch[0][1]
-                                    .update(&mut iir_state[0][1], y, false)
+                                settings.iir_ch[0][1].update(&mut iir_state[0][1], y, false)
                             };
                             *d0 = to_dac(y0);
 
                             let y1 = {
                                 let y = settings.iir_ch[1][0]
                                     .update(&mut iir_state[1][0], y0, false);
-                                settings.iir_ch[1][1]
-                                    .update(&mut iir_state[1][1], y, false)
+                                settings.iir_ch[1][1].update(&mut iir_state[1][1], y, false)
                             };
                             *d1 = to_dac(y1);
 
@@ -414,15 +407,8 @@ mod app {
                         .last();
 
                     // Update telemetry measurements.
-                    telemetry.adcs = [
-                        AdcCode(adc_samples[0][0]),
-                        AdcCode(adc_samples[1][0]),
-                    ];
-
-                    telemetry.dacs = [
-                        DacCode(dac0[0]),
-                        DacCode(dac1[0]),
-                    ];
+                    telemetry.adcs = [AdcCode(adc0[0]), AdcCode(adc1[0])];
+                    telemetry.dacs = [DacCode(dac0[0]), DacCode(dac1[0])];
 
                     // Preserve instruction and data ordering w.r.t. DMA flag access.
                     fence(Ordering::SeqCst);
@@ -451,12 +437,9 @@ mod app {
                     let mqtt = telemetry.mqtt();
 
                     if !subscribed {
-                        match mqtt.client.subscribe(&adc1_filtered_topic, &[]) {
-                            Ok(_) => {
-                                subscribed = true;
-                                info!("Subscribed to ADC1_FILTERED_TOPIC");
-                            },
-                            Err(_) => {}
+                        if let Ok(_) = mqtt.client.subscribe(&adc1_filtered_topic, &[]) {
+                            subscribed = true;
+                            info!("Subscribed to ADC1_FILTERED_TOPIC");
                         }
                     }
 
@@ -498,8 +481,6 @@ mod app {
                                 Retain::NotRetained,
                                 response_properties)
                             .ok();
-                        } else {
-                            warn!("No response topic");
                         }
                     })
                 };
@@ -545,18 +526,10 @@ mod app {
         c.local.afes.0.set_gain(settings.afe[0]);
         c.local.afes.1.set_gain(settings.afe[1]);
 
-
-        c.local.afes.0.set_gain(settings.afe[0]);
-        c.local.afes.1.set_gain(settings.afe[1]);
-
         // IIR gain ramp
         if en_before != en_after {
-            let gain_ramp_time = if en_after {
-                settings.gain_ramp_time
-            } else {
-                0.0
-            };
-            c.shared.gain_ramp.lock(|gr| gr.reset(gain_ramp_time));
+            let ramp_time = if en_after { settings.gain_ramp_time } else { 0.0 };
+            c.shared.gain_ramp.lock(|gr| gr.reset(ramp_time));
         }
 
         // Lock detect
@@ -598,8 +571,7 @@ mod app {
         });
 
         // Schedule the telemetry task in the future.
-        telemetry::Monotonic::spawn_after(10.secs())
-            .unwrap();
+        telemetry::Monotonic::spawn_after(10.secs()).unwrap();
     }
 
     #[task(binds = ETH, priority = 1)]
