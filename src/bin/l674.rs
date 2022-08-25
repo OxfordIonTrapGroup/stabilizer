@@ -53,13 +53,6 @@ const SCALE: f32 = i16::MAX as _;
 
 const IIR_CASCADE_LENGTH: usize = 2;
 
-/// Amount of bits to shift ADC1 samples before feeding into averaging low-pass filter.
-/// 15 might be possible also (would need to look more closely at saturation behaviour).
-const ADC1_LOWPASS_SHIFT: u8 = 14;
-
-/// log2 of time constant of ADC1 lowpass filter in sample units, about 10 ms.
-const ADC1_LOWPASS_LOG2_TC: u32 = 13;
-
 const ADC1_FILTERED_TOPIC: &str = "read_adc1_filtered";
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Miniconf)]
@@ -168,11 +161,18 @@ pub struct LockDetectState {
 }
 
 impl LockDetectState {
+    /// Amount of bits to shift ADC1 samples before feeding into averaging low-pass filter.
+    /// 15 might be possible also (would need to look more closely at saturation behaviour).
+    const LOWPASS_SHIFT: u8 = 14;
+
+    /// log2 of time constant of ADC1 lowpass filter in sample units, about 10 ms.
+    const LOWPASS_LOG2_TC: u32 = 13;
+
     pub fn update(&mut self, sample: i16) {
         // Lock detect.
         self.adc1_filtered = self.adc1_filter.update(
-            (sample as i32) << ADC1_LOWPASS_SHIFT,
-            ADC1_LOWPASS_LOG2_TC,
+            (sample as i32) << Self::LOWPASS_SHIFT,
+            Self::LOWPASS_LOG2_TC,
         );
         if sample < self.threshold {
             self.pin.set_low();
@@ -203,6 +203,12 @@ impl LockDetectState {
             decrement = 1;
         }
         self.decrement = decrement;
+    }
+
+    pub fn get_filtered(&self) -> f32 {
+        // 16 signed ADC bits (set to 1V full-range).
+        let a = AdcCode::from((self.adc1_filtered >> Self::LOWPASS_SHIFT) as u16);
+        f32::from(a)
     }
 }
 
@@ -458,20 +464,8 @@ mod app {
                         let mut payload_buf: String<64> = String::new();
 
                         let payload = if topic == adc1_filtered_topic {
-                            // Todo: move to impl LockDetectState
-                            // 16 signed ADC bits (set to 1V full-range).
-                            const FULL_RANGE: i32 = 1 << (15 + ADC1_LOWPASS_SHIFT);
-                            let filtered_int = c.shared.lock_detect.lock(|ld| {
-                                ld.adc1_filtered
-                            });
-                            write!(
-                                &mut payload_buf,
-                                "{}",
-                                (filtered_int as f32) / (FULL_RANGE as f32)
-                            ).unwrap_or_else(|_| {
-                                payload_buf.push_str("0.0").unwrap();
-                            });
-                            info!("Received ADC1_FILTERED_TOPIC");
+                            let adc1_filtered = c.shared.lock_detect.lock(|ld| ld.get_filtered());
+                            write!(&mut payload_buf, "{}", adc1_filtered).unwrap();
                             payload_buf.as_bytes()
                         } else {
                             warn!("Unexpected topic");
