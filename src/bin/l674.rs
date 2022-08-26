@@ -184,12 +184,19 @@ impl LockDetectState {
         }
     }
 
-    pub fn reset(&mut self, threshold: f32, reset_time: f32) {
-        if let Ok(thres) = AdcCode::try_from(threshold) {
-            self.threshold = i16::from(thres);
+    pub fn reset(&mut self, threshold: Option<i16>, decrement: u32) {
+        self.threshold = threshold.unwrap_or(self.threshold);
+        self.decrement = decrement;
+    }
+
+    // Not a member function to be able to execute this before locking the object.
+    pub fn prepare_reset(threshold: f32, reset_time: f32) -> (Option<i16>, u32) {
+        let threshold_opt = if let Ok(thres) = AdcCode::try_from(threshold) {
+            Some(i16::from(thres))
         } else {
             warn!("Ignoring invalid lock detect threshold: {}", threshold);
-        }
+            None
+        };
 
         let mut reset_samples = reset_time / SAMPLE_PERIOD;
         if reset_samples < 1.0 {
@@ -201,13 +208,12 @@ impl LockDetectState {
             warn!("Lock detect reset time too large, clamping: {}", reset_time);
             decrement = 1;
         }
-        self.decrement = decrement;
+
+        (threshold_opt, decrement)
     }
 
-    pub fn get_filtered(&self) -> f32 {
-        // 16 signed ADC bits (set to 1V full-range).
-        let a = AdcCode::from((self.adc1_filtered >> Self::LOWPASS_SHIFT) as u16);
-        f32::from(a)
+    pub fn get_filtered(&self) -> AdcCode {
+        AdcCode::from((self.adc1_filtered >> Self::LOWPASS_SHIFT) as u16)
     }
 }
 
@@ -417,7 +423,7 @@ mod app {
         );
     }
 
-    #[idle(shared=[network, lock_detect])]
+    #[idle(shared=[network, lock_detect, settings])]
     fn idle(mut c: idle::Context) -> ! {
         info!("Starting idle task...");
 
@@ -447,7 +453,10 @@ mod app {
                         let mut payload_buf: String<64> = String::new();
 
                         let payload = if topic == adc1_filtered_topic {
-                            let adc1_filtered = c.shared.lock_detect.lock(|ld| ld.get_filtered());
+                            let afe1_gain = c.shared.settings.lock(|settings| settings.afe[1]);
+                            let adc1_filtered = f32::from(
+                                c.shared.lock_detect.lock(|ld| ld.get_filtered())
+                            ) / afe1_gain.as_multiplier();
                             write!(&mut payload_buf, "{}", adc1_filtered).unwrap();
                             payload_buf.as_bytes()
                         } else {
@@ -533,9 +542,9 @@ mod app {
         }
 
         // Lock detect
-        c.shared.lock_detect.lock(|state| {
-            state.reset(settings.ld_threshold, settings.ld_reset_time);
-        });
+        let (threshold, decrement) = LockDetectState::prepare_reset(settings.ld_threshold,
+                                                                    settings.ld_reset_time);
+        c.shared.lock_detect.lock(|ld| ld.reset(threshold, decrement));
 
         // Print IIR settings
         let iir = c.shared.settings.lock(|settings| settings.iir_ch);
