@@ -8,6 +8,7 @@
 #![no_std]
 #![no_main]
 
+use core::mem::MaybeUninit;
 use core::sync::atomic::{fence, Ordering};
 
 use fugit::ExtU64;
@@ -26,6 +27,7 @@ use stabilizer::{
         EemDigitalOutput1,
     },
     net::{
+        data_stream::{FrameGenerator, StreamFormat, StreamTarget},
         miniconf::Miniconf,
         serde::{Serialize, Deserialize},
         telemetry::{Telemetry, TelemetryBuffer},
@@ -107,6 +109,15 @@ pub struct Settings {
     ld_reset_time: f32,
 
     aux_ttl_out: bool,
+
+    /// Specifies the target for data livestreaming.
+    ///
+    /// # Path
+    /// `stream_target`
+    ///
+    /// # Value
+    /// See [StreamTarget#miniconf]
+    stream_target: StreamTarget,
 }
 
 impl Default for Settings {
@@ -119,6 +130,7 @@ impl Default for Settings {
             ld_threshold: 0.0,
             ld_reset_time: 0.0,
             aux_ttl_out: false,
+            stream_target: StreamTarget::default(),
         }
     }
 }
@@ -245,6 +257,7 @@ mod app {
         iir_state: [[iir::Vec5<f32>; IIR_CASCADE_LENGTH]; 2],
         aux_ttl_out: EemDigitalOutput1,
 
+        generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
     }
 
@@ -261,7 +274,7 @@ mod app {
             SAMPLE_TICKS,
         );
 
-        let network = NetworkUsers::new(
+        let mut network = NetworkUsers::new(
             stabilizer.net.stack,
             stabilizer.net.phy,
             clock,
@@ -272,6 +285,9 @@ mod app {
                 .parse()
                 .unwrap(),
         );
+
+        let generator = network
+            .configure_streaming(StreamFormat::AdcDacData, BATCH_SIZE as _);
 
         // Set up lock detect GPIO output pins, which are specific to this
         // configuration.
@@ -304,6 +320,7 @@ mod app {
             dacs: stabilizer.dacs,
             iir_state: [[[0.; 5]; IIR_CASCADE_LENGTH]; 2],
             aux_ttl_out,
+            generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
         };
 
@@ -345,7 +362,7 @@ mod app {
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
     #[task(binds=DMA1_STR4, shared=[settings, telemetry, gain_ramp, lock_detect],
-           local=[adcs, dacs, iir_state], priority=2)]
+           local=[adcs, dacs, iir_state, generator], priority=2)]
     fn process(c: process::Context) {
         let process::SharedResources {
             settings,
@@ -358,6 +375,7 @@ mod app {
             adcs: (adc0, adc1),
             dacs: (dac0, dac1),
             iir_state,
+            generator,
         } = c.local;
 
         fn to_dac(val: f32) -> u16 {
@@ -415,6 +433,27 @@ mod app {
                     // Update telemetry measurements.
                     telemetry.adcs = [AdcCode(adc0[0]), AdcCode(adc1[0])];
                     telemetry.dacs = [DacCode(dac0[0]), DacCode(dac1[0])];
+
+                    // Stream the data.
+                    let adc_samples = [adc0, adc1];
+                    let dac_samples = [dac0, dac1];
+                    const N: usize = BATCH_SIZE * core::mem::size_of::<i16>()
+                        / core::mem::size_of::<MaybeUninit<u8>>();
+                    generator.add::<_, { N * 4 }>(|buf| {
+                        for (data, buf) in adc_samples
+                            .iter()
+                            .chain(dac_samples.iter())
+                            .zip(buf.chunks_exact_mut(N))
+                        {
+                            let data = unsafe {
+                                core::slice::from_raw_parts(
+                                    data.as_ptr() as *const MaybeUninit<u8>,
+                                    N,
+                                )
+                            };
+                            buf.copy_from_slice(data)
+                        }
+                    });
 
                     // Preserve instruction and data ordering w.r.t. DMA flag access.
                     fence(Ordering::SeqCst);
@@ -567,6 +606,10 @@ mod app {
         } else {
             c.local.aux_ttl_out.set_low();
         }
+
+        // Direct stream
+        let target = settings.stream_target.into();
+        c.shared.network.lock(|net| net.direct_stream(target));
     }
 
     #[task(priority = 1, shared=[settings, network, telemetry], local=[cpu_temp_sensor])]
