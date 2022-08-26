@@ -519,7 +519,7 @@ mod app {
 
         fn lock_enabled(iir: [[iir::IIR<f32>; IIR_CASCADE_LENGTH]; 2]) -> bool {
             const EPS: f32 = f32::EPSILON;
-            abs(iir[0][0].get_k()) < EPS && abs(iir[1][0].get_k()) < EPS
+            abs(iir[0][0].get_k()) > EPS || abs(iir[1][0].get_k()) > EPS
         }
 
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());
