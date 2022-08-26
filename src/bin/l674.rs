@@ -138,14 +138,14 @@ impl GainRampState {
         }
     }
 
-    pub fn reset(&mut self, ramp_time: f32) {
-        if ramp_time > 0.0 {
-            self.current = 0.0;
-            self.increment = SAMPLE_PERIOD / ramp_time;
-        } else {
-            self.current = 1.0;
-            self.increment = 0.0;
-        }
+    pub fn reset(&mut self, increment: f32) {
+        self.increment = increment;
+        self.current = if increment > 0.0 { 0.0 } else { 1.0 };
+    }
+
+    // Not a member function to be able to execute this before locking the object.
+    pub fn prepare_reset(ramp_time: f32) -> f32 {
+        if ramp_time > 0.0 { SAMPLE_PERIOD / ramp_time } else { 0.0 }
     }
 }
 
@@ -537,8 +537,14 @@ mod app {
 
         // IIR gain ramp
         if en_before != en_after {
-            let ramp_time = if en_after { settings.gain_ramp_time } else { 0.0 };
-            c.shared.gain_ramp.lock(|gr| gr.reset(ramp_time));
+            let ramp_time = if en_after {
+                info!("Activating gain ramp");
+                settings.gain_ramp_time
+            } else {
+                0.0
+            };
+            let increment = GainRampState::prepare_reset(ramp_time);
+            c.shared.gain_ramp.lock(|gr| gr.reset(increment));
         }
 
         // Lock detect
