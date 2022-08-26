@@ -522,10 +522,12 @@ mod app {
             abs(iir[0][0].get_k()) > EPS || abs(iir[1][0].get_k()) > EPS
         }
 
+        // Copy new settings from miniconf client.
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());
 
         let en_before = c.shared.settings.lock(|current| {
             let en_before = lock_enabled(current.iir_ch);
+            // Update settings shared between tasks.
             *current = settings;
             en_before
         });
@@ -553,14 +555,11 @@ mod app {
         c.shared.lock_detect.lock(|ld| ld.reset(threshold, decrement));
 
         // Print IIR settings
-        let iir = c.shared.settings.lock(|settings| settings.iir_ch);
-        {
-            info!("IIR settings:");
-            info!(" [0][0]: {:?}", iir[0][0]);
-            info!(" [0][1]: {:?}", iir[0][1]);
-            info!(" [1][0]: {:?}", iir[1][0]);
-            info!(" [1][1]: {:?}", iir[1][1]);
-        }
+        info!("IIR settings:");
+        info!(" [0][0]: {:?}", settings.iir_ch[0][0]);
+        info!(" [0][1]: {:?}", settings.iir_ch[0][1]);
+        info!(" [1][0]: {:?}", settings.iir_ch[1][0]);
+        info!(" [1][1]: {:?}", settings.iir_ch[1][1]);
 
         // Set auxiliary output TTL
         if settings.aux_ttl_out {
