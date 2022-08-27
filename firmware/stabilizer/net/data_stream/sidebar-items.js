@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["StreamFormat","Specifies the format of streamed data"]],"fn":[["setup_streaming","Configure streaming on a device."]],"struct":[["DataStream","The “consumer” portion of the data stream."],["FrameGenerator","The data generator for a stream."],["StreamTarget","Represents the destination for the UDP stream to send data to."]]};

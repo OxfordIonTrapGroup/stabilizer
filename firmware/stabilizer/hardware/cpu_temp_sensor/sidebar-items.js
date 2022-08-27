@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":[["CpuTempSensor","A driver to access the CPU temeprature sensor."]]};

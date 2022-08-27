@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":[["Monotonic",""]],"struct":[["LocalResources","Local resources `start` has access to"]]};

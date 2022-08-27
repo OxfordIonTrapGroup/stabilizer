@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":[["Dac0Output","Represents data associated with DAC."],["Dac1Output","Represents data associated with DAC."],["DacCode","Custom type for referencing DAC output codes. The internal integer is the raw code written to the DAC output register."]]};

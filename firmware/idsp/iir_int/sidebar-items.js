@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":[["IIR","Integer biquad IIR"]],"type":[["Vec5","Generic vector for integer IIR filter. This struct is used to hold the x/y input/output data vector or the b/a coefficient vector."]]};

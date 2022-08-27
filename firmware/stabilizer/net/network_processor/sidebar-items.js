@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":[["NetworkProcessor","Processor for managing network hardware."]]};

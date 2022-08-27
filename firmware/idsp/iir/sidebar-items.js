@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":[["IIR","IIR configuration."]],"type":[["Vec5","IIR state and coefficients type."]]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":[["Timestamper","Software unit to timestamp stabilizer ADC samples using an external pounder reference clock."]]};

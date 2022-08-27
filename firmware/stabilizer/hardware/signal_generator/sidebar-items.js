@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["Error","Represents the errors that can occur when attempting to configure the signal generator."],["Signal","Types of signals that can be generated."]],"struct":[["BasicConfig","Basic configuration for a generated signal."],["Config",""],["SignalGenerator",""]]};

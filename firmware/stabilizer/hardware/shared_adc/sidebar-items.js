@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["AdcError",""]],"struct":[["AdcChannel","A single channel on an ADC peripheral."],["SharedAdc","An ADC peripheral that can provide ownership of individual channels for sharing between drivers."]]};

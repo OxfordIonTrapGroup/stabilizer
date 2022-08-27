@@ -1,0 +1,163 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/hardware/input_stamper.rs`."><meta name="keywords" content="rust, rustlang, rust-lang"><title>input_stamper.rs - source</title><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../SourceSerif4-Regular.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../FiraSans-Regular.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../FiraSans-Medium.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../SourceCodePro-Regular.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../SourceSerif4-Bold.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../SourceCodePro-Semibold.ttf.woff2"><link rel="stylesheet" type="text/css" href="../../../normalize.css"><link rel="stylesheet" type="text/css" href="../../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../../ayu.css" disabled><link rel="stylesheet" type="text/css" href="../../../dark.css" disabled><link rel="stylesheet" type="text/css" href="../../../light.css" id="themeStyle"><script id="default-settings" ></script><script src="../../../storage.js"></script><script defer src="../../../source-script.js"></script><script defer src="../../../source-files.js"></script><script defer src="../../../main.js"></script><noscript><link rel="stylesheet" href="../../../noscript.css"></noscript><link rel="alternate icon" type="image/png" href="../../../favicon-16x16.png"><link rel="alternate icon" type="image/png" href="../../../favicon-32x32.png"><link rel="icon" type="image/svg+xml" href="../../../favicon.svg"></head><body class="rustdoc source"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="mobile-topbar"><button class="sidebar-menu-toggle">&#9776;</button><a class="sidebar-logo" href="../../../stabilizer/index.html"><div class="logo-container"><img class="rust-logo" src="../../../rust-logo.svg" alt="logo"></div>
+        </a><h2 class="location"></h2>
+    </nav>
+    <nav class="sidebar"><a class="sidebar-logo" href="../../../stabilizer/index.html"><div class="logo-container"><img class="rust-logo" src="../../../rust-logo.svg" alt="logo"></div>
+        </a></nav><main><div class="width-limiter"><div class="sub-container"><a class="sub-logo-container" href="../../../stabilizer/index.html"><img class="rust-logo" src="../../../rust-logo.svg" alt="logo"></a><nav class="sub"><form class="search-form"><div class="search-container"><span></span><input class="search-input" name="search" autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"><button type="button" id="help-button" title="help">?</button><div id="settings-menu" tabindex="-1">
+                                <a href="../../../settings.html" title="settings"><img width="22" height="22" alt="Change settings" src="../../../wheel.svg"></a></div>
+                        </div></form></nav></div><section id="main-content" class="content"><div class="example-wrap"><pre class="line-numbers"><span id="1">1</span>
+<span id="2">2</span>
+<span id="3">3</span>
+<span id="4">4</span>
+<span id="5">5</span>
+<span id="6">6</span>
+<span id="7">7</span>
+<span id="8">8</span>
+<span id="9">9</span>
+<span id="10">10</span>
+<span id="11">11</span>
+<span id="12">12</span>
+<span id="13">13</span>
+<span id="14">14</span>
+<span id="15">15</span>
+<span id="16">16</span>
+<span id="17">17</span>
+<span id="18">18</span>
+<span id="19">19</span>
+<span id="20">20</span>
+<span id="21">21</span>
+<span id="22">22</span>
+<span id="23">23</span>
+<span id="24">24</span>
+<span id="25">25</span>
+<span id="26">26</span>
+<span id="27">27</span>
+<span id="28">28</span>
+<span id="29">29</span>
+<span id="30">30</span>
+<span id="31">31</span>
+<span id="32">32</span>
+<span id="33">33</span>
+<span id="34">34</span>
+<span id="35">35</span>
+<span id="36">36</span>
+<span id="37">37</span>
+<span id="38">38</span>
+<span id="39">39</span>
+<span id="40">40</span>
+<span id="41">41</span>
+<span id="42">42</span>
+<span id="43">43</span>
+<span id="44">44</span>
+<span id="45">45</span>
+<span id="46">46</span>
+<span id="47">47</span>
+<span id="48">48</span>
+<span id="49">49</span>
+<span id="50">50</span>
+<span id="51">51</span>
+<span id="52">52</span>
+<span id="53">53</span>
+<span id="54">54</span>
+<span id="55">55</span>
+<span id="56">56</span>
+<span id="57">57</span>
+<span id="58">58</span>
+<span id="59">59</span>
+<span id="60">60</span>
+<span id="61">61</span>
+<span id="62">62</span>
+<span id="63">63</span>
+<span id="64">64</span>
+<span id="65">65</span>
+<span id="66">66</span>
+<span id="67">67</span>
+<span id="68">68</span>
+<span id="69">69</span>
+<span id="70">70</span>
+<span id="71">71</span>
+<span id="72">72</span>
+<span id="73">73</span>
+<span id="74">74</span>
+<span id="75">75</span>
+<span id="76">76</span>
+<span id="77">77</span>
+</pre><pre class="rust"><code><span class="doccomment">///! Digital Input 0 (DI0) reference clock timestamper</span>
+<span class="doccomment">///!</span>
+<span class="doccomment">///! This module provides a means of timestamping the rising edges of an external reference clock on</span>
+<span class="doccomment">///! the DI0 with a timer value from TIM5.</span>
+<span class="doccomment">///!</span>
+<span class="doccomment">///! # Design</span>
+<span class="doccomment">///! An input capture channel is configured on DI0 and fed into TIM5&#39;s capture channel 4. TIM5 is</span>
+<span class="doccomment">///! then run in a free-running mode with a configured tick rate (PSC) and maximum count value</span>
+<span class="doccomment">///! (ARR). Whenever an edge on DI0 triggers, the current TIM5 counter value is captured and</span>
+<span class="doccomment">///! recorded as a timestamp. This timestamp can be either directly read from the timer channel or</span>
+<span class="doccomment">///! can be collected asynchronously via DMA collection.</span>
+<span class="doccomment">///!</span>
+<span class="doccomment">///! To prevent silently discarding timestamps, the TIM5 input capture over-capture flag is</span>
+<span class="doccomment">///! continually checked. Any over-capture event (which indicates an overwritten timestamp) then</span>
+<span class="doccomment">///! triggers a panic to indicate the dropped timestamp so that design parameters can be adjusted.</span>
+<span class="doccomment">///!</span>
+<span class="doccomment">///! # Tradeoffs</span>
+<span class="doccomment">///! It appears that DMA transfers can take a significant amount of time to disable (400ns) if they</span>
+<span class="doccomment">///! are being prematurely stopped (such is the case here). As such, for a sample batch size of 1,</span>
+<span class="doccomment">///! this can take up a significant amount of the total available processing time for the samples.</span>
+<span class="doccomment">///! This module checks for any captured timestamps from the timer capture channel manually. In</span>
+<span class="doccomment">///! this mode, the maximum input clock frequency supported is dependant on the sampling rate and</span>
+<span class="doccomment">///! batch size.</span>
+<span class="doccomment">///!</span>
+<span class="doccomment">///! This module only supports DI0 for timestamping due to trigger constraints on the DIx pins. If</span>
+<span class="doccomment">///! timestamping is desired in DI1, a separate timer + capture channel will be necessary.</span>
+<span class="kw">use</span> <span class="kw">super</span>::{<span class="ident">hal</span>, <span class="ident">timers</span>};
+
+<span class="doccomment">/// The timestamper for DI0 reference clock inputs.</span>
+<span class="kw">pub</span> <span class="kw">struct</span> <span class="ident">InputStamper</span> {
+    <span class="ident">_di0_trigger</span>: <span class="ident">hal::gpio::gpioa::PA3</span><span class="op">&lt;</span><span class="ident">hal::gpio::Alternate</span><span class="op">&lt;</span><span class="number">2</span><span class="op">&gt;</span><span class="op">&gt;</span>,
+    <span class="ident">capture_channel</span>: <span class="ident">timers::tim5::Channel4InputCapture</span>,
+}
+
+<span class="kw">impl</span> <span class="ident">InputStamper</span> {
+    <span class="doccomment">/// Construct the DI0 input timestamper.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// # Args</span>
+    <span class="doccomment">/// * `trigger` - The capture trigger input pin.</span>
+    <span class="doccomment">/// * `timer_channel - The timer channel used for capturing timestamps.</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">new</span>(
+        <span class="ident">trigger</span>: <span class="ident">hal::gpio::gpioa::PA3</span><span class="op">&lt;</span><span class="ident">hal::gpio::Alternate</span><span class="op">&lt;</span><span class="number">2</span><span class="op">&gt;</span><span class="op">&gt;</span>,
+        <span class="ident">timer_channel</span>: <span class="ident">timers::tim5::Channel4</span>,
+    ) -&gt; <span class="self">Self</span> {
+        <span class="comment">// Utilize the TIM5 CH4 as an input capture channel - use TI4 (the DI0 input trigger) as the</span>
+        <span class="comment">// capture source.</span>
+        <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">input_capture</span> <span class="op">=</span>
+            <span class="ident">timer_channel</span>.<span class="ident">into_input_capture</span>(<span class="ident">timers::tim5::CaptureSource4::TI4</span>);
+
+        <span class="comment">// Do not prescale the input capture signal - require 8 consecutive samples to record an</span>
+        <span class="comment">// incoming event - this prevents spurious glitches from triggering captures.</span>
+        <span class="ident">input_capture</span>.<span class="ident">configure_filter</span>(<span class="ident">timers::InputFilter::Div1N8</span>);
+
+        <span class="self">Self</span> {
+            <span class="ident">capture_channel</span>: <span class="ident">input_capture</span>,
+            <span class="ident">_di0_trigger</span>: <span class="ident">trigger</span>,
+        }
+    }
+
+    <span class="doccomment">/// Start to capture timestamps on DI0.</span>
+    <span class="attribute">#[<span class="ident">allow</span>(<span class="ident">dead_code</span>)]</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">start</span>(<span class="kw-2">&amp;mut</span> <span class="self">self</span>) {
+        <span class="self">self</span>.<span class="ident">capture_channel</span>.<span class="ident">enable</span>();
+    }
+
+    <span class="doccomment">/// Get the latest timestamp that has occurred.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// # Note</span>
+    <span class="doccomment">/// This function must be called at least as often as timestamps arrive.</span>
+    <span class="doccomment">/// If an over-capture event occurs, this function will clear the overflow,</span>
+    <span class="doccomment">/// and return a new timestamp of unknown recency an `Err()`.</span>
+    <span class="doccomment">/// Note that this indicates at least one timestamp was inadvertently dropped.</span>
+    <span class="attribute">#[<span class="ident">allow</span>(<span class="ident">dead_code</span>)]</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">latest_timestamp</span>(<span class="kw-2">&amp;mut</span> <span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span><span class="op">&lt;</span><span class="prelude-ty">Option</span><span class="op">&lt;</span><span class="ident">u32</span><span class="op">&gt;</span>, <span class="prelude-ty">Option</span><span class="op">&lt;</span><span class="ident">u32</span><span class="op">&gt;</span><span class="op">&gt;</span> {
+        <span class="self">self</span>.<span class="ident">capture_channel</span>.<span class="ident">latest_capture</span>()
+    }
+}
+</code></pre></div>
+</section></div></main><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="stabilizer" data-themes="ayu,dark,light" data-resource-suffix="" data-rustdoc-version="1.63.0 (4b91a6ea7 2022-08-08)" ></div>
+</body></html>

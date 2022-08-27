@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":[["Monotonic",""]],"struct":[["LocalResources","Local resources `telemetry` has access to"],["SharedResources","Shared resources `telemetry` has access to"]]};

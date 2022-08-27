@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":[["Monotonic",""]],"struct":[["SharedResources","Shared resources `ethernet_link` has access to"]]};

@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["stabilizer"] = [{"text":"impl TryFromPrimitive for <a class=\"enum\" href=\"stabilizer/hardware/afe/enum.Gain.html\" title=\"enum stabilizer::hardware::afe::Gain\">Gain</a>","synthetic":false,"types":["stabilizer::hardware::afe::Gain"]},{"text":"impl TryFromPrimitive for <a class=\"enum\" href=\"stabilizer/hardware/timers/enum.Prescaler.html\" title=\"enum stabilizer::hardware::timers::Prescaler\">Prescaler</a>","synthetic":false,"types":["stabilizer::hardware::timers::Prescaler"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()
