@@ -175,7 +175,9 @@ impl<T: Serialize> TelemetryClient<T> {
     }
 
     /// Directly access the MQTT client.
-    pub fn mqtt(&mut self) -> &mut minimq::Minimq<NetworkReference, SystemTimer, 512, 1> {
+    pub fn mqtt(
+        &mut self,
+    ) -> &mut minimq::Minimq<NetworkReference, SystemTimer, 512, 1> {
         &mut self.mqtt
     }
 }

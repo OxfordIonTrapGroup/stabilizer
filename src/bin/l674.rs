@@ -12,8 +12,8 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{fence, Ordering};
 
 use fugit::ExtU64;
+use minimq::{Property, QoS, Retain};
 use mutex_trait::prelude::*;
-use minimq::{QoS, Retain, Property};
 
 use stabilizer::{
     hardware::{
@@ -23,13 +23,12 @@ use stabilizer::{
         dac::{Dac0Output, Dac1Output, DacCode},
         hal,
         timers::SamplingTimer,
-        SystemTimer, Systick, AFE0, AFE1,
-        EemDigitalOutput1,
+        EemDigitalOutput1, SystemTimer, Systick, AFE0, AFE1,
     },
     net::{
         data_stream::{FrameGenerator, StreamFormat, StreamTarget},
         miniconf::Miniconf,
-        serde::{Serialize, Deserialize},
+        serde::{Deserialize, Serialize},
         telemetry::{Telemetry, TelemetryBuffer},
         NetworkState, NetworkUsers,
     },
@@ -39,13 +38,14 @@ use core::fmt::Write;
 use heapless::String;
 use log::{info, warn};
 
-use idsp::{iir, Lowpass, abs};
+use idsp::{abs, iir, Lowpass};
 
 // The logarithm of the number of 100MHz timer ticks between each sample. With a value of 2^7 =
 // 128, there is 1.28uS per sample, corresponding to a sampling frequency of 781.25 KHz.
 const SAMPLE_TICKS_LOG2: u8 = 7;
 const SAMPLE_TICKS: u32 = 1 << SAMPLE_TICKS_LOG2;
-const SAMPLE_PERIOD: f32 = SAMPLE_TICKS as f32 * hardware::design_parameters::TIMER_PERIOD;
+const SAMPLE_PERIOD: f32 =
+    SAMPLE_TICKS as f32 * hardware::design_parameters::TIMER_PERIOD;
 
 // The number of samples in each batch process
 const BATCH_SIZE: usize = 8;
@@ -62,7 +62,6 @@ pub enum ADC1Routing {
     SumWithADC0,
     SumWithIIR0Output,
 }
-
 
 #[derive(Debug, Copy, Clone, Deserialize, Miniconf)]
 pub struct Settings {
@@ -157,7 +156,11 @@ impl GainRampState {
 
     // Not a member function to be able to execute this before locking the object.
     pub fn prepare_reset(ramp_time: f32) -> f32 {
-        if ramp_time > 0.0 { SAMPLE_PERIOD / ramp_time } else { 0.0 }
+        if ramp_time > 0.0 {
+            SAMPLE_PERIOD / ramp_time
+        } else {
+            0.0
+        }
     }
 }
 
@@ -202,7 +205,10 @@ impl LockDetectState {
     }
 
     // Not a member function to be able to execute this before locking the object.
-    pub fn prepare_reset(threshold: f32, reset_time: f32) -> (Option<i16>, u32) {
+    pub fn prepare_reset(
+        threshold: f32,
+        reset_time: f32,
+    ) -> (Option<i16>, u32) {
         let threshold_opt = if let Ok(thres) = AdcCode::try_from(threshold) {
             Some(i16::from(thres))
         } else {
@@ -309,7 +315,10 @@ mod app {
             network,
             settings: Settings::default(),
             telemetry: TelemetryBuffer::default(),
-            gain_ramp: GainRampState { current: 1.0, increment: 0.0 },
+            gain_ramp: GainRampState {
+                current: 1.0,
+                increment: 0.0,
+            },
             lock_detect,
         };
 
@@ -403,26 +412,44 @@ mod app {
 
                             // Cascaded PID controllers.
                             let adc1_float = f32::from(adc1_int);
-                            let mut x = f32::from(*a0 as i16) * gain_ramp.current;
-                            if let ADC1Routing::SumWithADC0 = settings.adc1_routing {
+                            let mut x =
+                                f32::from(*a0 as i16) * gain_ramp.current;
+                            if let ADC1Routing::SumWithADC0 =
+                                settings.adc1_routing
+                            {
                                 x += adc1_float;
                             }
 
                             let y0 = {
-                                let mut y = settings.iir_ch[0][0]
-                                    .update(&mut iir_state[0][0], x, false);
-                                if let ADC1Routing::SumWithIIR0Output = settings.adc1_routing
+                                let mut y = settings.iir_ch[0][0].update(
+                                    &mut iir_state[0][0],
+                                    x,
+                                    false,
+                                );
+                                if let ADC1Routing::SumWithIIR0Output =
+                                    settings.adc1_routing
                                 {
                                     y += adc1_float;
                                 }
-                                settings.iir_ch[0][1].update(&mut iir_state[0][1], y, false)
+                                settings.iir_ch[0][1].update(
+                                    &mut iir_state[0][1],
+                                    y,
+                                    false,
+                                )
                             };
                             *d0 = to_dac(y0);
 
                             let y1 = {
-                                let y = settings.iir_ch[1][0]
-                                    .update(&mut iir_state[1][0], y0, false);
-                                settings.iir_ch[1][1].update(&mut iir_state[1][1], y, false)
+                                let y = settings.iir_ch[1][0].update(
+                                    &mut iir_state[1][0],
+                                    y0,
+                                    false,
+                                );
+                                settings.iir_ch[1][1].update(
+                                    &mut iir_state[1][1],
+                                    y,
+                                    false,
+                                )
                             };
                             *d1 = to_dac(y1);
 
@@ -482,7 +509,9 @@ mod app {
                     let mqtt = telemetry.mqtt();
 
                     if !subscribed {
-                        if let Ok(_) = mqtt.client.subscribe(&adc1_filtered_topic, &[]) {
+                        if let Ok(_) =
+                            mqtt.client.subscribe(&adc1_filtered_topic, &[])
+                        {
                             subscribed = true;
                             info!("Subscribed to ADC1_FILTERED_TOPIC");
                         }
@@ -492,22 +521,26 @@ mod app {
                         let mut payload_buf: String<64> = String::new();
 
                         let payload = if topic == adc1_filtered_topic {
-                            let afe1_gain = c.shared.settings.lock(|settings| settings.afe[1]);
+                            let afe1_gain = c
+                                .shared
+                                .settings
+                                .lock(|settings| settings.afe[1]);
                             let adc1_filtered = f32::from(
-                                c.shared.lock_detect.lock(|ld| ld.get_filtered())
+                                c.shared
+                                    .lock_detect
+                                    .lock(|ld| ld.get_filtered()),
                             ) / afe1_gain.as_multiplier();
-                            write!(&mut payload_buf, "{}", adc1_filtered).unwrap();
+                            write!(&mut payload_buf, "{}", adc1_filtered)
+                                .unwrap();
                             payload_buf.as_bytes()
                         } else {
                             warn!("Unexpected topic");
                             "Unexpected topic".as_bytes()
                         };
 
-                        let property = properties
-                            .iter()
-                            .find(|&prop| {
-                                matches!(*prop, Property::ResponseTopic(_))
-                            });
+                        let property = properties.iter().find(|&prop| {
+                            matches!(*prop, Property::ResponseTopic(_))
+                        });
                         // Make a best-effort attempt to send the response.
                         // If we get a failure, we may have disconnected or the
                         // peer provided an invalid topic to respond to.
@@ -517,18 +550,23 @@ mod app {
                             let response_properties = properties
                                 .iter()
                                 .find(|&prop| {
-                                    matches!(*prop, Property::CorrelationData(_))
+                                    matches!(
+                                        *prop,
+                                        Property::CorrelationData(_)
+                                    )
                                 })
                                 .map(core::slice::from_ref)
                                 .unwrap_or(&[]);
 
-                            client.publish(
-                                topic,
-                                payload,
-                                QoS::AtMostOnce,
-                                Retain::NotRetained,
-                                response_properties)
-                            .ok();
+                            client
+                                .publish(
+                                    topic,
+                                    payload,
+                                    QoS::AtMostOnce,
+                                    Retain::NotRetained,
+                                    response_properties,
+                                )
+                                .ok();
                         }
                     })
                 };
@@ -545,8 +583,8 @@ mod app {
             }) {
                 NetworkState::SettingsChanged(_path) => {
                     settings_update::spawn().unwrap()
-                },
-                NetworkState::Updated => {},
+                }
+                NetworkState::Updated => {}
                 NetworkState::NoChange => cortex_m::asm::wfi(),
             }
         }
@@ -555,7 +593,6 @@ mod app {
     #[task(priority = 1, shared=[network, settings, gain_ramp, lock_detect],
            local=[aux_ttl_out, afes])]
     fn settings_update(mut c: settings_update::Context) {
-
         fn lock_enabled(iir: [[iir::IIR<f32>; IIR_CASCADE_LENGTH]; 2]) -> bool {
             const EPS: f32 = f32::EPSILON;
             abs(iir[0][0].get_k()) > EPS || abs(iir[1][0].get_k()) > EPS
@@ -593,7 +630,9 @@ mod app {
             settings.ld_threshold * settings.afe[1].as_multiplier(),
             settings.ld_reset_time,
         );
-        c.shared.lock_detect.lock(|ld| ld.reset(threshold, decrement));
+        c.shared
+            .lock_detect
+            .lock(|ld| ld.reset(threshold, decrement));
 
         // Print IIR settings
         info!("IIR settings:");

@@ -16,9 +16,9 @@ use super::{
     adc, afe, cpu_temp_sensor::CpuTempSensor, dac, delay, design_parameters,
     eeprom, input_stamper::InputStamper, pounder,
     pounder::dds_output::DdsOutput, shared_adc::SharedAdc, timers,
-    DigitalInput0, DigitalInput1, EthernetPhy, NetworkStack, SystemTimer,
-    Systick, AFE0, AFE1, EemDigitalInput0, EemDigitalInput1,
-    EemDigitalOutput0, EemDigitalOutput1
+    DigitalInput0, DigitalInput1, EemDigitalInput0, EemDigitalInput1,
+    EemDigitalOutput0, EemDigitalOutput1, EthernetPhy, NetworkStack,
+    SystemTimer, Systick, AFE0, AFE1,
 };
 
 const NUM_TCP_SOCKETS: usize = 4;
@@ -972,20 +972,26 @@ pub fn setup(
             )
         };
 
-        (Some(PounderDevices {
-            pounder: pounder_devices,
-            dds_output,
+        (
+            Some(PounderDevices {
+                pounder: pounder_devices,
+                dds_output,
 
-            #[cfg(not(feature = "pounder_v1_0"))]
-            timestamper: pounder_stamper,
-        }), None)
+                #[cfg(not(feature = "pounder_v1_0"))]
+                timestamper: pounder_stamper,
+            }),
+            None,
+        )
     } else {
-        (None, Some(EemGpioDevices {
-            lvds4: gpiod.pd1.into_floating_input(),
-            lvds5: gpiod.pd2.into_floating_input(),
-            lvds6: gpiod.pd3.into_push_pull_output(),
-            lvds7: gpiod.pd4.into_push_pull_output(),
-        }))
+        (
+            None,
+            Some(EemGpioDevices {
+                lvds4: gpiod.pd1.into_floating_input(),
+                lvds5: gpiod.pd2.into_floating_input(),
+                lvds6: gpiod.pd3.into_push_pull_output(),
+                lvds7: gpiod.pd4.into_push_pull_output(),
+            }),
+        )
     };
 
     let stabilizer = StabilizerDevices {
