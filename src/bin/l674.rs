@@ -589,8 +589,10 @@ mod app {
         }
 
         // Lock detect
-        let (threshold, decrement) = LockDetectState::prepare_reset(settings.ld_threshold,
-                                                                    settings.ld_reset_time);
+        let (threshold, decrement) = LockDetectState::prepare_reset(
+            settings.ld_threshold * settings.afe[1].as_multiplier(),
+            settings.ld_reset_time,
+        );
         c.shared.lock_detect.lock(|ld| ld.reset(threshold, decrement));
 
         // Print IIR settings
