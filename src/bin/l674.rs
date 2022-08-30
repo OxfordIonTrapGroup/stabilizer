@@ -495,18 +495,13 @@ mod app {
 
         let mut subscribed = false;
         let adc1_filtered_topic = c.shared.network.lock(|net| {
-            net.telemetry.as_ref().unwrap().topic(ADC1_FILTERED_TOPIC)
+            net.telemetry.topic(ADC1_FILTERED_TOPIC)
         });
 
         loop {
             match c.shared.network.lock(|net| {
-                // Take ownership of telemetry.
-                let mut telemetry = net.telemetry.take().unwrap();
-
-                // Skips the telemetry update because we took ownership.
-                let settings_result = net.update();
                 let mqtt_result = {
-                    let mqtt = telemetry.mqtt();
+                    let mqtt = net.telemetry.mqtt();
 
                     if !subscribed {
                         if let Ok(_) =
@@ -570,8 +565,6 @@ mod app {
                         }
                     })
                 };
-                // Move telemetry back into NetworkUsers.
-                net.telemetry.replace(telemetry);
 
                 if let Err(_) = mqtt_result {
                     if subscribed {
@@ -579,7 +572,8 @@ mod app {
                     }
                     subscribed = false;
                 }
-                settings_result
+
+                net.update_no_telemetry()
             }) {
                 NetworkState::SettingsChanged(_path) => {
                     settings_update::spawn().unwrap()
@@ -661,7 +655,7 @@ mod app {
         let gains = c.shared.settings.lock(|settings| settings.afe);
 
         c.shared.network.lock(|net| {
-            net.telemetry.as_mut().unwrap().publish(&telemetry.finalize(
+            net.telemetry.publish(&telemetry.finalize(
                 gains[0],
                 gains[1],
                 c.local.cpu_temp_sensor.get_temperature().unwrap(),
