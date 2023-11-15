@@ -49,7 +49,6 @@ num_enum = { version = "0.7.1", default-features = false }
 paste = "1"
 idsp = "0.13"
 ad9959 = { path = "ad9959", version = "0.2.1" }
-mcp230xx = "1.0"
 mutex-trait = "0.2"
 fugit = "0.3"
 rtt-logger = "0.2"
@@ -70,6 +69,10 @@ miniconf = "0.9.0"
 smoltcp-nal = { version = "0.4.1", features = ["shared-stack"]}
 bbqueue = "0.5"
 postcard = "1"
+# Enable exactly one of these two GPIO expanders on Pounder
+mcp230xx = {version = "1.0", optional = true}
+pca9539 = {git = "https://github.com/OxfordIonTrapGroup/rt-PCA9539.git", branch = "no_std", optional = true}
+cfg-if = "1.0.0"
 
 [dependencies.stm32h7xx-hal]
 version = "0.15.1"
@@ -77,7 +80,12 @@ features = ["stm32h743v", "rt", "ethernet", "xspi", "usb_hs"]
 
 [features]
 nightly = [ ]
-pounder_v1_0 = [ ]
+default = ["pounder_v1_2"]
+mcp23017 = ["dep:mcp230xx"]
+pca9539 = ["dep:pca9539"]
+pounder_v1_0 = ["mcp23017"]
+pounder_v1_1 = ["mcp23017"]
+pounder_v1_2 = ["pca9539"]
 
 [profile.dev]
 codegen-units = 1

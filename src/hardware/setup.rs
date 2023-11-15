@@ -3,6 +3,7 @@
 //! This file contains all of the hardware-specific configuration of Stabilizer.
 use core::sync::atomic::{self, AtomicBool, Ordering};
 use core::{fmt::Write, ptr, slice};
+use embedded_hal::digital::v2::{IoPin, PinState};
 use stm32h7xx_hal::{
     self as hal,
     ethernet::{self, PHY},
@@ -12,10 +13,12 @@ use stm32h7xx_hal::{
 
 use smoltcp_nal::smoltcp;
 
+use crate::hardware::pounder::io_expander;
+
 use super::{
     adc, afe, cpu_temp_sensor::CpuTempSensor, dac, delay, design_parameters,
     eeprom, flash::FlashSettings, input_stamper::InputStamper, pounder,
-    pounder::dds_output::DdsOutput, serial_terminal::SerialTerminal,
+    pounder::dds_output::DdsOutput, pounder::io_expander::GpioPin, serial_terminal::SerialTerminal,
     shared_adc::SharedAdc, timers, DigitalInput0, DigitalInput1,
     EemDigitalInput0, EemDigitalInput1, EemDigitalOutput0, EemDigitalOutput1,
     EthernetPhy, NetworkStack, SystemTimer, Systick, UsbBus, AFE0, AFE1,
@@ -813,8 +816,7 @@ pub fn setup(
             shared_bus::new_atomic_check!(hal::i2c::I2c<hal::stm32::I2C1> = i2c1).unwrap()
         };
 
-        let io_expander =
-            mcp230xx::Mcp230xx::new_default(i2c1.acquire_i2c()).unwrap();
+        let gpio_expander = io_expander::IoExpander::new(i2c1.acquire_i2c());
 
         let temp_sensor =
             lm75::Lm75::new(i2c1.acquire_i2c(), lm75::Address::default());
@@ -845,9 +847,9 @@ pub fn setup(
         let aux_adc0 = adc3.create_channel(gpiof.pf3.into_analog());
         let aux_adc1 = adc3.create_channel(gpiof.pf4.into_analog());
 
-        let pounder_devices = pounder::PounderDevices::new(
+        let mut pounder_devices = pounder::PounderDevices::new(
             temp_sensor,
-            io_expander,
+            gpio_expander,
             spi,
             pwr0,
             pwr1,
@@ -883,7 +885,13 @@ pub fn setup(
                 pounder::QspiInterface::new(qspi).unwrap()
             };
 
-            #[cfg(not(feature = "pounder_v1_0"))]
+            let reset_pin;
+            let pounder_pins;
+            #[cfg(feature = "pounder_v1_2")] {
+                pounder_pins = pounder_devices.gpio_expander.io_expander.pins();
+                reset_pin = pounder_pins.get_pin(GpioPin::DdsReset.into(), GpioPin::DdsReset.into()).into_output_pin(PinState::Low).unwrap();
+            }
+            #[cfg(feature = "pounder_v1_1")]
             let reset_pin = gpiog.pg6.into_push_pull_output();
             #[cfg(feature = "pounder_v1_0")]
             let reset_pin = gpioa.pa0.into_push_pull_output();
