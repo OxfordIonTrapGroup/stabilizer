@@ -211,7 +211,7 @@ pub fn amplitude_to_acr(amplitude: f32) -> Result<u32, Error> {
 /// # Args
 /// * `phase_offset` - requested phase offset in degrees. Must be > 0
 pub fn phase_to_pow(phase_offset: f32) -> Result<u16, Error> {
-    if phase_offset < 0 {
+    if phase_offset < 0.0 {
         return Err(Error::Bounds);
     }
 

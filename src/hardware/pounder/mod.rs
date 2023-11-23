@@ -270,31 +270,36 @@ impl ad9959::Interface for QspiInterface {
     }
 }
 
+pub type InChannel0 = AdcChannel<
+    'static,
+    hal::stm32::ADC1,
+    hal::gpio::gpiof::PF11<hal::gpio::Analog>,
+>;
+pub type InChannel1 = AdcChannel<
+    'static,
+    hal::stm32::ADC2,
+    hal::gpio::gpiof::PF14<hal::gpio::Analog>,
+>;
+pub type AuxAdcChannel0 = AdcChannel<
+    'static,
+    hal::stm32::ADC3,
+    hal::gpio::gpiof::PF3<hal::gpio::Analog>,
+>;
+pub type AuxAdcChannel1 = AdcChannel<
+    'static,
+    hal::stm32::ADC3,
+    hal::gpio::gpiof::PF4<hal::gpio::Analog>,
+>;
+
 /// A structure containing implementation for Pounder hardware.
 pub struct PounderDevices {
     pub gpio_expander: io_expander::IoExpander,
     pub lm75: lm75::Lm75<I2c1Proxy, lm75::ic::Lm75>,
     attenuator_spi: hal::spi::Spi<hal::stm32::SPI1, hal::spi::Enabled, u8>,
-    pwr0: AdcChannel<
-        'static,
-        hal::stm32::ADC1,
-        hal::gpio::gpiof::PF11<hal::gpio::Analog>,
-    >,
-    pwr1: AdcChannel<
-        'static,
-        hal::stm32::ADC2,
-        hal::gpio::gpiof::PF14<hal::gpio::Analog>,
-    >,
-    aux_adc0: AdcChannel<
-        'static,
-        hal::stm32::ADC3,
-        hal::gpio::gpiof::PF3<hal::gpio::Analog>,
-    >,
-    aux_adc1: AdcChannel<
-        'static,
-        hal::stm32::ADC3,
-        hal::gpio::gpiof::PF4<hal::gpio::Analog>,
-    >,
+    pwr0: InChannel0,
+    pwr1: InChannel1,
+    aux_adc0: AuxAdcChannel0,
+    aux_adc1: AuxAdcChannel1,
 }
 
 impl PounderDevices {
@@ -312,26 +317,10 @@ impl PounderDevices {
         lm75: lm75::Lm75<I2c1Proxy, lm75::ic::Lm75>,
         gpio_expander: io_expander::IoExpander,
         attenuator_spi: hal::spi::Spi<hal::stm32::SPI1, hal::spi::Enabled, u8>,
-        pwr0: AdcChannel<
-            'static,
-            hal::stm32::ADC1,
-            hal::gpio::gpiof::PF11<hal::gpio::Analog>,
-        >,
-        pwr1: AdcChannel<
-            'static,
-            hal::stm32::ADC2,
-            hal::gpio::gpiof::PF14<hal::gpio::Analog>,
-        >,
-        aux_adc0: AdcChannel<
-            'static,
-            hal::stm32::ADC3,
-            hal::gpio::gpiof::PF3<hal::gpio::Analog>,
-        >,
-        aux_adc1: AdcChannel<
-            'static,
-            hal::stm32::ADC3,
-            hal::gpio::gpiof::PF4<hal::gpio::Analog>,
-        >,
+        pwr0: InChannel0,
+        pwr1: InChannel1,
+        aux_adc0: AuxAdcChannel0,
+        aux_adc1: AuxAdcChannel1,
     ) -> Result<Self, Error> {
         let mut devices = Self {
             lm75,
