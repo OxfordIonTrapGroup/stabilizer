@@ -18,10 +18,11 @@ use crate::hardware::pounder::io_expander;
 use super::{
     adc, afe, cpu_temp_sensor::CpuTempSensor, dac, delay, design_parameters,
     eeprom, flash::FlashSettings, input_stamper::InputStamper, pounder,
-    pounder::dds_output::DdsOutput, pounder::io_expander::GpioPin, serial_terminal::SerialTerminal,
-    shared_adc::SharedAdc, timers, DigitalInput0, DigitalInput1,
-    EemDigitalInput0, EemDigitalInput1, EemDigitalOutput0, EemDigitalOutput1,
-    EthernetPhy, NetworkStack, SystemTimer, Systick, UsbBus, AFE0, AFE1,
+    pounder::dds_output::DdsOutput, pounder::io_expander::GpioPin,
+    serial_terminal::SerialTerminal, shared_adc::SharedAdc, timers,
+    DigitalInput0, DigitalInput1, EemDigitalInput0, EemDigitalInput1,
+    EemDigitalOutput0, EemDigitalOutput1, EthernetPhy, NetworkStack,
+    SystemTimer, Systick, UsbBus, AFE0, AFE1,
 };
 
 const NUM_TCP_SOCKETS: usize = 4;
@@ -887,9 +888,13 @@ pub fn setup(
 
             let reset_pin;
             let pounder_pins;
-            #[cfg(feature = "pounder_v1_2")] {
+            #[cfg(feature = "pounder_v1_2")]
+            {
                 pounder_pins = pounder_devices.gpio_expander.io_expander.pins();
-                reset_pin = pounder_pins.get_pin(GpioPin::DdsReset.into(), GpioPin::DdsReset.into()).into_output_pin(PinState::Low).unwrap();
+                reset_pin = pounder_pins
+                    .get_pin(GpioPin::DdsReset.into(), GpioPin::DdsReset.into())
+                    .into_output_pin(PinState::Low)
+                    .unwrap();
             }
             #[cfg(feature = "pounder_v1_1")]
             let reset_pin = gpiog.pg6.into_push_pull_output();
