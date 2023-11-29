@@ -209,11 +209,11 @@ pub fn amplitude_to_acr(amplitude: f32) -> Result<u32, Error> {
 /// Return the phase offset word to set the requested phase offset
 ///
 /// # Args
-/// * `phase_offset` - requested phase offset in degrees. Must be > 0
+/// * `phase_offset` - requested phase offset in turns. `0 <= phase_offset < 1`
 pub fn phase_to_pow(phase_offset: f32) -> Result<u16, Error> {
-    if phase_offset < 0.0 {
-        return Err(Error::Bounds);
+    if (0.0..1.0).contains(&phase_offset) {
+        Ok((phase_offset * (1 << 14) as f32) as u16 & 0x3FFF)
+    } else {
+        Err(Error::Bounds)
     }
-
-    Ok((phase_offset / 360.0 * (1 << 14) as f32) as u16 & 0x3FFF)
 }

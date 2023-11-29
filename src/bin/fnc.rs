@@ -223,6 +223,7 @@ mod app {
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
         pounder: pounder::PounderDevices,
         timestamper: pounder::timestamp::Timestamper,
+        phase_offset: u16,
     }
 
     #[init]
@@ -287,19 +288,21 @@ mod app {
             cpu_temp_sensor: stabilizer.temperature_sensor,
             pounder: pounder.pounder,
             timestamper: pounder.timestamper,
+            phase_offset: 0x00,
         };
 
         let mut dds_profile = shared.dds.builder();
-        // Enable DDS outputs
-        // Directly output aom centre frequency
+
+        // set both channels to the same phase
+        dds_profile.update_channels(ad9959::Channel::ONE | ad9959::Channel::TWO, None, Some(local.phase_offset), None);
+
+        // aom frequency
         let ftw = pounder::dds_output::frequency_to_ftw(
             settings.aom_centre_f,
             design_parameters::DDS_SYSTEM_CLK.to_Hz() as f32,
         )
         .ok();
-        dds_profile
-            .update_channels(ad9959::Channel::ONE, ftw, None, None)
-            .write();
+        dds_profile.update_channels(ad9959::Channel::ONE, ftw, None, None);
 
         // Mix down 2 * aom centre frequency with input APD signal
         let ftw = pounder::dds_output::frequency_to_ftw(
@@ -308,8 +311,9 @@ mod app {
         )
         .ok();
         dds_profile
-            .update_channels(ad9959::Channel::TWO, ftw, None, None)
-            .write();
+            .update_channels(ad9959::Channel::TWO, ftw, None, None);
+
+        dds_profile.write();
 
         // Enable ADC/DAC events
         local.adcs.0.start();
@@ -353,7 +357,8 @@ mod app {
     ///
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
-    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, dacs, iir_state, generator, pounder], shared=[settings, signal_generator, telemetry, dds], priority=3)]
+    // todo: binds? 
+    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, dacs, iir_state, generator, pounder, phase_offset], shared=[settings, signal_generator, telemetry, dds], priority=3)]
     #[link_section = ".itcm.process"]
     fn process(c: process::Context) {
         let process::SharedResources {
@@ -370,6 +375,7 @@ mod app {
             iir_state,
             generator,
             pounder,
+            phase_offset,
         } = c.local;
 
         (settings, telemetry, signal_generator, dds).lock(
@@ -381,11 +387,12 @@ mod app {
                 let hold = settings.force_hold
                     || (digital_inputs[1] && settings.allow_hold);
 
-                // todo: replace local adc and dac with pounder adc
+                // todo: reorder dds out and adc/dac IO?
                 let mut dds_profile = dds.builder();
                 let power_in =
                     pounder.measure_power(pounder::Channel::In0).unwrap();
 
+                // todo: fence needed?
                 fence(Ordering::SeqCst);
 
                 let iir_out = settings.iir_ch[0]
@@ -395,7 +402,8 @@ mod app {
                         ch.update(state, iir_accumulator, hold)
                     });
 
-                let pow = pounder::dds_output::phase_to_pow(iir_out).ok();
+                let phase_increment_word = pounder::dds_output::phase_to_pow(iir_out).ok();
+                phase_offset = (phase_offset + phase_increment_word) & 0x3FFF;  
                 dds_profile
                     .update_channels(ad9959::Channel::ONE, None, pow, None)
                     .write();
@@ -413,75 +421,76 @@ mod app {
                 // ];
                 fence(Ordering::SeqCst);
 
-                // (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
-                //     let adc_samples = [adc0, adc1];
-                //     let dac_samples = [dac0, dac1];
+                (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
+                    let adc_samples = [adc0, adc1];
+                    let dac_samples = [dac0, dac1];
 
-                //     // Preserve instruction and data ordering w.r.t. DMA flag access.
-                //     fence(Ordering::SeqCst);
+                    // Preserve instruction and data ordering w.r.t. DMA flag access.
+                    fence(Ordering::SeqCst);
 
-                //     for channel in 0..adc_samples.len() {
-                //         adc_samples[channel]
-                //             .iter()
-                //             .zip(dac_samples[channel].iter_mut())
-                //             .zip(&mut signal_generator[channel])
-                //             .map(|((ai, di), signal)| {
-                //                 let x = f32::from(*ai as i16);
-                //                 let y = settings.iir_ch[channel]
-                //                     .iter()
-                //                     .zip(iir_state[channel].iter_mut())
-                //                     .fold(x, |yi, (ch, state)| {
-                //                         ch.update(state, yi, hold)
-                //                     });
+                    for channel in 0..adc_samples.len() {
+                        adc_samples[channel]
+                            .iter()
+                            .zip(dac_samples[channel].iter_mut())
+                            .zip(&mut signal_generator[channel])
+                            .map(|((ai, di), signal)| {
+                                let x = f32::from(*ai as i16);
+                                let y = settings.iir_ch[channel]
+                                    .iter()
+                                    .zip(iir_state[channel].iter_mut())
+                                    .fold(x, |yi, (ch, state)| {
+                                        ch.update(state, yi, hold)
+                                    });
 
-                //                 // Note(unsafe): The filter limits must ensure that the value is in range.
-                //                 // The truncation introduces 1/2 LSB distortion.
-                //                 let y: i16 = unsafe { y.to_int_unchecked() };
+                                // Note(unsafe): The filter limits must ensure that the value is in range.
+                                // The truncation introduces 1/2 LSB distortion.
+                                let y: i16 = unsafe { y.to_int_unchecked() };
 
-                //                 let y = y.saturating_add(signal);
+                                let y = y.saturating_add(signal);
 
-                //                 // Convert to DAC code
-                //                 *di = DacCode::from(y).0;
-                //             })
-                //             .last();
-                //     }
+                                // Convert to DAC code
+                                *di = DacCode::from(y).0;
+                            })
+                            .last();
+                    }
 
-                //     // Stream the data.
-                //     const N: usize = BATCH_SIZE * core::mem::size_of::<i16>();
-                //     generator.add(|buf| {
-                //         for (data, buf) in adc_samples
-                //             .iter()
-                //             .chain(dac_samples.iter())
-                //             .zip(buf.chunks_exact_mut(N))
-                //         {
-                //             let data = unsafe {
-                //                 core::slice::from_raw_parts(
-                //                     data.as_ptr() as *const MaybeUninit<u8>,
-                //                     N,
-                //                 )
-                //             };
-                //             buf.copy_from_slice(data)
-                //         }
-                //         N * 4
-                //     });
-                //     // Update telemetry measurements.
-                //     telemetry.adcs = [
-                //         AdcCode(adc_samples[0][0]),
-                //         AdcCode(adc_samples[1][0]),
-                //     ];
+                    // Stream the data.
+                    const N: usize = BATCH_SIZE * core::mem::size_of::<i16>();
+                    generator.add(|buf| {
+                        for (data, buf) in adc_samples
+                            .iter()
+                            .chain(dac_samples.iter())
+                            .zip(buf.chunks_exact_mut(N))
+                        {
+                            let data = unsafe {
+                                core::slice::from_raw_parts(
+                                    data.as_ptr() as *const MaybeUninit<u8>,
+                                    N,
+                                )
+                            };
+                            buf.copy_from_slice(data)
+                        }
+                        N * 4
+                    });
+                    // Update telemetry measurements.
+                    telemetry.adcs = [
+                        AdcCode(adc_samples[0][0]),
+                        AdcCode(adc_samples[1][0]),
+                    ];
 
-                //     telemetry.dacs = [
-                //         DacCode(dac_samples[0][0]),
-                //         DacCode(dac_samples[1][0]),
-                //     ];
+                    telemetry.dacs = [
+                        DacCode(dac_samples[0][0]),
+                        DacCode(dac_samples[1][0]),
+                    ];
 
-                //     // Preserve instruction and data ordering w.r.t. DMA flag access.
-                //     fence(Ordering::SeqCst);
-                // });
+                    // Preserve instruction and data ordering w.r.t. DMA flag access.
+                    fence(Ordering::SeqCst);
+                });
             },
         );
     }
 
+    // todo: No change?
     #[idle(shared=[network, usb_terminal])]
     fn idle(mut c: idle::Context) -> ! {
         loop {
@@ -503,6 +512,7 @@ mod app {
         }
     }
 
+    // todo: Done?
     #[task(priority = 1, local=[afes], shared=[network, settings, signal_generator, dds])]
     fn settings_update(mut c: settings_update::Context) {
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());
@@ -511,39 +521,57 @@ mod app {
         c.local.afes.0.set_gain(settings.afe[0]);
         c.local.afes.1.set_gain(settings.afe[1]);
 
+        // Update the signal generators
+        for (i, &config) in settings.signal_generator.iter().enumerate() {
+            match config.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE) {
+                Ok(config) => {
+                    c.shared
+                        .signal_generator
+                        .lock(|generator| generator[i].update_waveform(config));
+                }
+                Err(err) => log::error!(
+                    "Failed to update signal generation on DAC{}: {:?}",
+                    i,
+                    err
+                ),
+            }
+        }
+
         let ftw_ch1 = pounder::dds_output::frequency_to_ftw(
             settings.aom_centre_f,
             DDS_SYSTEM_CLK.to_Hz() as f32,
-        ).ok();
+        )
+        .ok();
         let ftw_ch2 = pounder::dds_output::frequency_to_ftw(
             2.0 * settings.aom_centre_f,
             DDS_SYSTEM_CLK.to_Hz() as f32,
-        ).ok();
+        )
+        .ok();
         if ftw_ch1.is_none() || ftw_ch2.is_none() {
             log::warn!("Failed to set desired aom centre frequency");
-        }
-
-        c.shared.dds.lock(|dds| {
-            let mut dds_profile = dds.builder();
-            dds_profile.update_channels(
+        } else {
+            c.shared.dds.lock(|dds| {
+                let mut dds_profile = dds.builder();
+                dds_profile.update_channels(
                     ad9959::Channel::ONE,
                     ftw_ch1,
                     None,
                     None,
                 );
-            dds_profile.update_channels(
+                dds_profile.update_channels(
                     ad9959::Channel::TWO,
                     ftw_ch2,
                     None,
                     None,
                 );
-            dds_profile.write();
-        });
-
+                dds_profile.write();
+            });
+        }
         let target = settings.stream_target.into();
         c.shared.network.lock(|net| net.direct_stream(target));
     }
 
+    // todo: fix pounder telemetry structures -- non-critical
     #[task(priority = 1, shared=[network, settings, telemetry], local=[cpu_temp_sensor])]
     fn telemetry(mut c: telemetry::Context) {
         let telemetry: TelemetryBuffer =
@@ -567,6 +595,8 @@ mod app {
             .unwrap();
     }
 
+
+    // todo: no change
     #[task(priority = 1, shared=[usb_terminal])]
     fn usb(mut c: usb::Context) {
         // Handle the USB serial terminal.
