@@ -252,6 +252,8 @@ def _main():
                         help="The channel maximum output (%(default)s V)")
     parser.add_argument("--y-offset", type=float, default=0,
                         help="The channel output offset (%(default)s V)")
+    parser.add_argument("--aom-frequency", "-f", type=float, default=80e3,
+                        help="Aom centre frequency (%(default)s Hz) ")
 
     # Next, add subparsers and their arguments.
     subparsers = parser.add_subparsers(
@@ -305,6 +307,7 @@ def _main():
             "y_offset": stabilizer.voltage_to_machine_units(
                 args.y_offset + forward_gain * args.x_offset)
         })
+        await interface.set(f"/aom_centre_f", args.aom_frequency)
 
     asyncio.run(configure())
 

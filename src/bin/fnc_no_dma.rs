@@ -30,20 +30,23 @@
 #![no_main]
 
 use core::mem::MaybeUninit;
-use core::sync::atomic::{fence, Ordering};
+// use core::sync::atomic::{fence, Ordering};
 
 use fugit::ExtU64;
-use mutex_trait::prelude::*;
+// use mutex_trait::prelude::*;
 
 use idsp::iir;
 
 use stabilizer::{
     hardware::{
         self,
-        adc::{Adc0Input, Adc1Input, AdcCode},
+        // adc::{Adc0Input, Adc1Input},
         afe::Gain,
-        hal, pounder,
+        // dac::{Dac0Output, Dac1Output, DacCode},
+        hal,
+        pounder::{self, rf_power::PowerMeasurementInterface},
         serial_terminal::SerialTerminal,
+        // signal_generator::{self, SignalGenerator},
         timers::SamplingTimer,
         DigitalInput0, DigitalInput1, SystemTimer, Systick, AFE0, AFE1,
     },
@@ -61,11 +64,11 @@ const SCALE: f32 = i16::MAX as _;
 const IIR_CASCADE_LENGTH: usize = 1;
 
 // The number of samples in each batch process
-const BATCH_SIZE: usize = 1;
+const BATCH_SIZE: usize = 8;
 
 // The logarithm of the number of 100MHz timer ticks between each sample. With a value of 2^7 =
 // 128, there is 1.28uS per sample, corresponding to a sampling frequency of 781.25 KHz.
-const SAMPLE_TICKS_LOG2: u8 = 9;
+const SAMPLE_TICKS_LOG2: u8 = 7;
 const SAMPLE_TICKS: u32 = 1 << SAMPLE_TICKS_LOG2;
 // const SAMPLE_PERIOD: f32 =
 //     SAMPLE_TICKS as f32 * hardware::design_parameters::TIMER_PERIOD;
@@ -162,6 +165,8 @@ impl Default for Settings {
             // The default telemetry period in seconds.
             telemetry_period: 10,
 
+            // signal_generator: [signal_generator::BasicConfig::default(); 2],
+
             stream_target: StreamTarget::default(),
 
             aom_centre_f: 50_000.0,
@@ -171,7 +176,10 @@ impl Default for Settings {
 
 #[rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, LTDC, SDMMC])]
 mod app {
-    use stabilizer::hardware::design_parameters::{self, DDS_SYSTEM_CLK};
+    use stabilizer::hardware::{
+        design_parameters::{self, DDS_SYSTEM_CLK},
+        // pounder::dds_output::{self, ProfileBuilder},
+    };
 
     use super::*;
 
@@ -185,6 +193,7 @@ mod app {
 
         settings: Settings,
         telemetry: TelemetryBuffer,
+        // signal_generator: [SignalGenerator; 2],
 
         dds: pounder::dds_output::DdsOutput,
     }
@@ -194,10 +203,10 @@ mod app {
         sampling_timer: SamplingTimer,
         digital_inputs: (DigitalInput0, DigitalInput1),
         afes: (AFE0, AFE1),
-        adcs: (Adc0Input, Adc1Input),
         iir_state: [[iir::Vec5<f32>; IIR_CASCADE_LENGTH]; 2],
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
+        pounder: pounder::PounderDevices,
         timestamper: pounder::timestamp::Timestamper,
         phase_offset: u16,
         has_run: bool,
@@ -239,17 +248,29 @@ mod app {
             network,
             settings,
             telemetry: TelemetryBuffer::default(),
+            // signal_generator: [
+            //     SignalGenerator::new(
+            //         settings.signal_generator[0]
+            //             .try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
+            //             .unwrap(),
+            //     ),
+            //     SignalGenerator::new(
+            //         settings.signal_generator[1]
+            //             .try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
+            //             .unwrap(),
+            //     ),
+            // ],
             dds: pounder.dds_output,
         };
 
-        let mut local = Local {
+        let local = Local {
             sampling_timer: stabilizer.adc_dac_timer,
             digital_inputs: stabilizer.digital_inputs,
             afes: stabilizer.afes,
-            adcs: stabilizer.adcs,
             iir_state: [[[0.; 5]; IIR_CASCADE_LENGTH]; 2],
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
+            pounder: pounder.pounder,
             timestamper: pounder.timestamper,
             phase_offset: 0x00,
             has_run: false,
@@ -283,16 +304,14 @@ mod app {
 
         dds_profile.write();
 
-        // Enable ADC/DAC events
-        local.adcs.0.start();
-        local.adcs.1.start();
-
         // Spawn a settings update for default settings.
         settings_update::spawn().unwrap();
         telemetry::spawn().unwrap();
         ethernet_link::spawn().unwrap();
         usb::spawn().unwrap();
         start::spawn_after(100.millis()).unwrap();
+
+        // process::spawn_after(20.secs()).unwrap();
 
         (shared, local, init::Monotonics(stabilizer.systick))
     }
@@ -324,7 +343,7 @@ mod app {
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
     // todo: binds?
-    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, iir_state, generator, phase_offset], shared=[settings, telemetry, dds], priority=3)]
+    #[task(local=[digital_inputs, iir_state, generator, pounder, phase_offset, has_run], shared=[settings, telemetry, dds], priority=3)]
     #[link_section = ".itcm.process"]
     fn process(c: process::Context) {
         let process::SharedResources {
@@ -335,73 +354,106 @@ mod app {
 
         let process::LocalResources {
             digital_inputs,
-            adcs: (adc0, adc1),
             iir_state,
             generator,
+            pounder,
             phase_offset,
+            has_run,
         } = c.local;
 
-        (settings, telemetry, dds).lock(|settings, telemetry, dds| {
-            let digital_inputs =
-                [digital_inputs.0.is_high(), digital_inputs.1.is_high()];
-            telemetry.digital_inputs = digital_inputs;
+        if ! *has_run {
+            // *has_run = true;
+            log::warn!("a");
+        }
 
-            let hold = settings.force_hold
-                || (digital_inputs[1] && settings.allow_hold);
+        (settings, telemetry, dds).lock(
+            |settings, telemetry, dds| {
+                let digital_inputs =
+                    [digital_inputs.0.is_high(), digital_inputs.1.is_high()];
+                telemetry.digital_inputs = digital_inputs;
 
-            let mut dds_profile = dds.builder();
+                let hold = settings.force_hold
+                    || (digital_inputs[1] && settings.allow_hold);
 
-            let power_in: f32 = 0.0;
-            (adc0, adc1).lock(|adc0, adc1| {
-                let adc_samples = [adc0, adc1];
+                // todo: use batch size 1 DMA or read individually?
+                let mut dds_profile = dds.builder();
+                let power_in =
+                    pounder.sample_converter(pounder::Channel::In0).unwrap();
 
-                // Preserve instruction and data ordering w.r.t. DMA flag access.
-                fence(Ordering::SeqCst);
-
-                // for 0 in 0..adc_samples.len() {
-                adc_samples[0]
+                let iir_out = settings.iir_ch[0]
                     .iter()
-                    .map(|ai| {
-                        let power_in = f32::from(*ai as i16);
+                    .zip(iir_state[0].iter_mut())
+                    .fold(power_in, |iir_accumulator, (ch, state)| {
+                        ch.update(state, iir_accumulator, hold)
+                    });
 
-                        let iir_out = settings.iir_ch[0]
-                            .iter()
-                            .zip(iir_state[0].iter_mut())
-                            .fold(power_in, |iir_accumulator, (ch, state)| {
-                                ch.update(state, iir_accumulator, hold)
-                            });
+                *phase_offset = ((iir_out * (1 << 14) as f32) as u16
+                    + *phase_offset)
+                    & 0x3FFF;
+                // let phase_increment_word = pounder::dds_output::phase_to_pow(iir_out, true).ok();
+                // phase_offset = (phase_offset + phase_increment_word) & 0x3FFF;
+                dds_profile.update_channels(
+                    ad9959::Channel::ONE,
+                    None,
+                    Some(*phase_offset),
+                    None,
+                );
+                dds_profile.update_channels(
+                    ad9959::Channel::TWO,
+                    None,
+                    Some(2 * (*phase_offset) & 0x3FFF),
+                    None,
+                );
 
-                        *phase_offset = (((iir_out * (1 << 14) as f32)
-                            as i16
-                            & 0x3FFFi16)
-                            as u16
-                            + *phase_offset)
-                            & 0x3FFFu16;
+                // dds_profile.write();
 
-                        // if !*has_run {
-                        //     log::warn!("{:#x}", *phase_offset);
-                        //     *has_run = true;
-                        // }
+                // todo: fix pounder telemetry
+                // Update telemetry measurements.
+                // telemetry.adcs = [
+                //     power_in,
+                //     0.0,
+                // ];
 
-                        dds_profile.update_channels(
-                            ad9959::Channel::ONE,
-                            None,
-                            Some(*phase_offset),
-                            None,
-                        );
-                        dds_profile.update_channels(
-                            ad9959::Channel::TWO,
-                            None,
-                            Some(2 * (*phase_offset) & 0x3FFF),
-                            None,
-                        );
+                // telemetry.dacs = [
+                //     iir_out,
+                //     0.0,
+                // ];
+                // fence(Ordering::SeqCst);
 
-                        dds_profile.write();
-                    })
-                    .last();
-                // }
+                // (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
+                //     let adc_samples = [adc0, adc1];
+                //     let dac_samples = [dac0, dac1];
 
-                // // Stream the data.
+                //     // Preserve instruction and data ordering w.r.t. DMA flag access.
+                //     fence(Ordering::SeqCst);
+
+                //     for channel in 0..adc_samples.len() {
+                //         adc_samples[channel]
+                //             .iter()
+                //             .zip(dac_samples[channel].iter_mut())
+                //             .zip(&mut signal_generator[channel])
+                //             .map(|((ai, di), signal)| {
+                //                 let x = f32::from(*ai as i16);
+                //                 let y = settings.iir_ch[channel]
+                //                     .iter()
+                //                     .zip(iir_state[channel].iter_mut())
+                //                     .fold(x, |yi, (ch, state)| {
+                //                         ch.update(state, yi, hold)
+                //                     });
+
+                //                 // Note(unsafe): The filter limits must ensure that the value is in range.
+                //                 // The truncation introduces 1/2 LSB distortion.
+                //                 let y: i16 = unsafe { y.to_int_unchecked() };
+
+                //                 let y = y.saturating_add(signal);
+
+                //                 // Convert to DAC code
+                //                 *di = DacCode::from(y).0;
+                //             })
+                //             .last();
+                //     }
+
+                // Stream the data.
                 // const N: usize = BATCH_SIZE * core::mem::size_of::<i16>();
                 // generator.add(|buf| {
                 //     for (data, buf) in adc_samples
@@ -422,28 +474,22 @@ mod app {
 
                 generator.add(|buf| {
                     let power_data = unsafe {
-                        core::slice::from_raw_parts(
-                            power_in.to_ne_bytes().as_ptr()
-                                as *const MaybeUninit<u8>,
-                            4,
-                        )
+                        core::slice::from_raw_parts(power_in.to_ne_bytes().as_ptr() as *const MaybeUninit<u8>, 4)
                     };
                     let phase_data = unsafe {
-                        core::slice::from_raw_parts(
-                            phase_offset.to_ne_bytes().as_ptr()
-                                as *const MaybeUninit<u8>,
-                            2,
-                        )
+                        core::slice::from_raw_parts(phase_offset.to_ne_bytes().as_ptr() as *const MaybeUninit<u8>, 2)
                     };
 
                     buf[0..4].copy_from_slice(power_data);
                     buf[4..6].copy_from_slice(phase_data);
-
+                    
                     6 as usize
                 });
                 // // Update telemetry measurements.
-                telemetry.adcs =
-                    [AdcCode(adc_samples[0][0]), AdcCode(adc_samples[0][0])];
+                // telemetry.adcs = [
+                //     AdcCode(adc_samples[0][0]),
+                //     AdcCode(adc_samples[1][0]),
+                // ];
 
                 // telemetry.dacs = [
                 //     DacCode(dac_samples[0][0]),
@@ -451,9 +497,17 @@ mod app {
                 // ];
 
                 // // Preserve instruction and data ordering w.r.t. DMA flag access.
-                fence(Ordering::SeqCst);
-            });
-        });
+                // fence(Ordering::SeqCst);
+                // });
+            },
+        );
+
+        if ! *has_run {
+            *has_run = true;
+            log::warn!("b");
+        }
+
+        process::spawn_after(10.micros()).unwrap();
     }
 
     // todo: No change?
@@ -486,6 +540,22 @@ mod app {
 
         c.local.afes.0.set_gain(settings.afe[0]);
         c.local.afes.1.set_gain(settings.afe[1]);
+
+        // Update the signal generators
+        // for (i, &config) in settings.signal_generator.iter().enumerate() {
+        //     match config.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE) {
+        //         Ok(config) => {
+        //             c.shared
+        //                 .signal_generator
+        //                 .lock(|generator| generator[i].update_waveform(config));
+        //         }
+        //         Err(err) => log::error!(
+        //             "Failed to update signal generation on DAC{}: {:?}",
+        //             i,
+        //             err
+        //         ),
+        //     }
+        // }
 
         let ftw_ch1 = pounder::dds_output::frequency_to_ftw(
             settings.aom_centre_f,

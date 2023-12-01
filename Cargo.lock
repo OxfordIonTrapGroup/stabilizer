@@ -671,7 +671,7 @@ checksum = "de3145af08024dea9fa9914f381a17b8fc6034dfb00f3a84013f7ff43f29ed4c"
 [[package]]
 name = "pca9539"
 version = "0.2.1"
-source = "git+https://github.com/OxfordIonTrapGroup/rt-PCA9539.git?branch=no_std#7185b911ef9e9dfb8112e094cbc1b3469778bdae"
+source = "git+https://github.com/OxfordIonTrapGroup/rt-PCA9539.git?branch=no_std#baf53013648c342c4df571535bf675a890d9eb99"
 dependencies = [
  "bitmaps",
  "embedded-hal",
