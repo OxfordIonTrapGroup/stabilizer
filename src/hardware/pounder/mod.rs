@@ -25,6 +25,7 @@ pub enum Error {
     Adc,
     InvalidState,
     UnsetExpander,
+    NotImplemented,
 }
 
 impl From<hal::xspi::QspiError> for Error {
@@ -338,10 +339,10 @@ impl PounderDevices {
         for pin in enum_iterator::all::<GpioPin>() {
             devices
                 .gpio_expander
-                .set_gpio_pin(pin, io_expander::Level::Low)?;
+                .set_level(pin, io_expander::Level::Low)?;
             devices
                 .gpio_expander
-                .set_gpio_mode(pin, io_expander::Mode::Output)?;
+                .set_direction(pin, io_expander::Direction::Output)?;
         }
         devices.reset_attenuators().unwrap();
         Ok(devices)
@@ -366,7 +367,7 @@ impl PounderDevices {
         pin: GpioPin,
         level: io_expander::Level,
     ) -> Result<(), Error> {
-        self.gpio_expander.set_gpio_pin(pin.into(), level)
+        self.gpio_expander.set_level(pin.into(), level)
     }
 
     /// Select external reference clock input.

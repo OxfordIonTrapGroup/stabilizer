@@ -70,8 +70,8 @@ smoltcp-nal = { version = "0.4.1", features = ["shared-stack"]}
 bbqueue = "0.5"
 postcard = "1"
 # Enable exactly one of these two GPIO expanders on Pounder
-mcp230xx = {version = "1.0", optional = true}
-pca9539 = {git = "https://github.com/OxfordIonTrapGroup/rt-PCA9539.git", branch = "no_std", optional = true}
+mcp230xx = {version = "1.0"}
+pca9539 = {git = "https://github.com/OxfordIonTrapGroup/rt-PCA9539.git", branch = "no_std"}
 cfg-if = "1.0.0"
 
 [dependencies.stm32h7xx-hal]
@@ -81,8 +81,8 @@ features = ["stm32h743v", "rt", "ethernet", "xspi", "usb_hs"]
 [features]
 nightly = [ ]
 default = ["pounder_v1_2"]
-mcp23017 = ["dep:mcp230xx"]
-pca9539 = ["dep:pca9539"]
+mcp23017 = []
+pca9539 = []
 pounder_v1_0 = ["mcp23017"]
 pounder_v1_1 = ["mcp23017"]
 pounder_v1_2 = ["pca9539"]

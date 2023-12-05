@@ -25,7 +25,7 @@
 //! ## Livestreaming
 //! This application streams raw ADC and DAC data over UDP. Refer to
 //! [stabilizer::net::data_stream](../stabilizer/net/data_stream/index.html) for more information.
-// #![deny(warnings)]
+#![deny(warnings)]
 #![no_std]
 #![no_main]
 

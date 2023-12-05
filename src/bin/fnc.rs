@@ -25,7 +25,7 @@
 //! ## Livestreaming
 //! This application streams raw ADC and DAC data over UDP. Refer to
 //! [stabilizer::net::data_stream](../stabilizer/net/data_stream/index.html) for more information.
-// #![deny(warnings)]
+#![deny(warnings)]
 #![no_std]
 #![no_main]
 
@@ -200,7 +200,6 @@ mod app {
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
         timestamper: pounder::timestamp::Timestamper,
         phase_offset: u16,
-        has_run: bool,
     }
 
     #[init]
@@ -252,7 +251,6 @@ mod app {
             cpu_temp_sensor: stabilizer.temperature_sensor,
             timestamper: pounder.timestamper,
             phase_offset: 0x00,
-            has_run: false,
         };
 
         let mut dds_profile = shared.dds.builder();
@@ -377,11 +375,6 @@ mod app {
                             as u16
                             + *phase_offset)
                             & 0x3FFFu16;
-
-                        // if !*has_run {
-                        //     log::warn!("{:#x}", *phase_offset);
-                        //     *has_run = true;
-                        // }
 
                         dds_profile.update_channels(
                             ad9959::Channel::ONE,
