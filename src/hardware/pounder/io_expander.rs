@@ -5,8 +5,8 @@ use enum_iterator::Sequence;
 use mcp230xx::{Mcp23017, Mcp230xx};
 use pca9539::expander::PCA9539;
 
-pub const IO_EXPANDER_MCP23017_ADDRESS: u8 = 0x20;
-pub const IO_EXPANDER_PCA9539_ADDRESS: u8 = 0x74;
+const IO_EXPANDER_MCP23017_ADDRESS: u8 = 0x20;
+const IO_EXPANDER_PCA9539_ADDRESS: u8 = 0x74;
 
 #[derive(Debug, Copy, Clone, Sequence)]
 pub enum GpioPin {
@@ -182,10 +182,19 @@ pub enum IoExpander {
 
 impl IoExpander {
     pub fn new(i2c: I2c1Proxy) -> Self {
-        match Mcp230xx::new(i2c.clone(), IO_EXPANDER_MCP23017_ADDRESS) {
-            Ok(expander) => Self::Mcp23017(expander),
-            _ => Self::Pca9539(PCA9539::new(i2c, IO_EXPANDER_PCA9539_ADDRESS)),
-        }
+        let mut expander_mcp23017 =
+            Mcp230xx::new(i2c.clone(), IO_EXPANDER_MCP23017_ADDRESS).unwrap();
+        expander_mcp23017
+            .set_gpio(GpioPin::Led4Green.into(), Level::High.into())
+            .map_or_else(
+                |_| {
+                    Self::Pca9539(PCA9539::new(
+                        i2c,
+                        IO_EXPANDER_PCA9539_ADDRESS,
+                    ))
+                },
+                |_| Self::Mcp23017(expander_mcp23017),
+            )
     }
 
     pub fn set_level(
@@ -221,7 +230,9 @@ impl IoExpander {
         }
     }
 
-    pub fn get_pca9539_handle(&mut self) -> Result<&mut PCA9539<I2c1Proxy>, Error> {
+    pub fn get_pca9539_handle(
+        &mut self,
+    ) -> Result<&mut PCA9539<I2c1Proxy>, Error> {
         match self {
             Self::Mcp23017(_) => Err(Error::NotImplemented),
             Self::Pca9539(expander) => Ok(expander),

@@ -299,10 +299,6 @@ mod app {
     fn start(c: start::Context) {
         // Start sampling ADCs and DACs.
         c.local.sampling_timer.start();
-
-        // todo: check if needed
-        // Start sampling pounder ADCs and DACs
-        c.local.timestamper.start();
     }
 
     /// Main DSP processing routine.
@@ -356,7 +352,6 @@ mod app {
                 // Preserve instruction and data ordering w.r.t. DMA flag access.
                 fence(Ordering::SeqCst);
 
-                // for 0 in 0..adc_samples.len() {
                 adc_samples[0]
                     .iter()
                     .map(|ai| {
@@ -369,8 +364,7 @@ mod app {
                                 ch.update(state, iir_accumulator, hold)
                             });
 
-                        *phase_offset = (((iir_out * (1 << 14) as f32)
-                            as i16
+                        *phase_offset = (((iir_out * (1 << 14) as f32) as i16
                             & 0x3FFFi16)
                             as u16
                             + *phase_offset)
@@ -392,26 +386,6 @@ mod app {
                         dds_profile.write();
                     })
                     .last();
-                // }
-
-                // // Stream the data.
-                // const N: usize = BATCH_SIZE * core::mem::size_of::<i16>();
-                // generator.add(|buf| {
-                //     for (data, buf) in adc_samples
-                //         .iter()
-                //         .chain(dac_samples.iter())
-                //         .zip(buf.chunks_exact_mut(N))
-                //     {
-                //         let data = unsafe {
-                //             core::slice::from_raw_parts(
-                //                 data.as_ptr() as *const MaybeUninit<u8>,
-                //                 N,
-                //             )
-                //         };
-                //         buf.copy_from_slice(data)
-                //     }
-                //     N * 4
-                // });
 
                 generator.add(|buf| {
                     let power_data = unsafe {
@@ -434,16 +408,11 @@ mod app {
 
                     6 as usize
                 });
-                // // Update telemetry measurements.
+
+                // Update telemetry measurements.
                 telemetry.adcs =
                     [AdcCode(adc_samples[0][0]), AdcCode(adc_samples[0][0])];
 
-                // telemetry.dacs = [
-                //     DacCode(dac_samples[0][0]),
-                //     DacCode(dac_samples[1][0]),
-                // ];
-
-                // // Preserve instruction and data ordering w.r.t. DMA flag access.
                 fence(Ordering::SeqCst);
             });
         });

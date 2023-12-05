@@ -888,7 +888,7 @@ pub fn setup(
 
             let reset_pin;
             let pounder_pins;
-            
+
             #[cfg(feature = "pounder_v1_2")]
             {
                 pounder_pins = pounder_devices.gpio_expander.get_pca9539_handle().expect("PCA9539 not found on Pounder 1.2. MCP23017 unsupported").pins();
