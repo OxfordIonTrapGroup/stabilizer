@@ -216,7 +216,7 @@ def pid_coefficients(args):
     b = [i/a[0] for i in b]
     a = [i/a[0] for i in a]
     assert a[0] == 1
-    return b + [-ai for ai in a[1:]]
+    return b + [ai for ai in a[1:]]
 
 
 def _main():
