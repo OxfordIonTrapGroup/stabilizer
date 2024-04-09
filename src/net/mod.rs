@@ -17,6 +17,7 @@ use crate::hardware::{
     metadata::ApplicationMetadata, EthernetPhy, NetworkManager, NetworkStack,
     SystemTimer,
 };
+use crate::settings::NetSettings;
 use data_stream::{DataStream, FrameGenerator};
 use network_processor::NetworkProcessor;
 use telemetry::TelemetryClient;
@@ -87,8 +88,7 @@ where
     /// * `phy` - The ethernet PHY connecting the network.
     /// * `clock` - A `SystemTimer` implementing `Clock`.
     /// * `app` - The name of the application.
-    /// * `broker` - The domain name of the MQTT broker to use.
-    /// * `id` - The MQTT client ID base to use.
+    /// * `net_settings` - The network-specific settings to use for the application.
     /// * `metadata` - The application metadata
     ///
     /// # Returns
@@ -98,8 +98,7 @@ where
         phy: EthernetPhy,
         clock: SystemTimer,
         app: &str,
-        broker: &str,
-        id: &str,
+        net_settings: &NetSettings,
         metadata: &'static ApplicationMetadata,
     ) -> Self {
         let stack_manager =
@@ -109,14 +108,14 @@ where
         let processor =
             NetworkProcessor::new(stack_manager.acquire_stack(), phy);
 
-        let prefix = get_device_prefix(app, id);
+        let prefix = get_device_prefix(app, &net_settings.id);
 
         let store =
             cortex_m::singleton!(: MqttStorage = MqttStorage::default())
                 .unwrap();
 
         let named_broker = miniconf::minimq::broker::NamedBroker::new(
-            broker,
+            &net_settings.broker,
             stack_manager.acquire_stack(),
         )
         .unwrap();
@@ -124,18 +123,17 @@ where
             stack_manager.acquire_stack(),
             &prefix,
             clock,
-            S::default(),
             miniconf::minimq::ConfigBuilder::new(
                 named_broker,
                 &mut store.settings,
             )
-            .client_id(&get_client_id(id, "settings"))
+            .client_id(&get_client_id(&net_settings.id, "settings"))
             .unwrap(),
         )
         .unwrap();
 
         let named_broker = minimq::broker::NamedBroker::new(
-            broker,
+            &net_settings.broker,
             stack_manager.acquire_stack(),
         )
         .unwrap();
@@ -146,7 +144,7 @@ where
                 // The telemetry client doesn't receive any messages except MQTT control packets.
                 // As such, we don't need much of the buffer for RX.
                 .rx_buffer(minimq::config::BufferConfig::Maximum(100))
-                .client_id(&get_client_id(id, "tlm"))
+                .client_id(&get_client_id(&net_settings.id, "tlm"))
                 .unwrap(),
         );
 
@@ -192,7 +190,7 @@ where
     /// # Returns
     /// An indication if any of the network users indicated a state change.
     /// The SettingsChanged option contains the path of the settings that changed.
-    pub fn update(&mut self) -> NetworkState {
+    pub fn update(&mut self, settings: &mut S) -> NetworkState {
         // Update the MQTT clients.
         self.telemetry.update();
 
@@ -209,11 +207,11 @@ where
 
         // `settings_path` has to be at least as large as `miniconf::mqtt_client::MAX_TOPIC_LENGTH`.
         let mut settings_path: String<128> = String::new();
-        match self.miniconf.handled_update(|path, old, new| {
+        let res = self.miniconf.handled_update(settings, |path, _old, _new| {
             settings_path = path.into();
-            *old = new.clone();
             Result::<(), &'static str>::Ok(())
-        }) {
+        });
+        match res {
             Ok(true) => NetworkState::SettingsChanged(settings_path),
             _ => poll_result,
         }

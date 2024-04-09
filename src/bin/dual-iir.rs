@@ -16,7 +16,7 @@
 //! * Derivative kick avoidance
 //!
 //! ## Settings
-//! Refer to the [Settings] structure for documentation of run-time configurable settings for this
+//! Refer to the [DualIir] structure for documentation of run-time configurable settings for this
 //! application.
 //!
 //! ## Telemetry
@@ -25,14 +25,16 @@
 //! ## Livestreaming
 //! This application streams raw ADC and DAC data over UDP. Refer to
 //! [stabilizer::net::data_stream](../stabilizer/net/data_stream/index.html) for more information.
-#![deny(warnings)]
 #![no_std]
 #![no_main]
 
 use core::mem::MaybeUninit;
 use core::sync::atomic::{fence, Ordering};
+use serde::{Deserialize, Serialize};
 
-use fugit::ExtU64;
+use rtic_monotonics::Monotonic;
+
+use fugit::ExtU32;
 use mutex_trait::prelude::*;
 
 use idsp::iir;
@@ -55,6 +57,7 @@ use stabilizer::{
         telemetry::{Telemetry, TelemetryBuffer},
         NetworkState, NetworkUsers,
     },
+    settings::NetSettings,
 };
 
 const SCALE: f32 = i16::MAX as _;
@@ -72,8 +75,39 @@ const SAMPLE_TICKS: u32 = 1 << SAMPLE_TICKS_LOG2;
 const SAMPLE_PERIOD: f32 =
     SAMPLE_TICKS as f32 * hardware::design_parameters::TIMER_PERIOD;
 
-#[derive(Clone, Copy, Debug, Tree)]
+#[derive(Clone, Debug, Tree)]
 pub struct Settings {
+    #[tree(depth(3))]
+    pub dual_iir: DualIir,
+
+    #[tree(depth(1))]
+    pub net: NetSettings,
+}
+
+impl stabilizer::settings::AppSettings for Settings {
+    fn new(net: NetSettings) -> Self {
+        Self {
+            net,
+            dual_iir: DualIir::default(),
+        }
+    }
+
+    fn net(&self) -> &NetSettings {
+        &self.net
+    }
+}
+
+impl serial_settings::Settings<4> for Settings {
+    fn reset(&mut self) {
+        *self = Self {
+            dual_iir: DualIir::default(),
+            net: NetSettings::new(self.net.mac),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Tree, Serialize, Deserialize)]
+pub struct DualIir {
     /// Configure the Analog Front End (AFE) gain.
     ///
     /// # Path
@@ -147,7 +181,7 @@ pub struct Settings {
     signal_generator: [signal_generator::BasicConfig; 2],
 }
 
-impl Default for Settings {
+impl Default for DualIir {
     fn default() -> Self {
         let mut i = iir::Biquad::IDENTITY;
         i.set_min(-SCALE);
@@ -180,22 +214,20 @@ impl Default for Settings {
 mod app {
     use super::*;
 
-    #[monotonic(binds = SysTick, default = true, priority = 2)]
-    type Monotonic = Systick;
-
     #[shared]
     struct Shared {
         usb: UsbDevice,
-        network: NetworkUsers<Settings, Telemetry, 3>,
+        network: NetworkUsers<DualIir, Telemetry, 3>,
 
         settings: Settings,
+        active_settings: DualIir,
         telemetry: TelemetryBuffer,
         signal_generator: [SignalGenerator; 2],
     }
 
     #[local]
     struct Local {
-        usb_terminal: SerialTerminal,
+        usb_terminal: SerialTerminal<Settings, 4>,
         sampling_timer: SamplingTimer,
         digital_inputs: (DigitalInput0, DigitalInput1),
         afes: (AFE0, AFE1),
@@ -207,11 +239,11 @@ mod app {
     }
 
     #[init]
-    fn init(c: init::Context) -> (Shared, Local, init::Monotonics) {
-        let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
+    fn init(c: init::Context) -> (Shared, Local) {
+        let clock = SystemTimer::new(|| Systick::now().ticks());
 
         // Configure the microcontroller
-        let (stabilizer, _pounder) = hardware::setup::setup(
+        let (stabilizer, _pounder) = hardware::setup::setup::<Settings, 4>(
             c.core,
             c.device,
             clock,
@@ -219,38 +251,35 @@ mod app {
             SAMPLE_TICKS,
         );
 
-        let settings = stabilizer.usb_serial.settings();
         let mut network = NetworkUsers::new(
             stabilizer.net.stack,
             stabilizer.net.phy,
             clock,
             env!("CARGO_BIN_NAME"),
-            &settings.broker,
-            &settings.id,
+            &stabilizer.settings.net,
             stabilizer.metadata,
         );
 
         let generator = network.configure_streaming(StreamFormat::AdcDacData);
 
-        let settings = Settings::default();
-
         let shared = Shared {
             usb: stabilizer.usb,
             network,
-            settings,
+            active_settings: stabilizer.settings.dual_iir.clone(),
             telemetry: TelemetryBuffer::default(),
             signal_generator: [
                 SignalGenerator::new(
-                    settings.signal_generator[0]
+                    stabilizer.settings.dual_iir.signal_generator[0]
                         .try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
                         .unwrap(),
                 ),
                 SignalGenerator::new(
-                    settings.signal_generator[1]
+                    stabilizer.settings.dual_iir.signal_generator[1]
                         .try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
                         .unwrap(),
                 ),
             ],
+            settings: stabilizer.settings,
         };
 
         let mut local = Local {
@@ -276,13 +305,14 @@ mod app {
         telemetry::spawn().unwrap();
         ethernet_link::spawn().unwrap();
         usb::spawn().unwrap();
-        start::spawn_after(100.millis()).unwrap();
+        start::spawn().unwrap();
 
-        (shared, local, init::Monotonics(stabilizer.systick))
+        (shared, local)
     }
 
     #[task(priority = 1, local=[sampling_timer])]
-    fn start(c: start::Context) {
+    async fn start(c: start::Context) {
+        Systick::delay(100.millis()).await;
         // Start sampling ADCs and DACs.
         c.local.sampling_timer.start();
     }
@@ -303,13 +333,14 @@ mod app {
     ///
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
-    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, dacs, iir_state, generator], shared=[settings, signal_generator, telemetry], priority=3)]
+    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, dacs, iir_state, generator], shared=[active_settings, signal_generator, telemetry], priority=3)]
     #[link_section = ".itcm.process"]
     fn process(c: process::Context) {
         let process::SharedResources {
-            settings,
+            active_settings,
             telemetry,
             signal_generator,
+            ..
         } = c.shared;
 
         let process::LocalResources {
@@ -318,9 +349,10 @@ mod app {
             dacs: (dac0, dac1),
             iir_state,
             generator,
+            ..
         } = c.local;
 
-        (settings, telemetry, signal_generator).lock(
+        (active_settings, telemetry, signal_generator).lock(
             |settings, telemetry, signal_generator| {
                 let digital_inputs =
                     [digital_inputs.0.is_high(), digital_inputs.1.is_high()];
@@ -404,10 +436,12 @@ mod app {
         );
     }
 
-    #[idle(shared=[network, usb])]
+    #[idle(shared=[network, settings, usb])]
     fn idle(mut c: idle::Context) -> ! {
         loop {
-            match c.shared.network.lock(|net| net.update()) {
+            match (&mut c.shared.network, &mut c.shared.settings)
+                .lock(|net, settings| net.update(&mut settings.dual_iir))
+            {
                 NetworkState::SettingsChanged(_path) => {
                     settings_update::spawn().unwrap()
                 }
@@ -425,74 +459,91 @@ mod app {
         }
     }
 
-    #[task(priority = 1, local=[afes], shared=[network, settings, signal_generator])]
-    fn settings_update(mut c: settings_update::Context) {
-        let settings = c.shared.network.lock(|net| *net.miniconf.settings());
-        c.shared.settings.lock(|current| *current = settings);
+    #[task(priority = 1, local=[afes], shared=[network, settings, active_settings, signal_generator])]
+    async fn settings_update(mut c: settings_update::Context) {
+        c.shared.settings.lock(|settings| {
+            c.local.afes.0.set_gain(settings.dual_iir.afe[0]);
+            c.local.afes.1.set_gain(settings.dual_iir.afe[1]);
 
-        c.local.afes.0.set_gain(settings.afe[0]);
-        c.local.afes.1.set_gain(settings.afe[1]);
-
-        // Update the signal generators
-        for (i, &config) in settings.signal_generator.iter().enumerate() {
-            match config.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE) {
-                Ok(config) => {
-                    c.shared
-                        .signal_generator
-                        .lock(|generator| generator[i].update_waveform(config));
+            // Update the signal generators
+            for (i, &config) in
+                settings.dual_iir.signal_generator.iter().enumerate()
+            {
+                match config.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
+                {
+                    Ok(config) => {
+                        c.shared.signal_generator.lock(|generator| {
+                            generator[i].update_waveform(config)
+                        });
+                    }
+                    Err(err) => log::error!(
+                        "Failed to update signal generation on DAC{}: {:?}",
+                        i,
+                        err
+                    ),
                 }
-                Err(err) => log::error!(
-                    "Failed to update signal generation on DAC{}: {:?}",
-                    i,
-                    err
-                ),
             }
-        }
 
-        let target = settings.stream_target.into();
-        c.shared.network.lock(|net| net.direct_stream(target));
+            let target = settings.dual_iir.stream_target.into();
+            c.shared.network.lock(|net| net.direct_stream(target));
+
+            c.shared
+                .active_settings
+                .lock(|current| *current = settings.dual_iir.clone());
+        });
     }
 
     #[task(priority = 1, shared=[network, settings, telemetry], local=[cpu_temp_sensor])]
-    fn telemetry(mut c: telemetry::Context) {
-        let telemetry: TelemetryBuffer =
-            c.shared.telemetry.lock(|telemetry| *telemetry);
+    async fn telemetry(mut c: telemetry::Context) {
+        loop {
+            let telemetry: TelemetryBuffer =
+                c.shared.telemetry.lock(|telemetry| *telemetry);
 
-        let (gains, telemetry_period) = c
-            .shared
-            .settings
-            .lock(|settings| (settings.afe, settings.telemetry_period));
+            let (gains, telemetry_period) =
+                c.shared.settings.lock(|settings| {
+                    (settings.dual_iir.afe, settings.dual_iir.telemetry_period)
+                });
 
-        c.shared.network.lock(|net| {
-            net.telemetry.publish(&telemetry.finalize(
-                gains[0],
-                gains[1],
-                c.local.cpu_temp_sensor.get_temperature().unwrap(),
-            ))
-        });
+            c.shared.network.lock(|net| {
+                net.telemetry.publish(&telemetry.finalize(
+                    gains[0],
+                    gains[1],
+                    c.local.cpu_temp_sensor.get_temperature().unwrap(),
+                ))
+            });
 
-        // Schedule the telemetry task in the future.
-        telemetry::Monotonic::spawn_after((telemetry_period as u64).secs())
-            .unwrap();
+            Systick::delay((telemetry_period as u32).secs()).await;
+        }
     }
 
-    #[task(priority = 1, shared=[usb], local=[usb_terminal])]
-    fn usb(mut c: usb::Context) {
-        // Handle the USB serial terminal.
-        c.shared.usb.lock(|usb| {
-            usb.poll(&mut [c.local.usb_terminal.interface_mut().inner_mut()]);
-        });
+    #[task(priority = 1, shared=[usb, settings], local=[usb_terminal])]
+    async fn usb(mut c: usb::Context) {
+        loop {
+            // Handle the USB serial terminal.
+            c.shared.usb.lock(|usb| {
+                usb.poll(&mut [c
+                    .local
+                    .usb_terminal
+                    .interface_mut()
+                    .inner_mut()]);
+            });
 
-        c.local.usb_terminal.process().unwrap();
+            c.shared.settings.lock(|settings| {
+                if c.local.usb_terminal.process(settings).unwrap() {
+                    settings_update::spawn().unwrap()
+                }
+            });
 
-        // Schedule to run this task every 10 milliseconds.
-        usb::spawn_after(10u64.millis()).unwrap();
+            Systick::delay(10.millis()).await;
+        }
     }
 
     #[task(priority = 1, shared=[network])]
-    fn ethernet_link(mut c: ethernet_link::Context) {
-        c.shared.network.lock(|net| net.processor.handle_link());
-        ethernet_link::Monotonic::spawn_after(1.secs()).unwrap();
+    async fn ethernet_link(mut c: ethernet_link::Context) {
+        loop {
+            c.shared.network.lock(|net| net.processor.handle_link());
+            Systick::delay(1.secs()).await;
+        }
     }
 
     #[task(binds = ETH, priority = 1)]

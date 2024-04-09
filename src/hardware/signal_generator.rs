@@ -14,13 +14,13 @@ pub enum Signal {
 
 /// Basic configuration for a generated signal.
 ///
-/// # Miniconf Tree
+/// # Miniconf
 /// `{"signal": <signal>, "frequency", 1000.0, "symmetry": 0.5, "amplitude": 1.0}`
 ///
 /// Where `<signal>` may be any of [Signal] variants, `frequency` specifies the signal frequency
 /// in Hertz, `symmetry` specifies the normalized signal symmetry which ranges from 0 - 1.0, and
 /// `amplitude` specifies the signal amplitude in Volts.
-#[derive(Copy, Clone, Debug, Tree)]
+#[derive(Copy, Clone, Debug, Tree, Serialize, Deserialize)]
 pub struct BasicConfig {
     /// The signal type that should be generated. See [Signal] variants.
     pub signal: Signal,

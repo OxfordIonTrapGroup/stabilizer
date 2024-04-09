@@ -77,15 +77,25 @@ pub type EthernetPhy = hal::ethernet::phy::LAN8742A<hal::ethernet::EthernetMAC>;
 
 /// System timer (RTIC Monotonic) tick frequency
 pub const MONOTONIC_FREQUENCY: u32 = 1_000;
-pub type Systick = systick_monotonic::Systick<MONOTONIC_FREQUENCY>;
+pub type Systick = rtic_monotonics::systick::Systick;
 pub type SystemTimer = mono_clock::MonoClock<u32, MONOTONIC_FREQUENCY>;
 
 pub type I2c1 = hal::i2c::I2c<hal::stm32::I2C1>;
 pub type I2c1Proxy =
     shared_bus::I2cProxy<'static, shared_bus::AtomicCheckMutex<I2c1>>;
 
-pub type SerialTerminal =
-    serial_settings::Runner<'static, crate::settings::SerialSettingsPlatform>;
+pub type SerialPort = usbd_serial::SerialPort<
+    'static,
+    crate::hardware::UsbBus,
+    &'static mut setup::SerialBufferStore,
+    &'static mut setup::SerialBufferStore,
+>;
+
+pub type SerialTerminal<C, const Y: usize> = serial_settings::Runner<
+    'static,
+    crate::settings::SerialSettingsPlatform<C, Y>,
+    Y,
+>;
 
 pub enum HardwareVersion {
     Rev1_0,

@@ -15,8 +15,8 @@
 //! * Input/output data streamng via UDP
 //!
 //! ## Settings
-//! Refer to the [Settings] structure for documentation of run-time configurable settings for this
-//! application.
+//! Refer to the [Lockin] structure for documentation of run-time configurable settings
+//! for this application.
 //!
 //! ## Telemetry
 //! Refer to [Telemetry] for information about telemetry reported by this application.
@@ -24,7 +24,6 @@
 //! ## Livestreaming
 //! This application streams raw ADC and DAC data over UDP. Refer to
 //! [stabilizer::net::data_stream](../stabilizer/net/data_stream/index.html) for more information.
-#![deny(warnings)]
 #![no_std]
 #![no_main]
 
@@ -34,10 +33,12 @@ use core::{
     sync::atomic::{fence, Ordering},
 };
 
-use fugit::ExtU64;
+use rtic_monotonics::Monotonic;
+
+use fugit::ExtU32;
 use mutex_trait::prelude::*;
 
-use idsp::{Accu, Complex, ComplexExt, Filter, Lockin, Lowpass, Repeat, RPLL};
+use idsp::{Accu, Complex, ComplexExt, Filter, Lowpass, Repeat, RPLL};
 
 use stabilizer::{
     hardware::{
@@ -59,6 +60,7 @@ use stabilizer::{
         telemetry::{Telemetry, TelemetryBuffer},
         NetworkState, NetworkUsers,
     },
+    settings::NetSettings,
 };
 
 // The logarithm of the number of samples in each batch process. This corresponds with 2^3 samples
@@ -71,6 +73,37 @@ const BATCH_SIZE: usize = 1 << BATCH_SIZE_LOG2;
 // period of 1.28 uS or 781.25 KHz.
 const SAMPLE_TICKS_LOG2: u32 = 7;
 const SAMPLE_TICKS: u32 = 1 << SAMPLE_TICKS_LOG2;
+
+#[derive(Clone, Debug, Tree)]
+pub struct Settings {
+    #[tree(depth(2))]
+    pub lockin: Lockin,
+
+    #[tree(depth(1))]
+    pub net: NetSettings,
+}
+
+impl stabilizer::settings::AppSettings for Settings {
+    fn new(net: NetSettings) -> Self {
+        Self {
+            net,
+            lockin: Lockin::default(),
+        }
+    }
+
+    fn net(&self) -> &NetSettings {
+        &self.net
+    }
+}
+
+impl serial_settings::Settings<3> for Settings {
+    fn reset(&mut self) {
+        *self = Self {
+            lockin: Lockin::default(),
+            net: NetSettings::new(self.net.mac),
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 enum Conf {
@@ -90,7 +123,7 @@ enum Conf {
     Modulation,
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum LockinMode {
     /// Utilize an internally generated reference for demodulation
     Internal,
@@ -98,8 +131,8 @@ enum LockinMode {
     External,
 }
 
-#[derive(Copy, Clone, Debug, Tree)]
-pub struct Settings {
+#[derive(Clone, Debug, Tree)]
+pub struct Lockin {
     /// Configure the Analog Front End (AFE) gain.
     ///
     /// # Path
@@ -191,7 +224,7 @@ pub struct Settings {
     stream_target: StreamTarget,
 }
 
-impl Default for Settings {
+impl Default for Lockin {
     fn default() -> Self {
         Self {
             afe: [Gain::G1; 2],
@@ -217,20 +250,18 @@ impl Default for Settings {
 mod app {
     use super::*;
 
-    #[monotonic(binds = SysTick, default = true, priority = 2)]
-    type Monotonic = Systick;
-
     #[shared]
     struct Shared {
         usb: UsbDevice,
-        network: NetworkUsers<Settings, Telemetry, 2>,
+        network: NetworkUsers<Lockin, Telemetry, 2>,
         settings: Settings,
+        active_settings: Lockin,
         telemetry: TelemetryBuffer,
     }
 
     #[local]
     struct Local {
-        usb_terminal: SerialTerminal,
+        usb_terminal: SerialTerminal<Settings, 3>,
         sampling_timer: SamplingTimer,
         digital_inputs: (DigitalInput0, DigitalInput1),
         timestamper: InputStamper,
@@ -238,18 +269,18 @@ mod app {
         adcs: (Adc0Input, Adc1Input),
         dacs: (Dac0Output, Dac1Output),
         pll: RPLL,
-        lockin: Lockin<Repeat<2, Lowpass<2>>>,
+        lockin: idsp::Lockin<Repeat<2, Lowpass<2>>>,
         signal_generator: signal_generator::SignalGenerator,
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
     }
 
     #[init]
-    fn init(c: init::Context) -> (Shared, Local, init::Monotonics) {
-        let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
+    fn init(c: init::Context) -> (Shared, Local) {
+        let clock = SystemTimer::new(|| Systick::now().ticks());
 
         // Configure the microcontroller
-        let (mut stabilizer, _pounder) = hardware::setup::setup(
+        let (mut stabilizer, _pounder) = hardware::setup::setup::<Settings, 3>(
             c.core,
             c.device,
             clock,
@@ -257,14 +288,12 @@ mod app {
             SAMPLE_TICKS,
         );
 
-        let settings = stabilizer.usb_serial.settings();
         let mut network = NetworkUsers::new(
             stabilizer.net.stack,
             stabilizer.net.phy,
             clock,
             env!("CARGO_BIN_NAME"),
-            &settings.broker,
-            &settings.id,
+            &stabilizer.settings.net,
             stabilizer.metadata,
         );
 
@@ -274,7 +303,8 @@ mod app {
             network,
             usb: stabilizer.usb,
             telemetry: TelemetryBuffer::default(),
-            settings: Settings::default(),
+            active_settings: stabilizer.settings.lockin.clone(),
+            settings: stabilizer.settings,
         };
 
         let signal_config = signal_generator::Config {
@@ -296,7 +326,7 @@ mod app {
             timestamper: stabilizer.timestamper,
 
             pll: RPLL::new(SAMPLE_TICKS_LOG2 + BATCH_SIZE_LOG2),
-            lockin: Lockin::default(),
+            lockin: idsp::Lockin::default(),
             signal_generator: signal_generator::SignalGenerator::new(
                 signal_config,
             ),
@@ -315,7 +345,8 @@ mod app {
         settings_update::spawn().unwrap();
         telemetry::spawn().unwrap();
         ethernet_link::spawn().unwrap();
-        start::spawn_after(100.millis()).unwrap();
+        start::spawn().unwrap();
+        usb::spawn().unwrap();
 
         // Start recording digital input timestamps.
         stabilizer.timestamp_timer.start();
@@ -323,11 +354,12 @@ mod app {
         // Enable the timestamper.
         local.timestamper.start();
 
-        (shared, local, init::Monotonics(stabilizer.systick))
+        (shared, local)
     }
 
     #[task(priority = 1, local=[sampling_timer])]
-    fn start(c: start::Context) {
+    async fn start(c: start::Context) {
+        Systick::delay(100.millis()).await;
         // Start sampling ADCs and DACs.
         c.local.sampling_timer.start();
     }
@@ -339,12 +371,13 @@ mod app {
     /// This is an implementation of a externally (DI0) referenced PLL lockin on the ADC0 signal.
     /// It outputs either I/Q or power/phase on DAC0/DAC1. Data is normalized to full scale.
     /// PLL bandwidth, filter bandwidth, slope, and x/y or power/phase post-filters are available.
-    #[task(binds=DMA1_STR4, shared=[settings, telemetry], local=[adcs, dacs, lockin, timestamper, pll, generator, signal_generator], priority=3)]
+    #[task(binds=DMA1_STR4, shared=[active_settings, telemetry], local=[adcs, dacs, lockin, timestamper, pll, generator, signal_generator], priority=3)]
     #[link_section = ".itcm.process"]
     fn process(c: process::Context) {
         let process::SharedResources {
-            settings,
+            active_settings,
             telemetry,
+            ..
         } = c.shared;
 
         let process::LocalResources {
@@ -355,9 +388,10 @@ mod app {
             lockin,
             signal_generator,
             generator,
+            ..
         } = c.local;
 
-        (settings, telemetry).lock(|settings, telemetry| {
+        (active_settings, telemetry).lock(|settings, telemetry| {
             let (reference_phase, reference_frequency) =
                 match settings.lockin_mode {
                     LockinMode::External => {
@@ -458,10 +492,12 @@ mod app {
         });
     }
 
-    #[idle(shared=[network, usb])]
+    #[idle(shared=[settings, network, usb])]
     fn idle(mut c: idle::Context) -> ! {
         loop {
-            match c.shared.network.lock(|net| net.update()) {
+            match (&mut c.shared.network, &mut c.shared.settings)
+                .lock(|net, settings| net.update(&mut settings.lockin))
+            {
                 NetworkState::SettingsChanged(_path) => {
                     settings_update::spawn().unwrap()
                 }
@@ -479,63 +515,78 @@ mod app {
         }
     }
 
-    #[task(priority = 1, local=[afes], shared=[network, settings])]
-    fn settings_update(mut c: settings_update::Context) {
-        let settings = c.shared.network.lock(|net| *net.miniconf.settings());
-        c.shared.settings.lock(|current| *current = settings);
+    #[task(priority = 1, local=[afes], shared=[network, settings, active_settings])]
+    async fn settings_update(mut c: settings_update::Context) {
+        c.shared.settings.lock(|settings| {
+            c.local.afes.0.set_gain(settings.lockin.afe[0]);
+            c.local.afes.1.set_gain(settings.lockin.afe[1]);
 
-        c.local.afes.0.set_gain(settings.afe[0]);
-        c.local.afes.1.set_gain(settings.afe[1]);
+            let target = settings.lockin.stream_target.into();
+            c.shared.network.lock(|net| net.direct_stream(target));
 
-        let target = settings.stream_target.into();
-        c.shared.network.lock(|net| net.direct_stream(target));
+            c.shared
+                .active_settings
+                .lock(|current| *current = settings.lockin.clone());
+        });
     }
 
     #[task(priority = 1, local=[digital_inputs, cpu_temp_sensor], shared=[network, settings, telemetry])]
-    fn telemetry(mut c: telemetry::Context) {
-        let mut telemetry: TelemetryBuffer =
-            c.shared.telemetry.lock(|telemetry| *telemetry);
+    async fn telemetry(mut c: telemetry::Context) {
+        loop {
+            let mut telemetry: TelemetryBuffer =
+                c.shared.telemetry.lock(|telemetry| *telemetry);
 
-        telemetry.digital_inputs = [
-            c.local.digital_inputs.0.is_high(),
-            c.local.digital_inputs.1.is_high(),
-        ];
+            telemetry.digital_inputs = [
+                c.local.digital_inputs.0.is_high(),
+                c.local.digital_inputs.1.is_high(),
+            ];
 
-        let (gains, telemetry_period) = c
-            .shared
-            .settings
-            .lock(|settings| (settings.afe, settings.telemetry_period));
+            let (gains, telemetry_period) =
+                c.shared.settings.lock(|settings| {
+                    (settings.lockin.afe, settings.lockin.telemetry_period)
+                });
 
-        c.shared.network.lock(|net| {
-            net.telemetry.publish(&telemetry.finalize(
-                gains[0],
-                gains[1],
-                c.local.cpu_temp_sensor.get_temperature().unwrap(),
-            ))
-        });
+            c.shared.network.lock(|net| {
+                net.telemetry.publish(&telemetry.finalize(
+                    gains[0],
+                    gains[1],
+                    c.local.cpu_temp_sensor.get_temperature().unwrap(),
+                ))
+            });
 
-        // Schedule the telemetry task in the future.
-        telemetry::Monotonic::spawn_after((telemetry_period as u64).secs())
-            .unwrap();
+            // Schedule the telemetry task in the future.
+            Systick::delay((telemetry_period as u32).secs()).await;
+        }
     }
 
-    #[task(priority = 1, shared=[usb], local=[usb_terminal])]
-    fn usb(mut c: usb::Context) {
-        // Handle the USB serial terminal.
-        c.shared.usb.lock(|usb| {
-            usb.poll(&mut [c.local.usb_terminal.interface_mut().inner_mut()]);
-        });
+    #[task(priority = 1, shared=[usb, settings], local=[usb_terminal])]
+    async fn usb(mut c: usb::Context) {
+        loop {
+            // Handle the USB serial terminal.
+            c.shared.usb.lock(|usb| {
+                usb.poll(&mut [c
+                    .local
+                    .usb_terminal
+                    .interface_mut()
+                    .inner_mut()]);
+            });
 
-        c.local.usb_terminal.process().unwrap();
+            c.shared.settings.lock(|settings| {
+                if c.local.usb_terminal.process(settings).unwrap() {
+                    settings_update::spawn().unwrap()
+                }
+            });
 
-        // Schedule to run this task every 10 milliseconds.
-        usb::spawn_after(10u64.millis()).unwrap();
+            Systick::delay(10.millis()).await;
+        }
     }
 
     #[task(priority = 1, shared=[network])]
-    fn ethernet_link(mut c: ethernet_link::Context) {
-        c.shared.network.lock(|net| net.processor.handle_link());
-        ethernet_link::Monotonic::spawn_after(1.secs()).unwrap();
+    async fn ethernet_link(mut c: ethernet_link::Context) {
+        loop {
+            c.shared.network.lock(|net| net.processor.handle_link());
+            Systick::delay(1.secs()).await;
+        }
     }
 
     #[task(binds = ETH, priority = 1)]
