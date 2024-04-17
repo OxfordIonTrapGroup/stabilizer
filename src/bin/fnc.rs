@@ -296,6 +296,7 @@ mod app {
         local.adcs.1.start();
 
         // Spawn a settings update for default settings.
+        clock_update::spawn().unwrap();
         settings_update::spawn().unwrap();
         telemetry::spawn().unwrap();
         ethernet_link::spawn().unwrap();
@@ -522,6 +523,45 @@ mod app {
 
         let target = incoming_settings.stream_target.into();
         c.shared.network.lock(|net| net.direct_stream(target));
+    }
+
+    #[task(priority = 1, shared = [pounder, dds, settings, network])]
+    fn clock_update(mut c: clock_update::Context) {
+        log::info!("Updating DDS reference clock");
+        let clock_settings = c
+            .shared
+            .network
+            .lock(|net| net.miniconf.settings().dds_ref_clock);
+
+        match ad9959::validate_clocking(
+            clock_settings.reference_clock_frequency,
+            clock_settings.multiplier,
+        ) {
+            Ok(_frequency) => {
+                c.shared.pounder.lock(|pounder| {
+                    pounder.set_ext_clk(clock_settings.external_clock).unwrap();
+                });
+
+                c.shared.dds.lock(|dds| {
+                    dds.builder()
+                        .set_system_clock(
+                            clock_settings.reference_clock_frequency,
+                            clock_settings.multiplier,
+                        )
+                        .unwrap()
+                        .write();
+                });
+
+                c.shared.settings.lock(|settings| {
+                    settings.dds_ref_clock = clock_settings;
+                });
+            }
+            Err(err) => {
+                log::error!("Invalid AD9959 clocking parameters: {:?}", err)
+            }
+        }
+
+        //     log::info!("DDS reference clock updated");
     }
 
     #[task(priority = 1, shared=[network, settings, telemetry, pounder], local=[cpu_temp_sensor])]
