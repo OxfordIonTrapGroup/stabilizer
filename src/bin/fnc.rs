@@ -77,9 +77,9 @@ const IIR_CASCADE_LENGTH: usize = 1;
 // This does not strictly need a DMA, but the right interrupt binding is needed otherwise
 const BATCH_SIZE: usize = 1;
 
-// The number of 100MHz timer ticks between each sample. Currently set to 5.12 us
-// corresponding to a 195.3 kHz sampling rate.
-const SAMPLE_TICKS: u32 = 320;
+// The number of 100MHz timer ticks between each sample. Currently set to 4 us
+// corresponding to a 250 kHz sampling rate.
+const SAMPLE_TICKS: u32 = 400;
 
 #[derive(Clone, Copy, Debug, Tree)]
 pub struct Settings {
