@@ -7,12 +7,13 @@ import logging
 import struct
 import socket
 import ipaddress
+import itertools
 from collections import namedtuple
 from dataclasses import dataclass
 
 import numpy as np
 
-from . import DAC_VOLTS_PER_LSB
+from . import DAC_VOLTS_PER_LSB, ADC_VOLTS_PER_LSB
 
 logger = logging.getLogger(__name__)
 
@@ -36,46 +37,109 @@ def get_local_ip(remote):
     return list(map(int, address.split(".")))
 
 
-class AdcDac:
-    """Stabilizer default striming data format"""
-    format_id = 1
-
-    def __init__(self, header, body):
-        self.header = header
-        self.body = body
-
-    def size(self):
-        """Return the data size of the frame in bytes"""
-        return len(self.body)
-
-    def to_mu(self):
-        """Return the raw data in machine units"""
-        data = np.frombuffer(self.body, "<i2")
-        # batch, channel, sample
-        data = data.reshape(self.header.batches, 4, -1)
-        data = data.swapaxes(0, 1).reshape(4, -1)
-        # convert DAC offset binary to two's complement
-        data[2:] ^= np.int16(0x8000)
+class AbstractDecoder:
+    """Abstract streaming data format parser"""
+    name = ""
+    def __init__(self, n_sources):
+        self.n_sources = n_sources
+        
+    def to_mu(self, data):
+        """Return the raw data in machine units
+        """
         return data
 
-    def to_si(self):
+    def to_si(self, data):
         """Convert the raw data to SI units"""
-        data = self.to_mu() * DAC_VOLTS_PER_LSB
-        return {
-            "adc": data[:2],
-            "dac": data[2:],
-        }
+        raise NotImplementedError
 
     def to_traces(self):
         """Convert the raw data to labelled Trace instances"""
-        data = self.to_mu()
+        raise NotImplementedError
+
+class AdcDecoder(AbstractDecoder):
+    format_id = 1
+    
+    def __init__(self, n_sources=2):
+        super().__init__(n_sources)
+
+    def to_si(self, data):
+        """Convert the raw data to SI units"""
+        return self.to_mu(data) * ADC_VOLTS_PER_LSB
+
+    def to_traces(self, data):
+        """Convert the raw data to labelled Trace instances"""
         return [
-            Trace(data[0], scale=DAC_VOLTS_PER_LSB, label='ADC0'),
-            Trace(data[1], scale=DAC_VOLTS_PER_LSB, label='ADC1'),
-            Trace(data[2], scale=DAC_VOLTS_PER_LSB, label='DAC0'),
-            Trace(data[3], scale=DAC_VOLTS_PER_LSB, label='DAC1')
+            Trace(data[i], scale=ADC_VOLTS_PER_LSB, label=label_) for i, label_ in enumerate(self.labels())
         ]
 
+    def labels(self):
+        return [f"ADC{i}" for i in range(self.n_sources)]
+
+class DacDecoder(AbstractDecoder):
+    format_id = 1
+
+    def __init__(self, n_sources=2):
+        super().__init__(n_sources)
+
+    def to_mu(self, data):
+        """Return the raw data in machine units"""
+        # convert DAC offset binary to two's complement
+        return super().to_mu(data) ^ np.int16(0x8000)
+
+    def to_si(self, data):
+        """Convert the raw data to SI units"""
+        return self.to_mu(data) * DAC_VOLTS_PER_LSB
+
+    def to_traces(self, data):
+        """Convert the raw data to labelled Trace instances"""
+        data = self.to_mu(data)
+        return [
+            Trace(data[i], scale=DAC_VOLTS_PER_LSB, label=f"DAC{i}") for i in range(self.n_sources)
+        ]
+
+    def labels(self):
+        return [f"DAC{i}" for i in range(self.n_sources)]
+
+class Parser:
+    def __init__(self, decoders: list[AbstractDecoder]):
+        self.decoders = decoders
+        assert all(decoder.format_id == decoders[0].format_id for decoder in decoders), \
+            "Format IDs must be the same for all decoders"
+        self.format_id = decoders[0].format_id
+        
+        self.data_loc = np.pad(np.cumsum([decoder.n_sources for decoder in decoders]), (1,0))
+        self.n_sources = self.data_loc[-1]
+        self._n_decoders = len(decoders)
+        self.StreamData = namedtuple("StreamData", [label for decoder in decoders for label in decoder.labels()])
+
+    def set_frame(self, header, body):
+        """ Set the header and body read from the packet"""
+        self.header = header
+        self._size = len(body)
+
+        data = np.frombuffer(body, "<i2")
+        # batch, source, sample
+        data = data.reshape(self.header.batches, self.n_sources, -1)
+        # source, sample (from all batches)
+        data = data.swapaxes(0, 1).reshape(self.n_sources, -1)
+
+        self.data = [data[self.data_loc[i]: self.data_loc[i+1]] for i in range(self._n_decoders)]
+
+        return self
+        
+    def to_mu(self):
+        """ Return the raw data in machine units """
+        return np.array([decoder.to_mu(data) for (decoder, data) in zip(self.decoders, self.data)]).reshape(self.n_sources, -1)
+
+    def to_si(self):
+        """Convert the raw data to SI units"""
+        return np.array([decoder.to_si(data) for (decoder, data) in zip(self.decoders, self.data)]).reshape(self.n_sources, -1)
+
+    def size(self):
+        """Return the data size of the frame in bytes"""
+        return self._size
+
+            
 
 class StabilizerStream(asyncio.DatagramProtocol):
     """Stabilizer streaming receiver protocol"""
@@ -83,13 +147,15 @@ class StabilizerStream(asyncio.DatagramProtocol):
     magic = 0x057B
     header_fmt = struct.Struct("<HBBI")
     header = namedtuple("Header", "magic format_id batches sequence")
-    parsers = {
-        AdcDac.format_id: AdcDac,
-    }
 
     @classmethod
-    async def open(cls, addr, port, broker, maxsize=1):
+    async def open(cls, addr, port, broker, parsers:Parser | list[Parser], maxsize=1,):
         """Open a UDP socket and start receiving frames"""
+        if isinstance(parsers, Parser):
+            parsers = [parsers]
+
+        _parsers = {parser.format_id: parser for parser in parsers}
+
         loop = asyncio.get_running_loop()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -113,11 +179,12 @@ class StabilizerStream(asyncio.DatagramProtocol):
         else:
             sock.bind((addr, port))
 
-        transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize), sock=sock)
+        transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), sock=sock)
         return transport, protocol
 
-    def __init__(self, maxsize):
+    def __init__(self, maxsize, parsers):
         self.queue = asyncio.Queue(maxsize)
+        self.parsers = parsers
 
     def connection_made(self, _transport):
         logger.info("Connection made (listening)")
@@ -135,7 +202,8 @@ class StabilizerStream(asyncio.DatagramProtocol):
         except KeyError:
             logger.warning("No parser for format %s, ignoring", header.format_id)
             return
-        frame = parser(header, data[self.header_fmt.size:])
+
+        frame = parser.set_frame(header, data[self.header_fmt.size:])
         if self.queue.full():
             old = self.queue.get_nowait()
             logger.debug("Dropping frame: %#08x", old.header.sequence)
