@@ -43,12 +43,12 @@ class AbstractDecoder:
     def __init__(self, n_sources):
         self.n_sources = n_sources
         
-    def to_mu(self, data):
+    def to_mu(self, data, start=0, stop=-1):
         """Return the raw data in machine units
         """
         return data
 
-    def to_si(self, data):
+    def to_si(self, data, start=0, stop=-1):
         """Convert the raw data to SI units"""
         raise NotImplementedError
 
@@ -62,9 +62,9 @@ class AdcDecoder(AbstractDecoder):
     def __init__(self, n_sources=2):
         super().__init__(n_sources)
 
-    def to_si(self, data):
+    def to_si(self, data, start = 0, stop = -1):
         """Convert the raw data to SI units"""
-        return self.to_mu(data) * ADC_VOLTS_PER_LSB
+        data[start:stop] *= ADC_VOLTS_PER_LSB
 
     def to_traces(self, data):
         """Convert the raw data to labelled Trace instances"""
@@ -81,14 +81,15 @@ class DacDecoder(AbstractDecoder):
     def __init__(self, n_sources=2):
         super().__init__(n_sources)
 
-    def to_mu(self, data):
+    def to_mu(self, data, start=0, stop=-1):
         """Return the raw data in machine units"""
         # convert DAC offset binary to two's complement
-        return super().to_mu(data) ^ np.int16(0x8000)
+        data[start:stop] ^= np.int16(0x8000)
+        # pass
 
-    def to_si(self, data):
+    def to_si(self, data, start=0, stop=-1):
         """Convert the raw data to SI units"""
-        return self.to_mu(data) * DAC_VOLTS_PER_LSB
+        data[start:stop] *= DAC_VOLTS_PER_LSB
 
     def to_traces(self, data):
         """Convert the raw data to labelled Trace instances"""
@@ -117,23 +118,27 @@ class Parser:
         self.header = header
         self._size = len(body)
 
-        data = np.frombuffer(body, "<i2")
         # batch, source, sample
-        data = data.reshape(self.header.batches, self.n_sources, -1)
+        self.data = np.frombuffer(body, "<i2").reshape(self.header.batches, self.n_sources, -1)
         # source, sample (from all batches)
-        data = data.swapaxes(0, 1).reshape(self.n_sources, -1)
-
-        self.data = [data[self.data_loc[i]: self.data_loc[i+1]] for i in range(self._n_decoders)]
+        self.data = self.data.swapaxes(0, 1).reshape(self.n_sources, -1)
 
         return self
         
     def to_mu(self):
         """ Return the raw data in machine units """
-        return np.array([decoder.to_mu(data) for (decoder, data) in zip(self.decoders, self.data)]).reshape(self.n_sources, -1)
-
+        for (i, decoder) in enumerate(self.decoders):
+            decoder.to_mu(self.data, self.data_loc[i], self.data_loc[i+1])
+        # return np.array([decoder.to_mu(data) for (decoder, data) in zip(self.decoders, self.data)]).reshape(self.n_sources, -1)
+        return data
+    
     def to_si(self):
         """Convert the raw data to SI units"""
-        return np.array([decoder.to_si(data) for (decoder, data) in zip(self.decoders, self.data)]).reshape(self.n_sources, -1)
+        data = self.to_mu().astype(float)
+        for (i, decoder) in enumerate(self.decoders):
+            decoder.to_si(data, self.data_loc[i], self.data_loc[i+1])
+        # return np.array([decoder.to_si(data) for (decoder, data) in zip(self.decoders, self.data)]).reshape(self.n_sources, -1)
+        return data
 
     def size(self):
         """Return the data size of the frame in bytes"""
