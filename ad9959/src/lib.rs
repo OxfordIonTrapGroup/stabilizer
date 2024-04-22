@@ -649,6 +649,18 @@ pub fn amplitude_to_acr(amplitude: f32) -> Result<u32, Error> {
     Ok(acr as u32)
 }
 
+pub fn acr_to_amplitude(acr: u32) -> Result<f32, Error> {
+    if acr > 0x3FF {
+        return Err(Error::Bounds);
+    }
+
+    if (acr & 0x1000) == 0 {
+        Ok(1.0)
+    } else {
+        Ok((acr & 0x3FF) as f32 / (1 << 10) as f32)
+    }
+}
+
 /// Represents a means of serializing a DDS profile for writing to a stream.
 pub struct ProfileSerializer {
     // heapless::Vec<u8, 32>, especially its extend_from_slice() is slow
