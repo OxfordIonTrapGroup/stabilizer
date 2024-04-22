@@ -1,8 +1,11 @@
+PHASE_TURNS_PER_LSB = 1/(1 << 14)
+
 def phase_to_pow(phase_turns):
-    return int((phase_turns * (1 << 14)) & 0x3FFF)
+    """Phase in turns to phase offset word"""
+    return int((phase_turns / PHASE_TURNS_PER_LSB) & 0x3FFF)
 
 def pow_to_phase(pow):
-    return pow / (1 << 14)
+    return pow * PHASE_TURNS_PER_LSB
 
 def amplitude_to_acr(amplitude):
     if not (0.0 <= amplitude <= 1.0):

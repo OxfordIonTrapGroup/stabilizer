@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import DAC_VOLTS_PER_LSB, ADC_VOLTS_PER_LSB
+from .pounder import PHASE_TURNS_PER_LSB
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +96,32 @@ class DacDecoder(AbstractDecoder):
         """Convert the raw data to labelled Trace instances"""
         data = self.to_mu(data)
         return [
-            Trace(data[i], scale=DAC_VOLTS_PER_LSB, label=f"DAC{i}") for i in range(self.n_sources)
+            Trace(data[i], scale=DAC_VOLTS_PER_LSB, label=label_) for i, label_ in enumerate(self.labels())
         ]
 
     def labels(self):
         return [f"DAC{i}" for i in range(self.n_sources)]
+
+
+class PhaseOffsetDecoder(AbstractDecoder):
+    format_id = 1
+
+    def __init__(self, n_sources=2):
+        super().__init__(n_sources)
+
+    def to_si(self, data, start=0, stop=-1):
+        """Convert the raw data to SI units"""
+        data[start:stop] *= PHASE_TURNS_PER_LSB
+
+    def to_traces(self, data):
+        """Convert the raw data to labelled Trace instances"""
+        return [
+            Trace(data[i], scale=PHASE_TURNS_PER_LSB, label=label_) for i, label_ in enumerate(self.labels())
+        ]
+
+    def labels(self):
+        return [f"PhaseOffset{i}" for i in range(self.n_sources)]
+
 
 class Parser:
     def __init__(self, decoders: list[AbstractDecoder]):
