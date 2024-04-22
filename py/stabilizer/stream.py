@@ -7,7 +7,6 @@ import logging
 import struct
 import socket
 import ipaddress
-import itertools
 from collections import namedtuple
 from dataclasses import dataclass
 
@@ -18,7 +17,7 @@ from .pounder import PHASE_TURNS_PER_LSB
 
 logger = logging.getLogger(__name__)
 
-Trace = namedtuple("Trace", "values scale label")
+Trace = namedtuple("Trace", "values scale label unit")
 
 
 def wrap(wide):
@@ -59,7 +58,8 @@ class AbstractDecoder:
 
 class AdcDecoder(AbstractDecoder):
     format_id = 1
-    
+    si_unit = "V"
+
     def __init__(self, n_sources=2):
         super().__init__(n_sources)
 
@@ -70,7 +70,7 @@ class AdcDecoder(AbstractDecoder):
     def to_traces(self, data):
         """Convert the raw data to labelled Trace instances"""
         return [
-            Trace(data[i], scale=ADC_VOLTS_PER_LSB, label=label_) for i, label_ in enumerate(self.labels())
+            Trace(data[i], scale=ADC_VOLTS_PER_LSB, label=label_, unit=self.si_unit) for i, label_ in enumerate(self.labels())
         ]
 
     def labels(self):
@@ -78,6 +78,7 @@ class AdcDecoder(AbstractDecoder):
 
 class DacDecoder(AbstractDecoder):
     format_id = 1
+    si_unit = "V"
 
     def __init__(self, n_sources=2):
         super().__init__(n_sources)
@@ -96,7 +97,7 @@ class DacDecoder(AbstractDecoder):
         """Convert the raw data to labelled Trace instances"""
         data = self.to_mu(data)
         return [
-            Trace(data[i], scale=DAC_VOLTS_PER_LSB, label=label_) for i, label_ in enumerate(self.labels())
+            Trace(data[i], scale=DAC_VOLTS_PER_LSB, label=label_, unit=self.si_unit) for i, label_ in enumerate(self.labels())
         ]
 
     def labels(self):
@@ -105,7 +106,7 @@ class DacDecoder(AbstractDecoder):
 
 class PhaseOffsetDecoder(AbstractDecoder):
     format_id = 1
-
+    si_unit = "turns"
     def __init__(self, n_sources=2):
         super().__init__(n_sources)
 
@@ -116,7 +117,7 @@ class PhaseOffsetDecoder(AbstractDecoder):
     def to_traces(self, data):
         """Convert the raw data to labelled Trace instances"""
         return [
-            Trace(data[i], scale=PHASE_TURNS_PER_LSB, label=label_) for i, label_ in enumerate(self.labels())
+            Trace(data[i], scale=PHASE_TURNS_PER_LSB, label=label_, unit=self.si_unit) for i, label_ in enumerate(self.labels())
         ]
 
     def labels(self):
@@ -130,11 +131,11 @@ class Parser:
             "Format IDs must be the same for all decoders"
         self.format_id = decoders[0].format_id
         
-        self.data_loc = np.pad(np.cumsum([decoder.n_sources for decoder in decoders]), (1,0))
-        self.n_sources = self.data_loc[-1]
+        self.decoder_endpoints = np.pad(np.cumsum([decoder.n_sources for decoder in decoders]), (1,0))
+        self.n_sources = self.decoder_endpoints[-1]
         self._n_decoders = len(decoders)
         self.StreamData = namedtuple("StreamData", [label for decoder in decoders for label in decoder.labels()])
-
+\
     def set_frame(self, header, body):
         """ Set the header and body read from the packet"""
         self.header = header
@@ -142,29 +143,35 @@ class Parser:
 
         # batch, source, sample
         self.data = np.frombuffer(body, "<i2").reshape(self.header.batches, self.n_sources, -1)
+
         # source, sample (from all batches)
-        self.data = self.data.swapaxes(0, 1).reshape(self.n_sources, -1)
+        # Copy the array to own the data and make it mutable.
+        self.data = self.data.swapaxes(0, 1).reshape(self.n_sources, -1).copy()
 
         return self
         
     def to_mu(self):
         """ Return the raw data in machine units """
         for (i, decoder) in enumerate(self.decoders):
-            decoder.to_mu(self.data, self.data_loc[i], self.data_loc[i+1])
-        # return np.array([decoder.to_mu(data) for (decoder, data) in zip(self.decoders, self.data)]).reshape(self.n_sources, -1)
-        return data
+            decoder.to_mu(self.data, self.decoder_endpoints[i], self.decoder_endpoints[i+1])
+        return self.data
     
     def to_si(self):
         """Convert the raw data to SI units"""
         data = self.to_mu().astype(float)
         for (i, decoder) in enumerate(self.decoders):
-            decoder.to_si(data, self.data_loc[i], self.data_loc[i+1])
-        # return np.array([decoder.to_si(data) for (decoder, data) in zip(self.decoders, self.data)]).reshape(self.n_sources, -1)
+            decoder.to_si(data, self.decoder_endpoints[i], self.decoder_endpoints[i+1])
         return data
 
     def size(self):
         """Return the data size of the frame in bytes"""
         return self._size
+
+    def units(self):
+        units = []
+        for decoder in self.decoders:
+            units.extend([decoder.si_unit] * decoder.n_sources)
+        return units
 
             
 
