@@ -50,7 +50,7 @@ use stabilizer::{
         adc::{Adc0Input, Adc1Input, AdcCode},
         afe::Gain,
         hal,
-        pounder::{attenuators::AttenuatorInterface, ClockConfig},
+        pounder::attenuators::AttenuatorInterface,
         timers::SamplingTimer,
         DigitalInput0, DigitalInput1, SerialTerminal, SystemTimer, Systick,
         UsbDevice, AFE0, AFE1,
@@ -77,9 +77,9 @@ const IIR_CASCADE_LENGTH: usize = 1;
 // This does not strictly need a DMA, but the right interrupt binding is needed otherwise
 const BATCH_SIZE: usize = 1;
 
-// The number of 100MHz timer ticks between each sample. Currently set to 4 us
-// corresponding to a 250 kHz sampling rate.
-const SAMPLE_TICKS: u32 = 400;
+// The number of 100MHz timer ticks between each sample. Currently set to 5 us
+// corresponding to a 200 kHz sampling rate.
+const SAMPLE_TICKS: u32 = 500;
 
 #[derive(Clone, Copy, Debug, Tree)]
 pub struct Settings {
@@ -153,16 +153,6 @@ pub struct Settings {
     /// See [PounderConfig#miniconf]
     #[tree(depth(2))]
     pounder: [PounderFncSettings; 2],
-
-    /// Specifies the DDS clock configuration for the Pounder
-    ///
-    /// # Path
-    /// `dds_ref_clock`
-    ///
-    /// # Value
-    /// See [ClockConfig#miniconf]
-    #[tree]
-    dds_ref_clock: ClockConfig,
 }
 
 impl Default for Settings {
@@ -195,8 +185,6 @@ impl Default for Settings {
                 PounderFncSettings::new(Channel::ZERO),
                 PounderFncSettings::new(Channel::ONE),
             ],
-
-            dds_ref_clock: ClockConfig::default(),
         }
     }
 }
