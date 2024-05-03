@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import DAC_VOLTS_PER_LSB, ADC_VOLTS_PER_LSB
-from .pounder import PHASE_TURNS_PER_LSB
+from .pounder import PHASE_TURNS_PER_POW_LSB
 
 logger = logging.getLogger(__name__)
 
@@ -112,12 +112,12 @@ class PhaseOffsetDecoder(AbstractDecoder):
 
     def to_si(self, data, start=0, stop=-1):
         """Convert the raw data to SI units"""
-        data[start:stop] *= PHASE_TURNS_PER_LSB
+        data[start:stop] *= PHASE_TURNS_PER_POW_LSB
 
     def to_traces(self, data):
         """Convert the raw data to labelled Trace instances"""
         return [
-            Trace(data[i], scale=PHASE_TURNS_PER_LSB, label=label_, unit=self.si_unit) for i, label_ in enumerate(self.labels())
+            Trace(data[i], scale=PHASE_TURNS_PER_POW_LSB, label=label_, unit=self.si_unit) for i, label_ in enumerate(self.labels())
         ]
 
     def labels(self):

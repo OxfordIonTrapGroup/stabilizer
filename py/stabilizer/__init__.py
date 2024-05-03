@@ -4,11 +4,13 @@
 # Number of timer ticks per sample various applications
 DUAL_IIR_SAMPLE_TICKS = 128
 LOCKIN_SAMPLE_TICKS = 128
+L674_SAMPLE_TICKS = 128
 FNC_SAMPLE_TICKS = 500
 
 # Sample period in seconds for the default 100 MHz timer clock for various applications
 DEFAULT_DUAL_IIR_SAMPLE_PERIOD = 10e-9*DUAL_IIR_SAMPLE_TICKS
 DEFAULT_LOCKIN_SAMPLE_PERIOD = 10e-9*LOCKIN_SAMPLE_TICKS
+DEFAULT_L674_SAMPLE_PERIOD = 10e-9*L674_SAMPLE_TICKS
 DEFAULT_FNC_SAMPLE_PERIOD = 10e-9*FNC_SAMPLE_TICKS
 
 # The number of DAC LSB codes per volt on Stabilizer outputs.
