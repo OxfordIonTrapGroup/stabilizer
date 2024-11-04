@@ -1,7 +1,7 @@
 [package]
 name = "stabilizer"
 # Keep versions in Cargo.toml and py/setup.py synchronized.
-version = "0.9.0"
+version = "0.10.0"
 resolver = "2"
 authors = [
 	"Robert Jördens <rj@quartiq.de>",
@@ -15,10 +15,10 @@ repository = "https://github.com/quartiq/stabilizer"
 readme = "README.md"
 documentation = "https://docs.rs/stabilizer/"
 edition = "2021"
-# keep MSRV in sync in ci.yaml and Cargo.toml
-rust-version = "1.66.1"
-build = "build.rs"
-exclude = [".gitignore", "doc/", "doc/*"]
+exclude = [
+	"doc/",
+	"doc/*"
+]
 
 [badges]
 maintenance = { status = "actively-developed" }
@@ -32,13 +32,11 @@ members = ["ad9959", "serial-settings"]
 
 [dependencies]
 panic-persist = { version = "0.3", features = ["utf8", "custom-panic-handler"] }
-sequential-storage = "0.6"
+sequential-storage = "3"
 embedded-io = "0.6"
 embedded-storage = "0.3"
-cortex-m = { version = "0.7.7", features = [
-	"inline-asm",
-	"critical-section-single-core",
-] }
+embedded-storage-async = "0.4"
+cortex-m = { version = "0.7.7", features = ["inline-asm", "critical-section-single-core"] }
 cortex-m-rt = { version = "0.7", features = ["device"] }
 log = { version = "0.4", features = [
 	"max_level_trace",
@@ -46,49 +44,46 @@ log = { version = "0.4", features = [
 ] }
 rtt-target = "0.3"
 serde = { version = "1.0", features = ["derive"], default-features = false }
-serde-json-core = "0.5"
-heapless = { version = "0.7.16", features = ["serde"] }
-cortex-m-rtic = "1.0"
+serde-json-core = "0.6"
+heapless = { version = "0.8", features = ["serde"] }
+rtic = { version = "2.1", features = ["thumbv7-backend"] }
+rtic-monotonics = { version = "2.0", features = ["cortex-m-systick"] }
 embedded-hal = "0.2.7"
-num_enum = { version = "0.7.2", default-features = false }
+num_enum = { version = "0.7.3", default-features = false }
 paste = "1"
-idsp = "0.15.0"
-ad9959 = { path = "ad9959", version = "0.2.1" }
-serial-settings = { path = "serial-settings" }
+idsp = "0.15.1"
+ad9959 = { path = "ad9959", version = "0.3.0" }
+serial-settings = { version = "0.1", path = "serial-settings" }
 mcp230xx = "1.0"
 mutex-trait = "0.2"
 fugit = "0.3"
 rtt-logger = "0.2"
-systick-monotonic = "1.0"
 mono-clock = "0.1"
 spin = { version = "0.9", default-features = false, features = ["spin_mutex"] }
 shared-bus = { version = "0.3", features = ["cortex-m"] }
 lm75 = "0.2"
-enum-iterator = "1.4.1"
+enum-iterator = "2.1.0"
 rand_xorshift = "0.3.0"
 rand_core = "0.6.4"
-minimq = "0.8.0"
-usb-device = "0.3.0"
+minimq = "0.9.0"
+usb-device = "0.3.2"
 usbd-serial = "0.2"
 # Keep this synced with the miniconf version in py/setup.py
-miniconf = "0.9.0"
+miniconf = { version = "0.17", features = ["json-core", "derive", "postcard"] }
+miniconf_mqtt = { version = "0.17" }
 tca9539 = "0.2"
-smoltcp-nal = { version = "0.4.1", features = ["shared-stack"] }
-bbqueue = "0.5"
+smoltcp-nal = { version = "0.5", features = ["shared-stack"] }
 postcard = "1"
 bit_field = "0.10.2"
+embassy-futures = { version = "0.1", default-features = false }
+serde_with = { version = "3.11", default-features = false, features = ["macros"] }
 
 [build-dependencies]
 built = { version = "0.7", features = ["git2"], default-features = false }
 
 [dependencies.stm32h7xx-hal]
-git = "https://github.com/stm32-rs/stm32h7xx-hal.git"
-rev = "9bfd5b17e18e1dfd8e596ffdd77be5c0cb214fc5"
+version = "0.16.0"
 features = ["stm32h743v", "rt", "ethernet", "xspi", "usb_hs"]
-
-[patch.crates-io.usbd-serial]
-git = "https://github.com/rust-embedded-community/usbd-serial"
-rev = "096742c1c480f6f63c1a936a3c23ede7993c624d"
 
 [features]
 nightly = []

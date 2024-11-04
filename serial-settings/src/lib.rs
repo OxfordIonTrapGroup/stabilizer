@@ -1,282 +1,563 @@
-//! Persistent Settings Management Serial Interface
-//!
-//! # Description
-//! This crate provides a simple means to load, configure, and save device settings over a serial
-//! (i.e. text-based) interface. It is ideal to be used with serial ports and terminal emulators,
-//! and exposes a simple way to allow users to configure device operation.
-//!
-//! # Example
-//! Let's assume that your settings structure looks as follows:
-//! ```rust
-//! #[derive(miniconf::Tree, ...)]
-//! struct Settings {
-//!     broker: String,
-//!     id: String,
-//! }
-//! ```
-//!
-//! A user would be displayed the following terminal interface:
-//! ```
-//!> help
-//! AVAILABLE ITEMS:
-//!   list
-//!   get <item>
-//!   set <item> <value>
-//!   clear
-//!   platform <cmd>
-//!   help [ <command> ]
-//!
-//! > plaform dfu
-//! Reset to DFU is not supported
-//!
-//! > plaform service
-//! Service data not available
-//!
-//! > list
-//! Available settings:
-//! /broker: "test" [default: "mqtt"]
-//! /id: "04-91-62-d2-a8-6f" [default: "04-91-62-d2-a8-6f"]
-//! ```
-//!
-//! # Design
-//! Settings are specified in a [`Miniconf::Tree`] settings tree and are transferred over the
-//! serial interface using JSON encoding. This means that things like strings must be encased in
-//! qutoes.
-//!
-//! # Limitations
-//! Currently, there is a hardcoded limit of 32-bytes on the settings path. This is arbitrary and
-//! can be changed if needed.
+#![doc = include_str!("../README.md")]
 #![no_std]
 
-use core::fmt::Write;
-use embedded_io::{Read, ReadReady};
-use miniconf::{JsonCoreSlash, TreeKey};
+use embedded_io::{ErrorType, Read, ReadReady, Write};
+use heapless::String;
+use miniconf::{
+    json, postcard, Path, Traversal, TreeDeserializeOwned, TreeKey,
+    TreeSerialize,
+};
 
 mod interface;
-
 pub use interface::BestEffortInterface;
 
 /// Specifies the API required for objects that are used as settings with the serial terminal
 /// interface.
-pub trait Settings: for<'a> JsonCoreSlash<'a> + Clone {
+pub trait Settings:
+    TreeKey + TreeSerialize + TreeDeserializeOwned + Clone
+{
     /// Reset the settings to their default values.
     fn reset(&mut self) {}
 }
 
-pub trait Platform: Sized {
+/// Platform support for serial settings.
+///
+/// Covers platform-specific commands, persistent key-value storage and the
+/// Read/Write interface for interaction.
+///
+/// Assuming there are no unit fields in the `Settings`, the empty value can be
+/// used to mark the "cleared" state.
+pub trait Platform {
     /// This type specifies the interface to the user, for example, a USB CDC-ACM serial port.
     type Interface: embedded_io::Read
         + embedded_io::ReadReady
-        + core::fmt::Write;
+        + embedded_io::Write;
 
-    /// Specifies the settings that are used on the device.
-    type Settings: Settings;
-
-    /// `save()` Error type
     type Error: core::fmt::Debug;
 
-    /// Save the settings to storage
-    fn save(&mut self, buffer: &mut [u8]) -> Result<(), Self::Error>;
+    type Settings: Settings;
+
+    /// Fetch a value from persisten storage
+    fn fetch<'a>(
+        &mut self,
+        buf: &'a mut [u8],
+        key: &[u8],
+    ) -> Result<Option<&'a [u8]>, Self::Error>;
+
+    /// Store a value to persistent storage
+    fn store(
+        &mut self,
+        buf: &mut [u8],
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), Self::Error>;
+
+    /// Remove a key from storage.
+    fn clear(&mut self, buf: &mut [u8], key: &[u8]) -> Result<(), Self::Error>;
 
     /// Execute a platform specific command.
     fn cmd(&mut self, cmd: &str);
 
     /// Return a mutable reference to the `Interface`.
     fn interface_mut(&mut self) -> &mut Self::Interface;
-
-    /// Return a reference to the `Settings`
-    fn settings(&self) -> &Self::Settings;
-
-    /// Return a mutable reference to the `Settings`.
-    fn settings_mut(&mut self) -> &mut Self::Settings;
 }
 
-struct Context<'a, P: Platform> {
+struct Interface<'a, P, const Y: usize> {
     platform: P,
     buffer: &'a mut [u8],
+    updated: bool,
 }
 
-impl<'a, P: Platform> Context<'a, P> {
+impl<'a, P: Platform, const Y: usize> Interface<'a, P, Y> {
     fn handle_platform(
-        _menu: &menu::Menu<Self>,
-        item: &menu::Item<Self>,
+        _menu: &menu::Menu<Self, P::Settings>,
+        item: &menu::Item<Self, P::Settings>,
         args: &[&str],
-        context: &mut Self,
+        interface: &mut Self,
+        _settings: &mut P::Settings,
     ) {
         let key = menu::argument_finder(item, args, "cmd").unwrap().unwrap();
-        context.platform.cmd(key)
+        interface.platform.cmd(key)
     }
 
-    fn handle_list(
-        _menu: &menu::Menu<Self>,
-        _item: &menu::Item<Self>,
-        _args: &[&str],
-        context: &mut Self,
-    ) {
-        let mut defaults = context.platform.settings().clone();
+    fn iter_root<F>(
+        key: Option<&str>,
+        interface: &mut Self,
+        settings: &mut P::Settings,
+        mut func: F,
+    ) where
+        F: FnMut(
+            Path<&str, '/'>,
+            &mut Self,
+            &mut P::Settings,
+            &mut P::Settings,
+        ),
+    {
+        let mut iter = P::Settings::nodes::<Path<String<128>, '/'>, Y>();
+        if let Some(key) = key {
+            match iter.root(Path::<_, '/'>::from(key)) {
+                Ok(it) => iter = it,
+                Err(e) => {
+                    writeln!(interface, "Failed to locate `{key}`: {e}")
+                        .unwrap();
+                    return;
+                }
+            };
+        }
+
+        let mut defaults = settings.clone();
         defaults.reset();
-
-        for path in P::Settings::iter_paths::<heapless::String<32>>("/") {
-            match path {
-                Err(e) => writeln!(context, "Failed to get path: {e}"),
-                Ok(path) => {
-                    match context
-                        .platform
-                        .settings()
-                        .get_json(&path, context.buffer)
-                    {
-                        Err(e) => {
-                            writeln!(context, "Failed to read {path}: {e}")
-                                .unwrap();
-                            continue;
-                        }
-                        Ok(len) => write!(
-                            &mut context.platform.interface_mut(),
-                            "{path}: {}",
-                            core::str::from_utf8(&context.buffer[..len])
-                                .unwrap()
-                        )
-                        .unwrap(),
-                    }
-
-                    match defaults.get_json(&path, context.buffer) {
-                        Err(e) => writeln!(
-                            context,
-                            "[default serialization error: {e}]"
-                        ),
-                        Ok(len) => writeln!(
-                            &mut context.platform.interface_mut(),
-                            " [default: {}]",
-                            core::str::from_utf8(&context.buffer[..len])
-                                .unwrap()
-                        ),
-                    }
+        for key in iter {
+            match key {
+                Ok((key, node)) => {
+                    debug_assert!(node.is_leaf());
+                    func(
+                        key.as_str().into(),
+                        interface,
+                        settings,
+                        &mut defaults,
+                    )
+                }
+                Err(depth) => {
+                    writeln!(
+                        interface,
+                        "Failed to build path: no space at depth {depth}"
+                    )
+                    .unwrap();
                 }
             }
-            .unwrap()
         }
-    }
-
-    fn handle_clear(
-        _menu: &menu::Menu<Self>,
-        _item: &menu::Item<Self>,
-        _args: &[&str],
-        context: &mut Self,
-    ) {
-        context.platform.settings_mut().reset();
-        match context.platform.save(context.buffer) {
-            Ok(_) => {
-                writeln!(context, "Settings cleared to defaults and saved.")
-            }
-            Err(e) => {
-                writeln!(context, "Failed to clear settings: {e:?}")
-            }
-        }
-        .unwrap();
     }
 
     fn handle_get(
-        _menu: &menu::Menu<Self>,
-        item: &menu::Item<Self>,
+        _menu: &menu::Menu<Self, P::Settings>,
+        item: &menu::Item<Self, P::Settings>,
         args: &[&str],
-        context: &mut Self,
+        interface: &mut Self,
+        settings: &mut P::Settings,
     ) {
-        let key = menu::argument_finder(item, args, "item").unwrap().unwrap();
-        match context.platform.settings().get_json(key, context.buffer) {
-            Err(e) => {
-                writeln!(context, "Failed to read {key}: {e}")
-            }
-            Ok(len) => {
-                writeln!(
-                    &mut context.platform.interface_mut(),
-                    "{key}: {}",
-                    core::str::from_utf8(&context.buffer[..len]).unwrap()
-                )
-            }
-        }
-        .unwrap();
+        let key = menu::argument_finder(item, args, "path").unwrap();
+        Self::iter_root(
+            key,
+            interface,
+            settings,
+            |key, interface, settings, defaults| {
+                // Get current
+                let check =
+                    match json::get_by_key(settings, key, interface.buffer) {
+                        Err(miniconf::Error::Traversal(Traversal::Absent(
+                            _,
+                        ))) => {
+                            return;
+                        }
+                        Err(e) => {
+                            writeln!(
+                                interface,
+                                "Failed to get `{}`: {e}",
+                                *key
+                            )
+                            .unwrap();
+                            return;
+                        }
+                        Ok(len) => {
+                            write!(
+                                interface.platform.interface_mut(),
+                                "{}: {}",
+                                *key,
+                                core::str::from_utf8(&interface.buffer[..len])
+                                    .unwrap()
+                            )
+                            .unwrap();
+                            yafnv::fnv1a::<u32>(&interface.buffer[..len])
+                        }
+                    };
+
+                // Get default and compare
+                match json::get_by_key(defaults, key, interface.buffer) {
+                    Err(miniconf::Error::Traversal(Traversal::Absent(_))) => {
+                        write!(interface, " [default: absent]")
+                    }
+                    Err(e) => {
+                        write!(interface, " [default serialization error: {e}]")
+                    }
+                    Ok(len) => {
+                        if yafnv::fnv1a::<u32>(&interface.buffer[..len])
+                            != check
+                        {
+                            write!(
+                                interface.platform.interface_mut(),
+                                " [default: {}]",
+                                core::str::from_utf8(&interface.buffer[..len])
+                                    .unwrap()
+                            )
+                        } else {
+                            write!(interface, " [default]")
+                        }
+                    }
+                }
+                .unwrap();
+
+                // Get stored and compare
+                match interface.platform.fetch(interface.buffer, key.as_bytes())
+                {
+                    Err(e) => write!(
+                        interface,
+                        " [fetch error: {e:?}]"
+                    ),
+                    Ok(None) =>
+                        write!(interface, " [not stored]"),
+                    Ok(Some(stored)) => {
+                        let slic = ::postcard::de_flavors::Slice::new(stored);
+                        // Use defaults as scratch space for postcard->json conversion
+                        match postcard::set_by_key(defaults, key, slic) {
+                            Err(e) => write!(
+                                interface,
+                                " [stored deserialize error: {e}]"
+                            ),
+                            Ok(_rest) =>
+                                match json::get_by_key(defaults, key, interface.buffer) {
+                                    Err(e) => write!(
+                                        interface,
+                                        " [stored serialization error: {e}]"
+                                    ),
+                                    Ok(len) => {
+                                        if yafnv::fnv1a::<u32>(&interface.buffer[..len]) != check {
+                                        write!(
+                                            interface.platform.interface_mut(),
+                                            " [stored: {}]",
+                                            core::str::from_utf8(&interface.buffer[..len]).unwrap())
+                                        } else {
+                                            write!(
+                                                interface,
+                                                " [stored]"
+                                            )
+                                        }
+                                    },
+                                }
+                            }
+                    }
+                }.unwrap();
+                writeln!(interface).unwrap();
+            },
+        );
+    }
+
+    fn handle_clear(
+        _menu: &menu::Menu<Self, P::Settings>,
+        item: &menu::Item<Self, P::Settings>,
+        args: &[&str],
+        interface: &mut Self,
+        settings: &mut P::Settings,
+    ) {
+        let key = menu::argument_finder(item, args, "path").unwrap();
+        Self::iter_root(
+            key,
+            interface,
+            settings,
+            |key, interface, settings, defaults| {
+                // Get current value checksum
+                let slic =
+                    ::postcard::ser_flavors::Slice::new(interface.buffer);
+                let check = match postcard::get_by_key(settings, key, slic) {
+                    Err(miniconf::Error::Traversal(Traversal::Absent(_))) => {
+                        return;
+                    }
+                    Err(e) => {
+                        writeln!(interface, "Failed to get {}: {e:?}", *key)
+                            .unwrap();
+                        return;
+                    }
+                    Ok(slic) => yafnv::fnv1a::<u32>(slic),
+                };
+
+                // Get default if different
+                let slic =
+                    ::postcard::ser_flavors::Slice::new(interface.buffer);
+                let slic = match postcard::get_by_key(defaults, key, slic) {
+                    Err(miniconf::Error::Traversal(Traversal::Absent(_))) => {
+                        log::warn!(
+                            "Can't clear. Default is absent: `{}`",
+                            *key
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        writeln!(
+                            interface,
+                            "Failed to get default `{}`: {e}",
+                            *key
+                        )
+                        .unwrap();
+                        return;
+                    }
+                    Ok(slic) => {
+                        if yafnv::fnv1a::<u32>(slic) != check {
+                            Some(slic)
+                        } else {
+                            None
+                        }
+                    }
+                };
+
+                // Set default
+                if let Some(slic) = slic {
+                    let slic = ::postcard::de_flavors::Slice::new(slic);
+                    match postcard::set_by_key(settings, key, slic) {
+                        Err(miniconf::Error::Traversal(Traversal::Absent(
+                            _,
+                        ))) => {
+                            return;
+                        }
+                        Err(e) => {
+                            writeln!(
+                                interface,
+                                "Failed to set {}: {e:?}",
+                                *key
+                            )
+                            .unwrap();
+                            return;
+                        }
+                        Ok(_rest) => {
+                            interface.updated = true;
+                            writeln!(interface, "Cleared current `{}`", *key)
+                                .unwrap()
+                        }
+                    }
+                }
+
+                // Check for stored
+                match interface.platform.fetch(interface.buffer, key.as_bytes())
+                {
+                    Err(e) => {
+                        writeln!(
+                            interface,
+                            "Failed to fetch `{}`: {e:?}",
+                            *key
+                        )
+                        .unwrap();
+                    }
+                    Ok(None) => {}
+                    // Clear stored
+                    Ok(Some(_stored)) => match interface
+                        .platform
+                        .clear(interface.buffer, key.as_bytes())
+                    {
+                        Ok(()) => {
+                            writeln!(interface, "Clear stored `{}`", *key)
+                        }
+                        Err(e) => {
+                            writeln!(
+                                interface,
+                                "Failed to clear `{}` from storage: {e:?}",
+                                *key
+                            )
+                        }
+                    }
+                    .unwrap(),
+                }
+            },
+        );
+        interface.updated = true;
+        writeln!(interface, "Some values may require reboot to become active")
+            .unwrap();
+    }
+
+    fn handle_store(
+        _menu: &menu::Menu<Self, P::Settings>,
+        item: &menu::Item<Self, P::Settings>,
+        args: &[&str],
+        interface: &mut Self,
+        settings: &mut P::Settings,
+    ) {
+        let key = menu::argument_finder(item, args, "path").unwrap();
+        let force = menu::argument_finder(item, args, "force")
+            .unwrap()
+            .is_some();
+        Self::iter_root(
+            key,
+            interface,
+            settings,
+            |key, interface, settings, defaults| {
+                // Get default value checksum
+                let slic =
+                    ::postcard::ser_flavors::Slice::new(interface.buffer);
+                let mut check = match postcard::get_by_key(defaults, key, slic)
+                {
+                    // Could also serialize directly into the hasher for all these checksum calcs
+                    Ok(slic) => yafnv::fnv1a::<u32>(slic),
+                    Err(miniconf::Error::Traversal(Traversal::Absent(
+                        _depth,
+                    ))) => {
+                        log::warn!("Default absent: `{}`", *key);
+                        return;
+                    }
+                    Err(e) => {
+                        writeln!(
+                            interface,
+                            "Failed to get `{}` default: {e:?}",
+                            *key
+                        )
+                        .unwrap();
+                        return;
+                    }
+                };
+
+                // Get stored value checksum
+                match interface.platform.fetch(interface.buffer, key.as_bytes())
+                {
+                    Ok(None) => {}
+                    Ok(Some(stored)) => {
+                        let stored = yafnv::fnv1a::<u32>(stored);
+                        if stored != check {
+                            log::debug!(
+                                "Stored differs from default: `{}`",
+                                *key
+                            );
+                        } else {
+                            log::debug!("Stored matches default: `{}`", *key);
+                        }
+                        check = stored;
+                    }
+                    Err(e) => {
+                        writeln!(
+                            interface,
+                            "Failed to fetch `{}`: {e:?}",
+                            *key
+                        )
+                        .unwrap();
+                    }
+                }
+
+                // Get value
+                let slic =
+                    ::postcard::ser_flavors::Slice::new(interface.buffer);
+                let value = match postcard::get_by_key(settings, key, slic) {
+                    Ok(value) => value,
+                    Err(miniconf::Error::Traversal(Traversal::Absent(
+                        _depth,
+                    ))) => {
+                        return;
+                    }
+                    Err(e) => {
+                        writeln!(interface, "Could not get `{}`: {e}", *key)
+                            .unwrap();
+                        return;
+                    }
+                };
+
+                // Check for mismatch
+                if yafnv::fnv1a::<u32>(value) == check && !force {
+                    log::debug!(
+                        "Not saving matching default/stored `{}`",
+                        *key
+                    );
+                    return;
+                }
+                let len = value.len();
+                let (value, rest) = interface.buffer.split_at_mut(len);
+
+                // Store
+                match interface.platform.store(rest, key.as_bytes(), value) {
+                    Ok(_) => writeln!(interface, "`{}` stored", *key),
+                    Err(e) => {
+                        writeln!(interface, "Failed to store `{}`: {e:?}", *key)
+                    }
+                }
+                .unwrap();
+            },
+        );
+        writeln!(interface, "Some values may require reboot to become active")
+            .unwrap();
     }
 
     fn handle_set(
-        _menu: &menu::Menu<Self>,
-        item: &menu::Item<Self>,
+        _menu: &menu::Menu<Self, P::Settings>,
+        item: &menu::Item<Self, P::Settings>,
         args: &[&str],
-        context: &mut Self,
+        interface: &mut Self,
+        settings: &mut P::Settings,
     ) {
-        let key = menu::argument_finder(item, args, "item").unwrap().unwrap();
+        let key = menu::argument_finder(item, args, "path").unwrap().unwrap();
         let value =
             menu::argument_finder(item, args, "value").unwrap().unwrap();
 
         // Now, write the new value into memory.
-        // TODO: Validate it first?
-        match context
-            .platform
-            .settings_mut()
-            .set_json(key, value.as_bytes())
-        {
-            Ok(_) => match context.platform.save(context.buffer) {
-                Ok(_) => {
-                    writeln!(
-                            context,
-                            "Settings saved. Reboot device (`platform reboot`) to apply."
-                        )
-                }
-                Err(e) => {
-                    writeln!(context, "Failed to save settings: {e:?}")
-                }
-            },
-            Err(e) => {
-                writeln!(context, "Failed to update {key}: {e:?}")
+        match json::set(settings, key, value.as_bytes()) {
+            Ok(_) => {
+                interface.updated = true;
+                writeln!(
+                    interface,
+                    "Set but not stored. May require store and reboot to activate."
+                )
             }
-        }.unwrap();
+            Err(e) => {
+                writeln!(interface, "Failed to set `{key}`: {e:?}")
+            }
+        }
+        .unwrap();
     }
 
-    fn menu() -> menu::Menu<'a, Self> {
+    fn menu() -> menu::Menu<'a, Self, P::Settings> {
         menu::Menu {
         label: "settings",
         items: &[
             &menu::Item {
-                command: "list",
-                help: Some("List all available settings and their current values."),
-                item_type: menu::ItemType::Callback {
-                    function: Self::handle_list,
-                    parameters: &[],
-                },
-            },
-            &menu::Item {
                 command: "get",
-                help: Some("Read a setting_from the device."),
+                help: Some("List paths and read current, default, and stored values"),
                 item_type: menu::ItemType::Callback {
                     function: Self::handle_get,
-                    parameters: &[menu::Parameter::Mandatory {
-                        parameter_name: "item",
-                        help: Some("The name of the setting to read."),
+                    parameters: &[menu::Parameter::Optional {
+                        parameter_name: "path",
+                        help: Some("The path of the value or subtree to list/read."),
                     }]
                 },
             },
             &menu::Item {
                 command: "set",
-                help: Some("Update a a setting in the device."),
+                help: Some("Update a value"),
                 item_type: menu::ItemType::Callback {
                     function: Self::handle_set,
                     parameters: &[
                         menu::Parameter::Mandatory {
-                            parameter_name: "item",
-                            help: Some("The name of the setting to write."),
+                            parameter_name: "path",
+                            help: Some("The path to set"),
                         },
                         menu::Parameter::Mandatory {
                             parameter_name: "value",
-                            help: Some("Specifies the value to be written. Values must be JSON-encoded"),
+                            help: Some("The value to be written, JSON-encoded"),
                         },
                     ]
                 },
             },
             &menu::Item {
+                command: "store",
+                help: Some("Store values that differ from defaults"),
+                item_type: menu::ItemType::Callback {
+                    function: Self::handle_store,
+                    parameters: &[
+                        menu::Parameter::Named {
+                            parameter_name: "force",
+                            help: Some("Also store values that match defaults"),
+                        },
+                        menu::Parameter::Optional {
+                            parameter_name: "path",
+                            help: Some("The path of the value or subtree to store."),
+                        },
+
+                    ]
+                },
+            },
+            &menu::Item {
                 command: "clear",
-                help: Some("Clear the device settings to default values."),
+                help: Some("Clear active to defaults and remove all stored values"),
                 item_type: menu::ItemType::Callback {
                     function: Self::handle_clear,
-                    parameters: &[]
+                    parameters: &[
+                        menu::Parameter::Optional {
+                            parameter_name: "path",
+                            help: Some("The path of the value or subtree to clear"),
+                        },
+                    ]
                 },
             },
             &menu::Item {
@@ -297,61 +578,95 @@ impl<'a, P: Platform> Context<'a, P> {
     }
 }
 
-impl<'a, P: Platform> core::fmt::Write for Context<'a, P> {
+impl<'a, P: Platform, const Y: usize> core::fmt::Write for Interface<'a, P, Y> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        self.platform.interface_mut().write_str(s)
+        self.platform
+            .interface_mut()
+            .write_all(s.as_bytes())
+            .or(Err(core::fmt::Error))
     }
 }
 
-/// The serial settings management object.
-pub struct Runner<'a, P: Platform>(menu::Runner<'a, Context<'a, P>>);
+impl<'a, P: Platform, const Y: usize> ErrorType for Interface<'a, P, Y> {
+    type Error = <P::Interface as ErrorType>::Error;
+}
 
-impl<'a, P: Platform> Runner<'a, P> {
+impl<'a, P: Platform, const Y: usize> Write for Interface<'a, P, Y> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.platform.interface_mut().write(buf)
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.platform.interface_mut().flush()
+    }
+}
+
+// The Menu runner
+pub struct Runner<'a, P: Platform, const Y: usize>(
+    menu::Runner<'a, Interface<'a, P, Y>, P::Settings, [u8]>,
+);
+
+impl<'a, P: Platform, const Y: usize> Runner<'a, P, Y> {
     /// Constructor
     ///
     /// # Args
     /// * `platform` - The platform associated with the serial settings, providing the necessary
-    /// context and API to manage device settings.
+    ///   context and API to manage device settings.
+    ///
     /// * `line_buf` - A buffer used for maintaining the serial menu input line. It should be at
-    /// least as long as the longest user input.
+    ///   least as long as the longest user input.
+    ///
     /// * `serialize_buf` - A buffer used for serializing and deserializing settings. This buffer
-    /// needs to be at least as big as the entire serialized settings structure.
+    ///   needs to be at least as big as twice the biggest serialized setting plus its path.
     pub fn new(
         platform: P,
         line_buf: &'a mut [u8],
         serialize_buf: &'a mut [u8],
+        settings: &mut P::Settings,
     ) -> Result<Self, P::Error> {
         Ok(Self(menu::Runner::new(
-            Context::menu(),
+            Interface::menu(),
             line_buf,
-            Context {
+            Interface {
                 platform,
                 buffer: serialize_buf,
+                updated: false,
             },
+            settings,
         )))
-    }
-
-    /// Get the current device settings.
-    pub fn settings(&self) -> &P::Settings {
-        self.0.context.platform.settings()
     }
 
     /// Get the device communication interface
     pub fn interface_mut(&mut self) -> &mut P::Interface {
-        self.0.context.platform.interface_mut()
+        self.0.interface.platform.interface_mut()
+    }
+
+    pub fn platform_mut(&mut self) -> &mut P {
+        &mut self.0.interface.platform
+    }
+
+    pub fn platform(&mut self) -> &P {
+        &self.0.interface.platform
     }
 
     /// Must be called periodically to process user input.
-    pub fn process(
+    ///
+    /// # Returns
+    /// A boolean indicating true if the settings were modified.
+    pub fn poll(
         &mut self,
-    ) -> Result<(), <P::Interface as embedded_io::ErrorType>::Error> {
+        settings: &mut P::Settings,
+    ) -> Result<bool, <P::Interface as embedded_io::ErrorType>::Error> {
+        self.0.interface.updated = false;
+
         while self.interface_mut().read_ready()? {
             let mut buffer = [0u8; 64];
             let count = self.interface_mut().read(&mut buffer)?;
             for &value in &buffer[..count] {
-                self.0.input_byte(value);
+                self.0.input_byte(value, settings);
             }
         }
-        Ok(())
+
+        Ok(self.0.interface.updated)
     }
 }

@@ -11,7 +11,7 @@
 //! required immediately before transmission. This ensures that any slower computation required
 //! for unit conversion can be off-loaded to lower priority tasks.
 use crate::hardware::metadata::ApplicationMetadata;
-use heapless::{String, Vec};
+use heapless::String;
 use minimq::{DeferredPublication, Publication};
 use serde::Serialize;
 
@@ -22,16 +22,15 @@ use crate::hardware::{adc::AdcCode, afe::Gain, dac::DacCode, SystemTimer};
 const DEFAULT_METADATA: &str = "{\"message\":\"Truncated: See USB terminal\"}";
 
 /// The telemetry client for reporting telemetry data over MQTT.
-pub struct TelemetryClient<T: Serialize> {
+pub struct TelemetryClient {
     mqtt: minimq::Minimq<
         'static,
         NetworkReference,
         SystemTimer,
         minimq::broker::NamedBroker<NetworkReference>,
     >,
-    prefix: String<128>,
+    prefix: &'static str,
     meta_published: bool,
-    _telemetry: core::marker::PhantomData<T>,
     metadata: &'static ApplicationMetadata,
 }
 
@@ -41,7 +40,7 @@ pub struct TelemetryClient<T: Serialize> {
 /// These values can be converted to SI units immediately before reporting to save processing time.
 /// This allows for the DSP process to continually update the values without incurring significant
 /// run-time overhead during conversion to SI units.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct TelemetryBuffer {
     /// The latest input sample on ADC0/ADC1.
     pub adcs: [AdcCode; 2],
@@ -88,16 +87,6 @@ pub struct PounderTelemetry {
     pub input_power: [f32; 2],
 }
 
-impl Default for TelemetryBuffer {
-    fn default() -> Self {
-        Self {
-            adcs: [AdcCode(0), AdcCode(0)],
-            dacs: [DacCode(0), DacCode(0)],
-            digital_inputs: [false, false],
-        }
-    }
-}
-
 impl TelemetryBuffer {
     /// Convert the telemetry buffer to finalized, SI-unit telemetry for reporting.
     ///
@@ -129,7 +118,7 @@ impl TelemetryBuffer {
     }
 }
 
-impl<T: Serialize> TelemetryClient<T> {
+impl TelemetryClient {
     /// Construct a new telemetry client.
     ///
     /// # Args
@@ -145,14 +134,13 @@ impl<T: Serialize> TelemetryClient<T> {
             SystemTimer,
             minimq::broker::NamedBroker<NetworkReference>,
         >,
-        prefix: &str,
+        prefix: &'static str,
         metadata: &'static ApplicationMetadata,
     ) -> Self {
         Self {
             mqtt,
             meta_published: false,
-            prefix: String::from(prefix),
-            _telemetry: core::marker::PhantomData,
+            prefix,
             metadata,
         }
     }
@@ -165,20 +153,19 @@ impl<T: Serialize> TelemetryClient<T> {
     ///
     /// # Args
     /// * `telemetry` - The telemetry to report
-    pub fn publish(&mut self, telemetry: &T) {
-        let mut topic = self.prefix.clone();
+    pub fn publish<T: Serialize>(&mut self, telemetry: &T) {
+        let mut topic: String<128> = self.prefix.try_into().unwrap();
         topic.push_str("/telemetry").unwrap();
-
-        let telemetry: Vec<u8, 512> =
-            serde_json_core::to_vec(telemetry).unwrap();
 
         self.mqtt
             .client()
             .publish(
-                minimq::Publication::<&[u8]>::new(&telemetry)
-                    .topic(&topic)
-                    .finish()
-                    .unwrap(),
+                minimq::DeferredPublication::new(|buf| {
+                    serde_json_core::to_slice(telemetry, buf)
+                })
+                .topic(&topic)
+                .finish()
+                .unwrap(),
             )
             .map_err(|e| log::error!("Telemetry publishing error: {:?}", e))
             .ok();
@@ -217,7 +204,7 @@ impl<T: Serialize> TelemetryClient<T> {
                 ..
             } = self;
 
-            let mut topic = self.prefix.clone();
+            let mut topic: String<128> = self.prefix.try_into().unwrap();
             topic.push_str("/meta").unwrap();
 
             if mqtt

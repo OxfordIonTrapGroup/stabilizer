@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
-## [Unreleased](https://github.com/quartiq/stabilizer/compare/v0.9.0...main)
+## [v0.10.0](https://github.com/quartiq/stabilizer/compare/v0.9.0...v0.10.0)
 
 ### Added
 * Serial terminal is available on USB for settings configurations
@@ -14,15 +14,22 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 Booster
 * Panic information is now persisted after reboot and available via telemetry and the USB serial
 console.
+* Device operational settings can now be modified, stored and cleared from device flash using the
+  USB serial console. Run-time settings are unique to each application, but network settings are
+  unified for all applications (i.e. lockin, dual-iir, etc.)
 
 ### Changed
-* Broker is no longer configured at compile time, but is maintained in device memory
-* MSRV bumped to v1.66
+* Broker and static IP/DHCP are no longer configured at compile time,
+  but is maintained in device flash and can be changed via the USB port.
+* MSRV removed. Stabilizer uses latest stable rust.
 * The IIR (biquad) filter used for PID action has changed its serialization format.
   See also the `iir_coefficients` Python CLI implementation.
-* Bumped MSRV 1.66.0 -> 1.66.1
+* The stream target is now configures as a `1.2.3.4:4321` string
 
-## [0.9.0](https://github.com/quartiq/stabilizer/compare/v0.8.1...v0.9.0)
+### Fixed
+* Fixed an issue where the device would sometimes not enumerate on Windows
+
+## [v0.9.0](https://github.com/quartiq/stabilizer/compare/v0.8.1...v0.9.0)
 
 ### Fixed
 
@@ -33,10 +40,10 @@ console.
 * `idsp` crate update to 0.10: `lockin` now uses a double second order lowpass.
 * The `batch_size` field in the the UDP stream frame now contains the number of batches
   not the number of samples per batch. It has been renamed to `batches`.
- * All MQTT clients upgraded and APIs updated.
- * MQTT broker may now be specified via DNS hostnames
- * `hitl/streaming.py` no longer requires a prefix
- * Streaming now supports UDP multicast addresses
+* All MQTT clients upgraded and APIs updated.
+* MQTT broker may now be specified via DNS hostnames
+* `hitl/streaming.py` no longer requires a prefix
+* Streaming now supports UDP multicast addresses
 
 ## [v0.8.1](https://github.com/quartiq/stabilizer/compare/v0.8.0...v0.8.1) - 2022-11-14
 

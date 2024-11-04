@@ -287,45 +287,37 @@ def _main():
     if forward_gain == 0 and args.x_offset != 0:
         logger.warning("Filter has no DC gain but x_offset is non-zero")
 
-    if not (0.5 <= args.attn_out <= 31.5):
-        logger.warning("Output attenuation out of range, setting to default 0.5 dB")
-        args.attn_out = 0.5
-    if not (0.5 <= args.attn_in <= 31.5):
-        logger.warning("Input attenuation out of range, setting to default 0.5 dB")
-        args.attn_in = 0.5
-
-    if args.no_discover:
-        prefix = args.prefix
-    else:
-        devices = asyncio.run(miniconf.discover(args.broker, args.prefix))
-        if not devices:
-            raise ValueError("No prefixes discovered.")
-        if len(devices) > 1:
-            raise ValueError(f"Multiple prefixes discovered ({devices})."
-                             "Please specify a more specific --prefix")
-        prefix = devices.pop()
-        logger.info("Automatically using detected device prefix: %s", prefix)
-
     async def configure():
-        logger.info("Connecting to broker")
-        interface = await miniconf.Miniconf.create(prefix, args.broker)
+        async with miniconf.Client(
+            args.broker, protocol=miniconf.MQTTv5,
+            logger=logging.getLogger("aiomqtt-client")
+        ) as client:
+            if not args.no_discover:
+                prefix, _alive = await miniconf.discover_one(client, args.prefix)
+            else:
+                prefix = args.prefix
 
-        # Set the filter coefficients.
-        # Note: In the future, we will need to Handle higher-order cascades.
-        await interface.set(f"/iir_ch/{args.channel}/0", {
-            "ba": coefficients,
-            "u": stabilizer.voltage_to_machine_units(
-                args.y_offset + forward_gain * args.x_offset),
-            "min": stabilizer.voltage_to_machine_units(args.y_min),
-            "max": stabilizer.voltage_to_machine_units(args.y_max),
-        }, retain=True)
-        await interface.set(f"/aom_centre_f", args.aom_frequency, retain=True)
+            interface = miniconf.Miniconf(client, prefix)
 
-        await interface.set(f"/output_attenuation", args.attn_out, retain=True)
-        await interface.set(f"/input_attenuation", args.attn_in, retain=True)
+            # Set the filter coefficients.
+            # Note: In the future, we will need to Handle higher-order cascades.
+            await interface.set(f"/iir_ch/{args.channel}/0", {
+                "ba": coefficients,
+                "u": stabilizer.voltage_to_machine_units(
+                    args.y_offset + forward_gain * args.x_offset),
+                "min": stabilizer.voltage_to_machine_units(args.y_min),
+                "max": stabilizer.voltage_to_machine_units(args.y_max),
+            })
 
     asyncio.run(configure())
 
 
 if __name__ == "__main__":
+    import os
+    import sys
+    if sys.platform.lower() == "win32" or os.name.lower() == "nt":
+        from asyncio import set_event_loop_policy, WindowsSelectorEventLoopPolicy
+
+        set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+
     _main()

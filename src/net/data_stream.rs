@@ -1,10 +1,10 @@
 //! Stabilizer data stream capabilities
 //!
 //! # Design
-//! Data streamining utilizes UDP packets to send live data streams at high throughput.
+//! Data streamining utilizes UDP packets to send data streams at high throughput.
 //! Packets are always sent in a best-effort fashion, and data may be dropped.
 //!
-//! Stabilizer organizes livestreamed data into batches within a "Frame" that will be sent as a UDP
+//! Stabilizer organizes streamed data into batches within a "Frame" that will be sent as a UDP
 //! packet. Each frame consits of a header followed by sequential batch serializations. The packet
 //! header is constant for all streaming capabilities, but the serialization format after the header
 //! is application-defined.
@@ -21,17 +21,21 @@
 //!
 //! # Example
 //! A sample Python script is available in `scripts/stream_throughput.py` to demonstrate reception
-//! of livestreamed data.
-#![allow(static_mut_refs)]
+//! of streamed data.
 
-use core::mem::MaybeUninit;
+#![allow(non_camel_case_types)] // https://github.com/rust-embedded/heapless/issues/411
+
+use core::{fmt::Write, mem::MaybeUninit};
 use heapless::{
-    pool::{Box, Init, Pool, Uninit},
+    box_pool,
+    pool::boxed::{Box, BoxBlock},
     spsc::{Consumer, Producer, Queue},
+    String,
 };
 use num_enum::IntoPrimitive;
-use serde::{Deserialize, Serialize};
-use smoltcp_nal::embedded_nal::{IpAddr, Ipv4Addr, SocketAddr, UdpClientStack};
+use serde::Serialize;
+use serde_with::DeserializeFromStr;
+use smoltcp_nal::embedded_nal::{nb, SocketAddr, UdpClientStack};
 
 use super::NetworkReference;
 
@@ -55,27 +59,54 @@ const FRAME_SIZE: usize = 1500 - 40 - 8;
 // allocated frame buffer should fit in the queue.
 const FRAME_QUEUE_SIZE: usize = FRAME_COUNT * 2;
 
-// Static storage used for a heapless::Pool of frame buffers.
-static mut FRAME_DATA: [u8; core::mem::size_of::<u8>()
-    * FRAME_SIZE
-    * FRAME_COUNT] = [0; core::mem::size_of::<u8>() * FRAME_SIZE * FRAME_COUNT];
-
 type Frame = [MaybeUninit<u8>; FRAME_SIZE];
+
+box_pool!(FRAME_POOL: Frame);
 
 /// Represents the destination for the UDP stream to send data to.
 ///
 /// # Miniconf
-/// `{"ip": <addr>, "port": <port>}`
+/// `<addr>:<port>`
 ///
-/// * `<addr>` is an array of 4 bytes. E.g. `[192, 168, 0, 1]`
+/// * `<addr>` is an IPv4 address. E.g. `192.168.0.1`
 /// * `<port>` is any unsigned 16-bit value.
 ///
 /// ## Example
-/// `{"ip": [192, 168,0, 1], "port": 1111}`
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, Default)]
-pub struct StreamTarget {
-    pub ip: [u8; 4],
-    pub port: u16,
+/// `192.168.0.1:1234`
+#[derive(Copy, Clone, Debug, DeserializeFromStr, PartialEq, Eq)]
+pub struct StreamTarget(pub SocketAddr);
+
+impl Default for StreamTarget {
+    fn default() -> Self {
+        Self("0.0.0.0:0".parse().unwrap())
+    }
+}
+
+impl Serialize for StreamTarget {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut display: String<30> = String::new();
+        write!(&mut display, "{}", self.0).unwrap();
+        serializer.serialize_str(&display)
+    }
+}
+
+impl core::str::FromStr for StreamTarget {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let addr = SocketAddr::from_str(s)
+            .map_err(|_| "Invalid socket address format")?;
+        Ok(Self(addr))
+    }
+}
+
+impl core::fmt::Display for StreamTarget {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 /// Specifies the format of streamed data
@@ -85,7 +116,7 @@ pub enum StreamFormat {
     /// Reserved, unused format specifier.
     Unknown = 0,
 
-    /// Streamed data contains ADC0, ADC1, DAC0, and DAC1 sequentially in little-endian format.
+    /// ADC0, ADC1, DAC0, and DAC1 sequentially in little-endian format.
     ///
     /// # Example
     /// With a batch size of 2, the serialization would take the following form:
@@ -94,23 +125,11 @@ pub enum StreamFormat {
     /// ```
     AdcDacData = 1,
 
-    /// Streamed data in FLS (fiber length stabilization) format. See the FLS application for
-    /// detailed definition.
+    /// FLS (fiber length stabilization) format. See the FLS application.
     Fls = 2,
-}
 
-impl From<StreamTarget> for SocketAddr {
-    fn from(target: StreamTarget) -> SocketAddr {
-        SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(
-                target.ip[0],
-                target.ip[1],
-                target.ip[2],
-                target.ip[3],
-            )),
-            target.port,
-        )
-    }
+    /// Thermostat-EEM data. See `thermostat-eem` repo and application.
+    ThermostatEem = 3,
 }
 
 /// Configure streaming on a device.
@@ -131,34 +150,37 @@ pub fn setup_streaming(
             .unwrap();
     let (producer, consumer) = queue.split();
 
-    let frame_pool = cortex_m::singleton!(: Pool<Frame> = Pool::new()).unwrap();
+    #[allow(clippy::declare_interior_mutable_const)]
+    const FRAME: BoxBlock<Frame> = BoxBlock::new();
+    let memory =
+        cortex_m::singleton!(FRAME_DATA: [BoxBlock<Frame>; FRAME_COUNT] =
+    [FRAME; FRAME_COUNT])
+        .unwrap();
 
-    // Note(unsafe): We guarantee that FRAME_DATA is only accessed once in this function.
-    let memory = unsafe { &mut FRAME_DATA };
-    frame_pool.grow(memory);
+    for block in memory.iter_mut() {
+        FRAME_POOL.manage(block);
+    }
 
-    let generator = FrameGenerator::new(producer, frame_pool);
+    let generator = FrameGenerator::new(producer);
 
-    let stream = DataStream::new(stack, consumer, frame_pool);
+    let stream = DataStream::new(stack, consumer);
 
     (generator, stream)
 }
 
 #[derive(Debug)]
 struct StreamFrame {
-    buffer: Box<Frame, Init>,
+    buffer: Box<FRAME_POOL>,
     offset: usize,
     batches: u8,
 }
 
 impl StreamFrame {
     pub fn new(
-        buffer: Box<Frame, Uninit>,
+        mut buffer: Box<FRAME_POOL>,
         format_id: u8,
         sequence_number: u32,
     ) -> Self {
-        let mut buffer = buffer.init([MaybeUninit::uninit(); FRAME_SIZE]);
-
         for (byte, buf) in MAGIC
             .to_le_bytes()
             .iter()
@@ -199,20 +221,15 @@ impl StreamFrame {
 /// The data generator for a stream.
 pub struct FrameGenerator {
     queue: Producer<'static, StreamFrame, FRAME_QUEUE_SIZE>,
-    pool: &'static Pool<Frame>,
     current_frame: Option<StreamFrame>,
     sequence_number: u32,
     format: u8,
 }
 
 impl FrameGenerator {
-    fn new(
-        queue: Producer<'static, StreamFrame, FRAME_QUEUE_SIZE>,
-        pool: &'static Pool<Frame>,
-    ) -> Self {
+    fn new(queue: Producer<'static, StreamFrame, FRAME_QUEUE_SIZE>) -> Self {
         Self {
             queue,
-            pool,
             format: StreamFormat::Unknown.into(),
             current_frame: None,
             sequence_number: 0,
@@ -236,7 +253,7 @@ impl FrameGenerator {
     /// # Args
     /// * `f` - A closure that will be provided the buffer to write batch data into.
     ///         Returns the number of bytes written.
-    pub fn add<F>(&mut self, f: F)
+    pub fn add<F>(&mut self, func: F)
     where
         F: FnMut(&mut [MaybeUninit<u8>]) -> usize,
     {
@@ -244,7 +261,9 @@ impl FrameGenerator {
         self.sequence_number = self.sequence_number.wrapping_add(1);
 
         if self.current_frame.is_none() {
-            if let Some(buffer) = self.pool.alloc() {
+            if let Ok(buffer) =
+                FRAME_POOL.alloc([MaybeUninit::uninit(); FRAME_SIZE])
+            {
                 self.current_frame.replace(StreamFrame::new(
                     buffer,
                     self.format,
@@ -258,7 +277,7 @@ impl FrameGenerator {
         // Note(unwrap): We ensure the frame is present above.
         let current_frame = self.current_frame.as_mut().unwrap();
 
-        let len = current_frame.add_batch(f);
+        let len = current_frame.add_batch(func);
 
         if current_frame.is_full(len) {
             // Note(unwrap): The queue is designed to be at least as large as the frame buffer
@@ -278,8 +297,7 @@ pub struct DataStream {
     stack: NetworkReference,
     socket: Option<<NetworkReference as UdpClientStack>::UdpSocket>,
     queue: Consumer<'static, StreamFrame, FRAME_QUEUE_SIZE>,
-    frame_pool: &'static Pool<Frame>,
-    remote: SocketAddr,
+    remote: StreamTarget,
 }
 
 impl DataStream {
@@ -292,14 +310,12 @@ impl DataStream {
     fn new(
         stack: NetworkReference,
         consumer: Consumer<'static, StreamFrame, FRAME_QUEUE_SIZE>,
-        frame_pool: &'static Pool<Frame>,
     ) -> Self {
         Self {
             stack,
             socket: None,
-            remote: StreamTarget::default().into(),
+            remote: StreamTarget::default(),
             queue: consumer,
-            frame_pool,
         }
     }
 
@@ -315,19 +331,21 @@ impl DataStream {
     fn open(&mut self) -> Result<(), ()> {
         // If there is already a socket of if remote address is unspecified,
         // do not open a new socket.
-        if self.socket.is_some() || self.remote.ip().is_unspecified() {
+        if self.socket.is_some() || self.remote.0.ip().is_unspecified() {
             return Err(());
         }
 
-        log::info!("Opening stream");
-
         let mut socket = self.stack.socket().or(Err(()))?;
 
-        // Note(unwrap): We only connect with a new socket, so it is guaranteed to not already be
-        // bound.
-        self.stack.connect(&mut socket, self.remote).unwrap();
+        // We may fail to connect if we don't have an IP address yet.
+        if self.stack.connect(&mut socket, self.remote.0).is_err() {
+            self.stack.close(socket).unwrap();
+            return Err(());
+        }
 
         self.socket.replace(socket);
+
+        log::info!("Opening stream");
 
         Ok(())
     }
@@ -336,7 +354,7 @@ impl DataStream {
     ///
     /// # Args
     /// * `remote` - The destination to send stream data to.
-    pub fn set_remote(&mut self, remote: SocketAddr) {
+    pub fn set_remote(&mut self, remote: StreamTarget) {
         // Close socket to be reopened if the remote has changed.
         if remote != self.remote {
             self.close();
@@ -352,7 +370,7 @@ impl DataStream {
                 if self.open().is_ok() {
                     // If we just successfully opened the socket, flush old data from queue.
                     while let Some(frame) = self.queue.dequeue() {
-                        self.frame_pool.free(frame.buffer);
+                        drop(frame.buffer);
                     }
                 }
             }
@@ -363,11 +381,31 @@ impl DataStream {
                     let data = unsafe {
                         core::slice::from_raw_parts(
                             buf.as_ptr() as *const u8,
-                            core::mem::size_of_val(buf),
+                            size_of_val(buf),
                         )
                     };
-                    self.stack.send(handle, data).ok();
-                    self.frame_pool.free(frame.buffer)
+
+                    // If we fail to send, it can only be because the socket got closed on us (i.e.
+                    // address update due to DHCP). If this happens, reopen the socket.
+                    match self.stack.send(handle, data) {
+                        Ok(_) => {},
+
+                        // Our IP address may have changedm so handle reopening the UDP stream.
+                        Err(nb::Error::Other(smoltcp_nal::NetworkError::UdpWriteFailure(smoltcp_nal::smoltcp::socket::udp::SendError::Unaddressable))) => {
+                            log::warn!( "IP address updated during stream. Reopening socket");
+                            let socket = self.socket.take().unwrap();
+                            self.stack.close(socket).unwrap();
+                        }
+
+                        // The buffer should clear up once ICMP resolves the IP address, so ignore
+                        // this error.
+                        Err(nb::Error::Other(smoltcp_nal::NetworkError::UdpWriteFailure(smoltcp_nal::smoltcp::socket::udp::SendError::BufferFull))) => {}
+
+                        Err(other) => {
+                            log::warn!("Unexpected UDP error during data stream: {other:?}");
+                        }
+                    }
+                    drop(frame.buffer)
                 }
             }
         }

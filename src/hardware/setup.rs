@@ -4,8 +4,10 @@
 #![allow(static_mut_refs)]
 
 use bit_field::BitField;
+use core::mem::MaybeUninit;
 use core::sync::atomic::{self, AtomicBool, Ordering};
 use core::{fmt::Write, ptr, slice};
+use heapless::String;
 use stm32h7xx_hal::{
     self as hal,
     ethernet::{self, PHY},
@@ -15,14 +17,17 @@ use stm32h7xx_hal::{
 
 use smoltcp_nal::smoltcp;
 
+use crate::settings::{AppSettings, NetSettings};
+
 use super::{
     adc, afe, cpu_temp_sensor::CpuTempSensor, dac, delay, design_parameters,
     eeprom, input_stamper::InputStamper, metadata::ApplicationMetadata,
-    platform, pounder, pounder::dds_output::DdsOutput, shared_adc::SharedAdc,
+    platform, shared_adc::SharedAdc,
     timers, DigitalInput0, DigitalInput1, EemDigitalInput0, EemDigitalInput1,
     EemDigitalOutput0, EemDigitalOutput1, EthernetPhy, HardwareVersion,
-    NetworkStack, SerialTerminal, SystemTimer, Systick, UsbBus, UsbDevice,
-    AFE0, AFE1,
+    NetworkStack, SerialTerminal, SystemTimer, Systick, UsbDevice, AFE0, AFE1,
+    mezzanine::{CpuAdcDacHeaderPins, GpioHeaderPins, SharedAdcs,
+        Recs as MezzanineRecs, Resources as MezzanineResources},
 };
 
 const NUM_TCP_SOCKETS: usize = 4;
@@ -109,8 +114,10 @@ pub struct EemGpioDevices {
 }
 
 /// The available hardware interfaces on Stabilizer.
-pub struct StabilizerDevices {
-    pub systick: Systick,
+pub struct StabilizerDevices<
+    C: serial_settings::Settings + 'static,
+    const Y: usize,
+> {
     pub temperature_sensor: CpuTempSensor,
     pub afes: (AFE0, AFE1),
     pub adcs: (adc::Adc0Input, adc::Adc1Input),
@@ -121,26 +128,17 @@ pub struct StabilizerDevices {
     pub net: NetworkDevices,
     pub digital_inputs: (DigitalInput0, DigitalInput1),
     pub eem_gpio: EemGpioDevices,
-    pub usb_serial: SerialTerminal,
+    pub usb_serial: SerialTerminal<C, Y>,
     pub usb: UsbDevice,
     pub metadata: &'static ApplicationMetadata,
-}
-
-/// The available Pounder-specific hardware interfaces.
-pub struct PounderDevices {
-    pub pounder: pounder::PounderDevices,
-    pub dds_output: DdsOutput,
-
-    #[cfg(not(feature = "pounder_v1_0"))]
-    pub timestamper: pounder::timestamp::Timestamper,
+    pub settings: C,
 }
 
 #[link_section = ".sram3.eth"]
 /// Static storage for the ethernet DMA descriptor ring.
-static mut DES_RING: ethernet::DesRing<
-    { super::TX_DESRING_CNT },
-    { super::RX_DESRING_CNT },
-> = ethernet::DesRing::new();
+static mut DES_RING: MaybeUninit<
+    ethernet::DesRing<{ super::TX_DESRING_CNT }, { super::RX_DESRING_CNT }>,
+> = MaybeUninit::uninit();
 
 /// Setup ITCM and load its code from flash.
 ///
@@ -172,10 +170,13 @@ fn load_itcm() {
         // Ensure ITCM is enabled before loading.
         atomic::fence(Ordering::SeqCst);
 
-        let len =
-            (&__eitcm as *const u32).offset_from(&__sitcm as *const _) as usize;
-        let dst = slice::from_raw_parts_mut(&mut __sitcm as *mut _, len);
-        let src = slice::from_raw_parts(&__siitcm as *const _, len);
+        let sitcm = core::ptr::addr_of_mut!(__sitcm);
+        let eitcm = core::ptr::addr_of_mut!(__eitcm);
+        let siitcm = core::ptr::addr_of_mut!(__siitcm);
+
+        let len = eitcm.offset_from(sitcm) as usize;
+        let dst = slice::from_raw_parts_mut(sitcm, len);
+        let src = slice::from_raw_parts(siitcm, len);
         // Load code into ITCM.
         dst.copy_from_slice(src);
     }
@@ -199,17 +200,18 @@ fn load_itcm() {
 /// * `sample_ticks` - The number of timer ticks between each sample.
 ///
 /// # Returns
-/// (stabilizer, pounder) where `stabilizer` is a `StabilizerDevices` structure containing all
-/// stabilizer hardware interfaces in a disabled state. `pounder` is an `Option` containing
-/// `Some(devices)` if pounder is detected, where `devices` is a `PounderDevices` structure
-/// containing all of the pounder hardware interfaces in a disabled state.
-pub fn setup(
+/// A `StabilizerDevices` structure containing all Stabilizer hardware interfaces in a
+/// disabled state.
+pub fn setup<C, const Y: usize>(
     mut core: stm32h7xx_hal::stm32::CorePeripherals,
     device: stm32h7xx_hal::stm32::Peripherals,
     clock: SystemTimer,
     batch_size: usize,
     sample_ticks: u32,
-) -> (StabilizerDevices, Option<PounderDevices>) {
+) -> (StabilizerDevices<C, Y>, MezzanineResources)
+where
+    C: serial_settings::Settings + AppSettings,
+{
     // Set up RTT logging
     {
         // Enable debug during WFE/WFI-induced sleep
@@ -295,7 +297,7 @@ pub fn setup(
     // Before being able to call any code in ITCM, load that code from flash.
     load_itcm();
 
-    let systick = Systick::new(core.SYST, ccdr.clocks.sysclk().to_Hz());
+    Systick::start(core.SYST, ccdr.clocks.sysclk().to_Hz());
 
     // After ITCM loading.
     core.SCB.enable_icache();
@@ -626,6 +628,20 @@ pub fn setup(
     ));
     log::info!("EUI48: {}", mac_addr);
 
+    let (flash, mut settings) = {
+        let mut flash = {
+            let (_, flash_bank2) = device.FLASH.split();
+            super::flash::Flash(flash_bank2.unwrap())
+        };
+
+        let mut settings = C::new(NetSettings::new(mac_addr));
+        crate::settings::SerialSettingsPlatform::load(
+            &mut settings,
+            &mut flash,
+        );
+        (flash, settings)
+    };
+
     let network_devices = {
         let ethernet_pins = {
             // Reset the PHY before configuring pins.
@@ -647,6 +663,8 @@ pub fn setup(
             (ref_clk, mdio, mdc, crs_dv, rxd0, rxd1, tx_en, txd0, txd1)
         };
 
+        let ring = unsafe { DES_RING.write(ethernet::DesRing::new()) };
+
         // Configure the ethernet controller
         let (mut eth_dma, eth_mac) = ethernet::new(
             device.ETHERNET_MAC,
@@ -655,7 +673,7 @@ pub fn setup(
             ethernet_pins,
             // Note(unsafe): We only call this function once to take ownership of the
             // descriptor ring.
-            unsafe { &mut DES_RING },
+            ring,
             mac_addr,
             ccdr.peripheral.ETH1MAC,
             &ccdr.clocks,
@@ -670,10 +688,14 @@ pub fn setup(
         unsafe { ethernet::enable_interrupt() };
 
         // Configure IP address according to DHCP socket availability
-        let ip_addrs: smoltcp::wire::IpAddress = option_env!("STATIC_IP")
-            .unwrap_or("0.0.0.0")
-            .parse()
-            .unwrap();
+        let ip_addrs: smoltcp::wire::IpAddress = match settings.net().ip.parse()
+        {
+            Ok(addr) => addr,
+            Err(e) => {
+                log::warn!("Invalid IP address in settings: {e:?}. Defaulting to 0.0.0.0 (DHCP)");
+                "0.0.0.0".parse().unwrap()
+            }
+        };
 
         let random_seed = {
             let mut rng =
@@ -824,205 +846,6 @@ pub fn setup(
         )
     };
 
-    // Measure the Pounder PGOOD output to detect if pounder is present on Stabilizer.
-    let pounder_pgood = gpiob.pb13.into_pull_down_input();
-    delay.delay_ms(2u8);
-    let pounder = if pounder_pgood.is_high() {
-        log::info!("Found Pounder");
-
-        let i2c1 = {
-            let sda = gpiob.pb7.into_alternate().set_open_drain();
-            let scl = gpiob.pb8.into_alternate().set_open_drain();
-            let i2c1 = device.I2C1.i2c(
-                (scl, sda),
-                400.kHz(),
-                ccdr.peripheral.I2C1,
-                &ccdr.clocks,
-            );
-
-            shared_bus::new_atomic_check!(hal::i2c::I2c<hal::stm32::I2C1> = i2c1).unwrap()
-        };
-
-        let spi = {
-            let mosi = gpiod.pd7.into_alternate();
-            let miso = gpioa.pa6.into_alternate();
-            let sck = gpiog.pg11.into_alternate();
-
-            let config = hal::spi::Config::new(hal::spi::Mode {
-                polarity: hal::spi::Polarity::IdleHigh,
-                phase: hal::spi::Phase::CaptureOnSecondTransition,
-            });
-
-            // The maximum frequency of this SPI must be limited due to capacitance on the MISO
-            // line causing a long RC decay.
-            device.SPI1.spi(
-                (sck, miso, mosi),
-                config,
-                5.MHz(),
-                ccdr.peripheral.SPI1,
-                &ccdr.clocks,
-            )
-        };
-
-        let pwr0 = adc1.create_channel(gpiof.pf11.into_analog());
-        let pwr1 = adc2.create_channel(gpiof.pf14.into_analog());
-        let aux_adc0 = adc3.create_channel(gpiof.pf3.into_analog());
-        let aux_adc1 = adc3.create_channel(gpiof.pf4.into_analog());
-
-        let pounder_devices = pounder::PounderDevices::new(
-            i2c1.acquire_i2c(),
-            spi,
-            (pwr0, pwr1),
-            (aux_adc0, aux_adc1),
-        )
-        .unwrap();
-
-        let ad9959 = {
-            let qspi_interface = {
-                // Instantiate the QUADSPI pins and peripheral interface.
-                let qspi_pins = {
-                    let _ncs =
-                        gpioc.pc11.into_alternate::<9>().speed(Speed::VeryHigh);
-
-                    let clk = gpiob.pb2.into_alternate().speed(Speed::VeryHigh);
-                    let io0 = gpioe.pe7.into_alternate().speed(Speed::VeryHigh);
-                    let io1 = gpioe.pe8.into_alternate().speed(Speed::VeryHigh);
-                    let io2 = gpioe.pe9.into_alternate().speed(Speed::VeryHigh);
-                    let io3 =
-                        gpioe.pe10.into_alternate().speed(Speed::VeryHigh);
-
-                    (clk, io0, io1, io2, io3)
-                };
-
-                let qspi = device.QUADSPI.bank2(
-                    qspi_pins,
-                    design_parameters::POUNDER_QSPI_FREQUENCY.convert(),
-                    &ccdr.clocks,
-                    ccdr.peripheral.QSPI,
-                );
-
-                pounder::QspiInterface::new(qspi).unwrap()
-            };
-
-            #[cfg(not(feature = "pounder_v1_0"))]
-            let reset_pin = gpiog.pg6.into_push_pull_output();
-            #[cfg(feature = "pounder_v1_0")]
-            let reset_pin = gpioa.pa0.into_push_pull_output();
-
-            let mut io_update = gpiog.pg7.into_push_pull_output();
-
-            // Delay to allow the pounder DDS reference clock to fully start up. The exact startup
-            // time is not specified, but bench testing indicates it usually comes up within
-            // 200-300uS. We do a larger delay to ensure that it comes up and is stable before
-            // using it.
-            delay.delay_ms(10u32);
-
-            let mut ad9959 = ad9959::Ad9959::new(
-                qspi_interface,
-                reset_pin,
-                &mut io_update,
-                &mut delay,
-                ad9959::Mode::FourBitSerial,
-                design_parameters::DDS_REF_CLK.to_Hz() as f32,
-                design_parameters::DDS_MULTIPLIER,
-            )
-            .unwrap();
-
-            ad9959.self_test().unwrap();
-
-            // Return IO_Update
-            gpiog.pg7 = io_update.into_analog();
-
-            ad9959
-        };
-
-        let dds_output = {
-            let io_update_trigger = {
-                let _io_update =
-                    gpiog.pg7.into_alternate::<2>().speed(Speed::VeryHigh);
-
-                // Configure the IO_Update signal for the DDS.
-                let mut hrtimer = pounder::hrtimer::HighResTimerE::new(
-                    device.HRTIM_TIME,
-                    device.HRTIM_MASTER,
-                    device.HRTIM_COMMON,
-                    ccdr.clocks,
-                    ccdr.peripheral.HRTIM,
-                );
-
-                // IO_Update occurs after a fixed delay from the QSPI write. Note that the timer
-                // is triggered after the QSPI write, which can take approximately 120nS, so
-                // there is additional margin.
-                hrtimer.configure_single_shot(
-                    pounder::hrtimer::Channel::Two,
-                    design_parameters::POUNDER_IO_UPDATE_DELAY,
-                    design_parameters::POUNDER_IO_UPDATE_DURATION,
-                );
-
-                // Ensure that we have enough time for an IO-update every batch.
-                let sample_frequency = {
-                    design_parameters::TIMER_FREQUENCY.to_Hz() as f32
-                        / sample_ticks as f32
-                };
-
-                let sample_period = 1.0 / sample_frequency;
-                assert!(
-                    sample_period * batch_size as f32
-                        > design_parameters::POUNDER_IO_UPDATE_DELAY
-                );
-
-                hrtimer
-            };
-
-            let (qspi, config) = ad9959.freeze();
-            DdsOutput::new(qspi, io_update_trigger, config)
-        };
-
-        #[cfg(not(feature = "pounder_v1_0"))]
-        let pounder_stamper = {
-            log::info!("Assuming Pounder v1.1 or later");
-            let etr_pin = gpioa.pa0.into_alternate();
-
-            // The frequency in the constructor is dont-care, as we will modify the period + clock
-            // source manually below.
-            let tim8 =
-                device
-                    .TIM8
-                    .timer(1.kHz(), ccdr.peripheral.TIM8, &ccdr.clocks);
-            let mut timestamp_timer = timers::PounderTimestampTimer::new(tim8);
-
-            // Pounder is configured to generate a 500MHz reference clock, so a 125MHz sync-clock is
-            // output. As a result, dividing the 125MHz sync-clk provides a 31.25MHz tick rate for
-            // the timestamp timer. 31.25MHz corresponds with a 32ns tick rate.
-            // This is less than fCK_INT/3 of the timer as required for oversampling the trigger.
-            timestamp_timer.set_external_clock(timers::Prescaler::Div4);
-            timestamp_timer.start();
-
-            // Set the timer to wrap at the u16 boundary to meet the PLL periodicity.
-            // Scale and wrap before or after the PLL.
-            timestamp_timer.set_period_ticks(u16::MAX);
-            let tim8_channels = timestamp_timer.channels();
-
-            pounder::timestamp::Timestamper::new(
-                timestamp_timer,
-                tim8_channels.ch1,
-                &mut sampling_timer,
-                etr_pin,
-                batch_size,
-            )
-        };
-
-        Some(PounderDevices {
-            pounder: pounder_devices,
-            dds_output,
-
-            #[cfg(not(feature = "pounder_v1_0"))]
-            timestamper: pounder_stamper,
-        })
-    } else {
-        None
-    };
-
     let eem_gpio = EemGpioDevices {
         lvds4: gpiod.pd1.into_floating_input(),
         lvds5: gpiod.pd2.into_floating_input(),
@@ -1031,14 +854,9 @@ pub fn setup(
     };
 
     let (usb_device, usb_serial) = {
-        let usb_bus = cortex_m::singleton!(: Option<usb_device::bus::UsbBusAllocator<UsbBus>> = None).unwrap();
-        let endpoint_memory =
-            cortex_m::singleton!(: [u32; 1024] = [0; 1024]).unwrap();
-
-        //let usb_id = gpioa.pa10.into_alternate::<8>();
+        let _usb_id = gpioa.pa10.into_alternate::<10>();
         let usb_n = gpioa.pa11.into_alternate();
         let usb_p = gpioa.pa12.into_alternate();
-
         let usb = stm32h7xx_hal::usb_hs::USB2::new(
             device.OTG2_HS_GLOBAL,
             device.OTG2_HS_DEVICE,
@@ -1049,43 +867,43 @@ pub fn setup(
             &ccdr.clocks,
         );
 
-        // Generate a device serial number from the MAC address.
-        let serial_number =
-            cortex_m::singleton!(: Option<heapless::String<17>> = None)
-                .unwrap();
-        {
-            let mut serial_string: heapless::String<17> =
-                heapless::String::new();
-            let octets = mac_addr.0;
-
-            write!(
-                serial_string,
-                "{:02x}-{:02x}-{:02x}-{:02x}-{:02x}-{:02x}",
-                octets[0],
-                octets[1],
-                octets[2],
-                octets[3],
-                octets[4],
-                octets[5]
-            )
-            .unwrap();
-            serial_number.replace(serial_string);
-        }
-
-        usb_bus.replace(stm32h7xx_hal::usb_hs::UsbBus::new(
+        let endpoint_memory =
+            cortex_m::singleton!(: Option<&'static mut [u32]> = None).unwrap();
+        endpoint_memory.replace(
+            &mut cortex_m::singleton!(: [u32; 1024] = [0; 1024]).unwrap()[..],
+        );
+        let usb_bus = cortex_m::singleton!(: usb_device::bus::UsbBusAllocator<super::UsbBus> =
+        stm32h7xx_hal::usb_hs::UsbBus::new(
             usb,
-            &mut endpoint_memory[..],
-        ));
+            endpoint_memory.take().unwrap(),
+        ))
+        .unwrap();
 
-        let serial = usbd_serial::SerialPort::new(usb_bus.as_ref().unwrap());
+        let read_store = cortex_m::singleton!(: [u8; 128] = [0; 128]).unwrap();
+        let write_store =
+            cortex_m::singleton!(: [u8; 1024] = [0; 1024]).unwrap();
+        let serial = usbd_serial::SerialPort::new_with_store(
+            usb_bus,
+            &mut read_store[..],
+            &mut write_store[..],
+        );
+
+        // Generate a device serial number from the MAC address.
+        let serial_number = cortex_m::singleton!(: String<17> = {
+            let mut s = String::new();
+            write!(s, "{mac_addr}").unwrap();
+            s
+        })
+        .unwrap();
+
         let usb_device = usb_device::device::UsbDeviceBuilder::new(
-            usb_bus.as_ref().unwrap(),
+            usb_bus,
             usb_device::device::UsbVidPid(0x1209, 0x392F),
         )
         .strings(&[usb_device::device::StringDescriptors::default()
             .manufacturer("ARTIQ/Sinara")
             .product("Stabilizer")
-            .serial_number(serial_number.as_ref().unwrap())])
+            .serial_number(serial_number)])
         .unwrap()
         .device_class(usbd_serial::USB_CLASS_CDC)
         .build();
@@ -1093,42 +911,36 @@ pub fn setup(
         (usb_device, serial)
     };
 
-    let usb_serial = {
-        let (_, flash_bank2) = device.FLASH.split();
-
+    let usb_terminal = {
         let input_buffer =
-            cortex_m::singleton!(: [u8; 256] = [0u8; 256]).unwrap();
+            cortex_m::singleton!(: [u8; 128] = [0u8; 128]).unwrap();
         let serialize_buffer =
             cortex_m::singleton!(: [u8; 512] = [0u8; 512]).unwrap();
-
-        let mut storage = super::flash::Flash(flash_bank2.unwrap());
-        let mut settings =
-            crate::settings::Settings::new(network_devices.mac_address);
-        settings.reload(&mut storage);
 
         serial_settings::Runner::new(
             crate::settings::SerialSettingsPlatform {
                 interface: serial_settings::BestEffortInterface::new(
                     usb_serial,
                 ),
-                storage,
-                settings,
+                storage: flash,
                 metadata,
+                _settings_marker: core::marker::PhantomData,
             },
             input_buffer,
             serialize_buffer,
+            &mut settings,
         )
         .unwrap()
     };
 
     let stabilizer = StabilizerDevices {
-        systick,
         afes,
         adcs,
         dacs,
         temperature_sensor: CpuTempSensor::new(
             adc3.create_channel(hal::adc::Temperature::new()),
         ),
+        usb_serial: usb_terminal,
         timestamper: input_stamper,
         net: network_devices,
         adc_dac_timer: sampling_timer,
@@ -1136,8 +948,46 @@ pub fn setup(
         digital_inputs,
         eem_gpio,
         usb: usb_device,
-        usb_serial,
         metadata,
+        settings,
+    };
+
+    let mezzanine_resources = MezzanineResources {
+        cpu_adc_dac_pins: CpuAdcDacHeaderPins {
+            pf3: gpiof.pf3,
+            pf4: gpiof.pf4,
+            pf11: gpiof.pf11,
+            pf14: gpiof.pf14,
+        },
+        gpio_header_pins: GpioHeaderPins {
+            pa0: gpioa.pa0,
+            pa6: gpioa.pa6,
+            pb2: gpiob.pb2,
+            pb7: gpiob.pb7,
+            pb8: gpiob.pb8,
+            pb13: gpiob.pb13,
+            pc11: gpioc.pc11,
+            pd7: gpiod.pd7,
+            pe7: gpioe.pe7,
+            pe8: gpioe.pe8,
+            pe9: gpioe.pe9,
+            pe10: gpioe.pe10,
+            pg6: gpiog.pg6,
+            pg7: gpiog.pg7,
+            pg11: gpiog.pg11,
+        },
+        recs: MezzanineRecs {
+            hrtim: ccdr.peripheral.HRTIM,
+            i2c1: ccdr.peripheral.I2C1,
+            qspi: ccdr.peripheral.QSPI,
+            spi1: ccdr.peripheral.SPI1,
+            tim8: ccdr.peripheral.TIM8,
+        },
+        shared_adcs: SharedAdcs {
+            adc1,
+            adc2,
+            adc3,
+        },
     };
 
     // info!("Version {} {}", build_info::PKG_VERSION, build_info::GIT_VERSION.unwrap());
@@ -1145,5 +995,5 @@ pub fn setup(
     // info!("{} {}", build_info::RUSTC_VERSION, build_info::TARGET);
     log::info!("setup() complete");
 
-    (stabilizer, pounder)
+    (stabilizer, mezzanine_resources)
 }
