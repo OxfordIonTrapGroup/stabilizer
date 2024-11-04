@@ -236,7 +236,7 @@ mod app {
         let clock = SystemTimer::new(|| Systick::now().ticks());
 
         // Configure the microcontroller
-        let (stabilizer, _pounder) = hardware::setup::setup::<Settings, 4>(
+        let (stabilizer, _mezzanine_resources) = hardware::setup::setup::<Settings, 4>(
             c.core,
             c.device,
             clock,

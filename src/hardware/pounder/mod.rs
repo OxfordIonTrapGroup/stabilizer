@@ -10,6 +10,7 @@ pub mod attenuators;
 pub mod dds_output;
 pub mod hrtimer;
 pub mod rf_power;
+pub mod setup;
 
 #[cfg(not(feature = "pounder_v1_0"))]
 pub mod timestamp;
@@ -423,6 +424,11 @@ pub struct PounderDevices {
             hal::gpio::gpiof::PF4<hal::gpio::Analog>,
         >,
     ),
+
+    dds_output: dds_output::DdsOutput,
+
+    #[cfg(not(feature = "pounder_v1_0"))]
+    timestamper: timestamp::Timestamper,
 }
 
 impl PounderDevices {
@@ -460,6 +466,10 @@ impl PounderDevices {
                 hal::gpio::gpiof::PF4<hal::gpio::Analog>,
             >,
         ),
+        dds_output: dds_output::DdsOutput,
+
+        #[cfg(not(feature = "pounder_v1_0"))]
+        timestamper: timestamp::Timestamper,
     ) -> Result<Self, Error> {
         let mut devices = Self {
             lm75: lm75::Lm75::new(i2c.clone(), lm75::Address::default()),
@@ -467,6 +477,10 @@ impl PounderDevices {
             attenuator_spi,
             pwr,
             aux_adc,
+            dds_output,
+
+            #[cfg(not(feature = "pounder_v1_0"))]
+            timestamper,
         };
 
         // Configure power-on-default state for pounder. All LEDs are off, on-board oscillator

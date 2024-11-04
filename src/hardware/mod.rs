@@ -13,6 +13,7 @@ mod eeprom;
 pub mod flash;
 pub mod input_stamper;
 pub mod metadata;
+mod mezzanine;
 pub mod platform;
 pub mod pounder;
 pub mod setup;
