@@ -28,6 +28,9 @@ impl ApplicationMetadata {
     /// # Returns
     /// A reference to the global metadata.
     pub fn new(version: HardwareVersion) -> &'static ApplicationMetadata {
+        if !build_info::GIT_DIRTY.unwrap_or(false) {
+            log::warn!("Dirty git, consider commiting your changes");
+        }
         cortex_m::singleton!(: ApplicationMetadata = ApplicationMetadata {
             firmware_version: build_info::GIT_VERSION.unwrap_or("Unspecified"),
             rust_version: build_info::RUSTC_VERSION,
