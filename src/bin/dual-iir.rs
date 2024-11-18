@@ -47,8 +47,6 @@ use stabilizer::{
         afe::Gain,
         dac::{Dac0Output, Dac1Output, DacCode},
         hal,
-        pounder::{ClockConfig, PounderConfig},
-        setup::PounderDevices as Pounder,
         signal_generator::{self, SignalGenerator},
         timers::SamplingTimer,
         DigitalInput0, DigitalInput1, SerialTerminal, SystemTimer, Systick,
@@ -229,7 +227,6 @@ mod app {
         adcs: (Adc0Input, Adc1Input),
         dacs: (Dac0Output, Dac1Output),
         iir_state: [[[f32; 4]; IIR_CASCADE_LENGTH]; 2],
-        dds_clock_state: Option<ClockConfig>,
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
     }
@@ -253,8 +250,7 @@ mod app {
             clock,
             env!("CARGO_BIN_NAME"),
             &stabilizer.settings.net,
-            stabilizer.metadata,
-            application_settings,
+            stabilizer.metadata
         );
 
         let generator = network.configure_streaming(StreamFormat::AdcDacData);
@@ -287,7 +283,6 @@ mod app {
             adcs: stabilizer.adcs,
             dacs: stabilizer.dacs,
             iir_state: [[[0.; 4]; IIR_CASCADE_LENGTH]; 2],
-            dds_clock_state,
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
         };
@@ -505,6 +500,7 @@ mod app {
                     *gains[0],
                     *gains[1],
                     c.local.cpu_temp_sensor.get_temperature().unwrap(),
+                    None,
                 ))
             });
 

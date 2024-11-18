@@ -3,16 +3,14 @@ use core::borrow::BorrowMut;
 use self::attenuators::AttenuatorInterface;
 
 use super::hal;
-use crate::hardware::{
-    design_parameters, setup, shared_adc::AdcChannel, I2c1Proxy,
-};
+use crate::hardware::{design_parameters, shared_adc::AdcChannel, I2c1Proxy};
 use crate::net::telemetry::PounderTelemetry;
 use ad9959::{
     amplitude_to_acr, frequency_to_ftw, phase_to_pow, validate_clocking,
 };
 use embedded_hal::blocking::spi::Transfer;
 use enum_iterator::Sequence;
-use miniconf::Tree;
+use miniconf::{Leaf, Tree};
 use rf_power::PowerMeasurementInterface;
 use serde::{Deserialize, Serialize};
 
@@ -133,17 +131,17 @@ impl From<Channel> for GpioPin {
 
 #[derive(Serialize, Deserialize, Copy, Clone, Debug, Tree)]
 pub struct DdsChannelConfig {
-    pub frequency: f32,
-    pub phase_offset: f32,
-    pub amplitude: f32,
+    pub frequency: Leaf<f32>,
+    pub phase_offset: Leaf<f32>,
+    pub amplitude: Leaf<f32>,
 }
 
 impl Default for DdsChannelConfig {
     fn default() -> Self {
         Self {
-            frequency: 0.0,
-            phase_offset: 0.0,
-            amplitude: 0.0,
+            frequency: 0.0.into(),
+            phase_offset: 0.0.into(),
+            amplitude: 0.0.into(),
         }
     }
 }
@@ -169,48 +167,48 @@ impl TryFrom<(ClockConfig, ChannelConfig)> for Profile {
         (clocking, channel): (ClockConfig, ChannelConfig),
     ) -> Result<Self, Self::Error> {
         let system_clock_frequency =
-            clocking.reference_clock_frequency * clocking.multiplier as f32;
+            *clocking.reference_clock_frequency * *clocking.multiplier as f32;
         Ok(Profile {
             frequency_tuning_word: frequency_to_ftw(
-                channel.dds.frequency,
+                *channel.dds.frequency,
                 system_clock_frequency,
             )?,
-            phase_offset: phase_to_pow(channel.dds.phase_offset)?,
-            amplitude_control: amplitude_to_acr(channel.dds.amplitude)?,
+            phase_offset: phase_to_pow(*channel.dds.phase_offset)?,
+            amplitude_control: amplitude_to_acr(*channel.dds.amplitude)?,
         })
     }
 }
 
 #[derive(Serialize, Deserialize, Copy, Clone, Debug, Tree)]
 pub struct ChannelConfig {
-    #[tree]
     pub dds: DdsChannelConfig,
-    pub attenuation: f32,
+    pub attenuation: Leaf<f32>,
 }
 
 impl Default for ChannelConfig {
     fn default() -> Self {
         ChannelConfig {
             dds: DdsChannelConfig::default(),
-            attenuation: 31.5,
+            attenuation: 31.5.into(),
         }
     }
 }
 
 #[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Tree)]
 pub struct ClockConfig {
-    pub multiplier: u8,
-    pub reference_clock_frequency: f32,
-    pub external_clock: bool,
+    pub multiplier: Leaf<u8>,
+    pub reference_clock_frequency: Leaf<f32>,
+    pub external_clock: Leaf<bool>,
 }
 
 impl Default for ClockConfig {
     fn default() -> Self {
         Self {
-            multiplier: 5,
-            reference_clock_frequency: design_parameters::DDS_REF_CLK.to_Hz()
-                as f32,
-            external_clock: false,
+            multiplier: 5.into(),
+            reference_clock_frequency: (design_parameters::DDS_REF_CLK.to_Hz()
+                as f32)
+                .into(),
+            external_clock: false.into(),
         }
     }
 }
@@ -219,9 +217,7 @@ impl Default for ClockConfig {
 pub struct PounderConfig {
     #[tree]
     pub clock: ClockConfig,
-    #[tree(depth(3))]
     pub in_channel: [ChannelConfig; 2],
-    #[tree(depth(3))]
     pub out_channel: [ChannelConfig; 2],
 }
 
@@ -494,11 +490,6 @@ pub struct PounderDevices {
             hal::gpio::gpiof::PF4<hal::gpio::Analog>,
         >,
     ),
-
-    dds_output: dds_output::DdsOutput,
-
-    #[cfg(not(feature = "pounder_v1_0"))]
-    timestamper: timestamp::Timestamper,
 }
 
 impl PounderDevices {
@@ -536,10 +527,6 @@ impl PounderDevices {
                 hal::gpio::gpiof::PF4<hal::gpio::Analog>,
             >,
         ),
-        dds_output: dds_output::DdsOutput,
-
-        #[cfg(not(feature = "pounder_v1_0"))]
-        timestamper: timestamp::Timestamper,
     ) -> Result<Self, Error> {
         let mut devices = Self {
             lm75: lm75::Lm75::new(i2c.clone(), lm75::Address::default()),
@@ -547,10 +534,6 @@ impl PounderDevices {
             attenuator_spi,
             pwr,
             aux_adc,
-            dds_output,
-
-            #[cfg(not(feature = "pounder_v1_0"))]
-            timestamper,
         };
 
         // Configure power-on-default state for pounder. All LEDs are off, on-board oscillator
@@ -619,6 +602,83 @@ impl PounderDevices {
     }
 }
 
+impl setup::Devices {
+    pub fn update_dds(
+        &mut self,
+        settings: PounderConfig,
+        current_clock: &mut Option<ClockConfig>,
+    ) {
+        self.update_dds_clock(settings.clock, current_clock.borrow_mut());
+        self.update_dds_waveform(settings);
+    }
+
+    pub fn update_dds_clock(
+        &mut self,
+        new_clock_settings: ClockConfig,
+        current_clock_settings: &mut Option<ClockConfig>,
+    ) {
+        // Note(unwrap): Short-cut evaluation ensures `current_clock_settings` is `Some`
+        if current_clock_settings.is_none()
+            || (current_clock_settings.unwrap() != new_clock_settings)
+        {
+            match validate_clocking(
+                *new_clock_settings.reference_clock_frequency,
+                *new_clock_settings.multiplier,
+            ) {
+                Ok(_frequency) => {
+                    self.pounder
+                        .set_ext_clk(*new_clock_settings.external_clock)
+                        .unwrap();
+
+                    self.dds_output
+                        .builder()
+                        .set_system_clock(
+                            *new_clock_settings.reference_clock_frequency,
+                            *new_clock_settings.multiplier,
+                        )
+                        .unwrap()
+                        .write();
+                    current_clock_settings.replace(new_clock_settings);
+                }
+                Err(err) => {
+                    log::error!("Invalid AD9959 clocking parameters: {:?}", err)
+                }
+            }
+        }
+    }
+
+    pub fn update_dds_waveform(&mut self, settings: PounderConfig) {
+        for (channel_config, pounder_channel) in settings
+            .in_channel
+            .iter()
+            .chain(settings.out_channel.iter())
+            .zip([Channel::In0, Channel::In1, Channel::Out0, Channel::Out1])
+        {
+            match Profile::try_from((settings.clock, *channel_config)) {
+                Ok(dds_profile) => {
+                    self.dds_output
+                        .builder()
+                        .update_channels_with_profile(
+                            pounder_channel.into(),
+                            dds_profile,
+                        )
+                        .write();
+
+                    if let Err(err) = self.pounder.set_attenuation(
+                        pounder_channel,
+                        *channel_config.attenuation,
+                    ) {
+                        log::error!("Invalid attenuation settings: {:?}", err)
+                    }
+                }
+                Err(err) => {
+                    log::error!("Invalid AD9959 profile settings: {:?}", err)
+                }
+            }
+        }
+    }
+}
+
 impl attenuators::AttenuatorInterface for PounderDevices {
     /// Reset all of the attenuators to a power-on default state.
     fn reset_attenuators(&mut self) -> Result<(), Error> {
@@ -677,86 +737,5 @@ impl rf_power::PowerMeasurementInterface for PounderDevices {
         // Convert analog percentage to voltage. Note that the ADC uses an external 2.048V analog
         // reference.
         Ok(adc_scale * 2.048)
-    }
-}
-
-impl setup::PounderDevices {
-    pub fn update_dds(
-        &mut self,
-        settings: PounderConfig,
-        current_clock: &mut Option<ClockConfig>,
-    ) {
-        self.update_dds_clock(settings.clock, current_clock.borrow_mut());
-        self.update_dds_waveform(settings);
-    }
-
-    pub fn update_dds_clock(
-        &mut self,
-        new_clock_settings: ClockConfig,
-        current_clock_settings: &mut Option<ClockConfig>,
-    ) {
-        // Note(unwrap): Short-cut evaluation ensures `current_clock_settings` is `Some`
-        if current_clock_settings.is_none()
-            || (current_clock_settings.unwrap() != new_clock_settings)
-        {
-            match validate_clocking(
-                new_clock_settings.reference_clock_frequency,
-                new_clock_settings.multiplier,
-            ) {
-                Ok(_frequency) => {
-                    self.pounder
-                        .set_ext_clk(new_clock_settings.external_clock)
-                        .unwrap();
-
-                    self.dds_output
-                        .builder()
-                        .set_system_clock(
-                            new_clock_settings.reference_clock_frequency,
-                            new_clock_settings.multiplier,
-                        )
-                        .unwrap()
-                        .write();
-                    current_clock_settings.replace(new_clock_settings);
-                }
-                Err(err) => {
-                    log::error!("Invalid AD9959 clocking parameters: {:?}", err)
-                }
-            }
-        }
-    }
-
-    pub fn update_dds_waveform(&mut self, settings: PounderConfig) {
-        for (channel_config, pounder_channel) in settings
-            .in_channel
-            .iter()
-            .chain(settings.out_channel.iter())
-            .zip([Channel::In0, Channel::In1, Channel::Out0, Channel::Out1])
-        {
-            match Profile::try_from((settings.clock, *channel_config)) {
-                Ok(dds_profile) => {
-                    self.dds_output
-                        .builder()
-                        .update_channels_with_profile(
-                            pounder_channel.into(),
-                            dds_profile,
-                        )
-                        .write();
-
-                    if let Err(err) = self.pounder.set_attenuation(
-                        pounder_channel,
-                        channel_config.attenuation,
-                    ) {
-                        log::error!("Invalid attenuation settings: {:?}", err)
-                    }
-                }
-                Err(err) => {
-                    log::error!("Invalid AD9959 profile settings: {:?}", err)
-                }
-            }
-        }
-    }
-
-    pub fn get_telemetry(&mut self) -> PounderTelemetry {
-        self.pounder.get_telemetry()
     }
 }

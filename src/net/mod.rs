@@ -98,7 +98,6 @@ where
         app: &str,
         net_settings: &NetSettings,
         metadata: &'static ApplicationMetadata,
-        settings: S,
     ) -> Self {
         let stack_manager =
             cortex_m::singleton!(: NetworkManager = NetworkManager::new(stack))

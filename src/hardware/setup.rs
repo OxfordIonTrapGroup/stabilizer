@@ -27,7 +27,7 @@ use super::{
     EemDigitalOutput0, EemDigitalOutput1, EthernetPhy, HardwareVersion,
     NetworkStack, SerialTerminal, SystemTimer, Systick, UsbDevice, AFE0, AFE1,
     mezzanine::{CpuAdcDacHeaderPins, GpioHeaderPins, SharedAdcs,
-        Recs as MezzanineRecs, Resources as MezzanineResources},
+        Devices as MezzanineDevices, Recs as MezzanineRecs, Resources as MezzanineResources},
 };
 
 const NUM_TCP_SOCKETS: usize = 4;
@@ -310,7 +310,7 @@ where
     let gpiod = device.GPIOD.split(ccdr.peripheral.GPIOD);
     let gpioe = device.GPIOE.split(ccdr.peripheral.GPIOE);
     let gpiof = device.GPIOF.split(ccdr.peripheral.GPIOF);
-    let mut gpiog = device.GPIOG.split(ccdr.peripheral.GPIOG);
+    let gpiog = device.GPIOG.split(ccdr.peripheral.GPIOG);
 
     let dma_streams =
         hal::dma::dma::StreamsTuple::new(device.DMA1, ccdr.peripheral.DMA1);
@@ -953,6 +953,7 @@ where
     };
 
     let mezzanine_resources = MezzanineResources {
+        core_clocks: ccdr.clocks,
         cpu_adc_dac_pins: CpuAdcDacHeaderPins {
             pf3: gpiof.pf3,
             pf4: gpiof.pf4,
@@ -975,6 +976,15 @@ where
             pg6: gpiog.pg6,
             pg7: gpiog.pg7,
             pg11: gpiog.pg11,
+        },
+        devices: MezzanineDevices {
+            hrtim_common: device.HRTIM_COMMON,
+            hrtim_master: device.HRTIM_MASTER,
+            hrtim_time: device.HRTIM_TIME,
+            i2c1: device.I2C1,
+            quadspi: device.QUADSPI,
+            spi1: device.SPI1,
+            tim8: device.TIM8,
         },
         recs: MezzanineRecs {
             hrtim: ccdr.peripheral.HRTIM,

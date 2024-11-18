@@ -5,20 +5,25 @@ use crate::hardware::{
 };
 use stm32h7xx_hal::{self as hal, gpio::Speed, prelude::*};
 
+pub struct Devices {
+    pub pounder: PounderDevices,
+    pub dds_output: dds_output::DdsOutput,
+    #[cfg(not(feature = "pounder_v1_0"))]
+    pub timestamper: timestamp::Timestamper,
+}
+
 /// Configure the Pounder hardware for operation.
 ///
 /// # Returns
 /// `Some(devices)` if Pounder is detected, where `devices` contains all of the hardware
 /// interfaces in a disabled state.
 pub fn setup(
-    device: stm32h7xx_hal::stm32::Peripherals,
     resources: MezzanineResources,
     adc_dac_timer: &mut timers::SamplingTimer,
-    core_clocks: &hal::rcc::CoreClocks,
     batch_size: usize,
     sample_ticks: u32,
-) -> Option<PounderDevices> {
-    let mut delay = delay::AsmDelay::new(core_clocks.c_ck().to_Hz());
+) -> Option<Devices> {
+    let mut delay = delay::AsmDelay::new(resources.core_clocks.c_ck().to_Hz());
 
     // Measure the Pounder PGOOD output to detect if pounder is present on Stabilizer.
     let pounder_pgood = resources.gpio_header_pins.pb13.into_pull_down_input();
@@ -39,11 +44,11 @@ pub fn setup(
             .pb8
             .into_alternate()
             .set_open_drain();
-        let i2c1 = device.I2C1.i2c(
+        let i2c1 = resources.devices.i2c1.i2c(
             (scl, sda),
             400.kHz(),
             resources.recs.i2c1,
-            core_clocks,
+            &resources.core_clocks,
         );
 
         shared_bus::new_atomic_check!(hal::i2c::I2c<hal::stm32::I2C1> = i2c1)
@@ -62,12 +67,12 @@ pub fn setup(
 
         // The maximum frequency of this SPI must be limited due to capacitance on the MISO
         // line causing a long RC decay.
-        device.SPI1.spi(
+        resources.devices.spi1.spi(
             (sck, miso, mosi),
             config,
             5.MHz(),
             resources.recs.spi1,
-            core_clocks,
+            &resources.core_clocks,
         )
     };
 
@@ -127,10 +132,10 @@ pub fn setup(
                 (clk, io0, io1, io2, io3)
             };
 
-            let qspi = device.QUADSPI.bank2(
+            let qspi = resources.devices.quadspi.bank2(
                 qspi_pins,
                 design_parameters::POUNDER_QSPI_FREQUENCY.convert(),
-                core_clocks,
+                &resources.core_clocks,
                 resources.recs.qspi,
             );
 
@@ -174,10 +179,10 @@ pub fn setup(
 
             // Configure the IO_Update signal for the DDS.
             let mut hrtimer = hrtimer::HighResTimerE::new(
-                device.HRTIM_TIME,
-                device.HRTIM_MASTER,
-                device.HRTIM_COMMON,
-                *core_clocks,
+                resources.devices.hrtim_time,
+                resources.devices.hrtim_master,
+                resources.devices.hrtim_common,
+                resources.core_clocks,
                 resources.recs.hrtim,
             );
 
@@ -210,13 +215,13 @@ pub fn setup(
     };
 
     #[cfg(not(feature = "pounder_v1_0"))]
-    let pounder_stamper = {
+    let timestamper = {
         log::info!("Assuming Pounder v1.1 or later");
         let etr_pin = resources.gpio_header_pins.pa0.into_alternate();
 
         // The frequency in the constructor is dont-care, as we will modify the period + clock
         // source manually below.
-        let tim8 = device.TIM8.timer(1.kHz(), resources.recs.tim8, core_clocks);
+        let tim8 = resources.devices.tim8.timer(1.kHz(), resources.recs.tim8, &resources.core_clocks);
         let mut timestamp_timer = timers::PounderTimestampTimer::new(tim8);
 
         // Pounder is configured to generate a 500MHz reference clock, so a 125MHz sync-clock is
@@ -240,16 +245,15 @@ pub fn setup(
         )
     };
 
-    Some(
-        PounderDevices::new(
+    Some(Devices {
+        pounder: PounderDevices::new(
             i2c1.acquire_i2c(),
             spi,
             (pwr0, pwr1),
             (aux_adc0, aux_adc1),
-            dds_output,
-            #[cfg(not(feature = "pounder_v1_0"))]
-            pounder_stamper,
         )
         .unwrap(),
-    )
+        dds_output,
+        timestamper,
+    })
 }

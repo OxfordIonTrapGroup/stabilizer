@@ -27,6 +27,16 @@ pub struct CpuAdcDacHeaderPins {
     pub pf14: hal::gpio::gpiof::PF14,
 }
 
+pub struct Devices {
+    pub hrtim_common: hal::stm32::HRTIM_COMMON,
+    pub hrtim_master: hal::stm32::HRTIM_MASTER,
+    pub hrtim_time: hal::stm32::HRTIM_TIME,
+    pub i2c1: hal::stm32::I2C1,
+    pub quadspi: hal::stm32::QUADSPI,
+    pub spi1: hal::stm32::SPI1,
+    pub tim8: hal::stm32::TIM8,
+}
+
 pub struct Recs {
     pub i2c1: hal::rcc::rec::I2c1,
     pub hrtim: hal::rcc::rec::Hrtim,
@@ -42,8 +52,10 @@ pub struct SharedAdcs {
 }
 
 pub struct Resources {
+    pub core_clocks: hal::rcc::CoreClocks,
     pub cpu_adc_dac_pins: CpuAdcDacHeaderPins,
     pub gpio_header_pins: GpioHeaderPins,
+    pub devices: Devices,
     pub recs: Recs,
     pub shared_adcs: SharedAdcs,
 }
