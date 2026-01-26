@@ -11,9 +11,10 @@ use core::mem::MaybeUninit;
 //Memory ordering and synchronization at CPU level - ordering defiens how memory operations can be reordered
 //Fence - inserts memory fence that prevents compiler and CPU from reordering memory operations across it
 use core::sync::atomic::{fence, Ordering};
+use core::usize;
 
 use serde::{Deserialize, Serialize};
-use array_init::array_init;
+//use array_init::array_init;
 
 // External crate - fugit - provides strongly typed time a duration units e.g. 1.secs()
 use fugit::ExtU64;
@@ -23,7 +24,8 @@ use mutex_trait::prelude::*;
 //The iir algorithm that we need - inbuilt package
 use idsp::iir;
 
-use stabilizer::hardware::signal_generator::{BasicConfig, Signal};
+//use stabilizer::hardware::signal_generator::{BasicConfig, Signal};
+use stabilizer::hardware::harmonic_oscillators::{BasicConfig};
 //Features we need from stabilizer
 use stabilizer::{
     hardware::{
@@ -34,7 +36,8 @@ use stabilizer::{
         hal,
         pounder::{ClockConfig, PounderConfig},
         setup::PounderDevices as Pounder,
-        signal_generator::{self, SignalGenerator},
+        //signal_generator::{self, SignalGenerator},
+        harmonic_oscillators::{self, HarmonicGenerator},
         timers::SamplingTimer,
         DigitalInput0, DigitalInput1, SerialTerminal, SystemTimer, Systick,
         UsbDevice, AFE0, AFE1,
@@ -99,56 +102,6 @@ impl Default for HarmonicWaveParameters {
         Self {
             amp: 0.0,
             phase: 0.0,
-        }
-    }
-}
-
-//#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
-
-//Each wrapper owns a single SignalGenerator and knows how to initialize it safely and update it from basic config
-//Also allows us to use the .next() method
-
-pub struct HarmonicGenerator{
-    //One HarmonicGenerator - this is one cosine harmonic and it owns a SignalGenerator
-    harmonic_signal_generator: SignalGenerator,
-}
-impl HarmonicGenerator{
-    //This would generate an "zero" empty harmonic genreator i.e. straight line at 0
-    //Creates a harmonic generator that has correct frequency but outputs zero until enabled/configured - use for safe start up in case it fails
-    fn new_zero_harmonic(sample_period: f32, full_scale: f32, freq_hz:f32)->Self{
-        //This generates the cosine we want with 0 ampl and no phase offset but correct frequency - generator runs and phase accumulator advances but output is always 0
-        let basic_configuration_cosine = BasicConfig{
-            signal: Signal::Cosine,
-            frequency: freq_hz,
-            symmetry: 0.5,
-            amplitude: 0.0,
-            phase: 0.0,
-        };
-        //Signal generator we use does not accept the Basic config so we need to change it to Config structure - if fails it should give the zero safe config
-        let configuration = basic_configuration_cosine.try_into_config(sample_period, full_scale).unwrap_or_default();
-        //Create the generator
-        Self {
-            harmonic_signal_generator: SignalGenerator::new(configuration),
-        }
-    }
-    
-    
-    //Advance DDS phase, returns one DAC sample, returns 0 if anything unexpected happens
-
-    #[inline(always)] //called inside a tight real time loop - encourages compuler to remove call overhead?
-    fn next(&mut self)->i16{
-        self.harmonic_signal_generator.next().unwrap_or(0)
-    }
-
-    //This is how we change the parameters to match our network supplied parameters - pass in basic config constructued from harmonic wave parameters and sampling information
-    //If valid then waveform parameters are added and phase accumulator reset so phase changes are determinisitc and no suddent phase jumps else harmonic is disabled
-    fn update_from_basic(&mut self, basic: BasicConfig, sample_period: f32, full_scale: f32){
-        match basic.try_into_config(sample_period, full_scale){
-            Ok(configuration)=>{self.harmonic_signal_generator.update_waveform(configuration); self.harmonic_signal_generator.clear_phase_accumulator();}
-            Err(_)=>{ let mut zero = basic; zero.amplitude = 0.0;
-                let configuration = zero.try_into_config(sample_period, full_scale).unwrap_or_default();
-                self.harmonic_signal_generator.update_waveform(configuration); self.harmonic_signal_generator.clear_phase_accumulator();
-            }
         }
     }
 }
@@ -220,14 +173,14 @@ pub struct Settings{
     /// Specifies the config for signal generators to add on to DAC0/DAC1 outputs.
     ///
     /// # Path
-    /// `signal_generator/<n>`
+    /// `harmonic_generator/<n>`
     ///
     /// * `<n>` specifies which channel to configure. `<n>` := [0, 1]
     ///
     /// # Value
-    /// See [signal_generator::BasicConfig#miniconf]
-    #[tree(depth(2))]
-    signal_generator: [signal_generator::BasicConfig;2],
+    /// See [harmonic_generator::BasicConfig#miniconf]
+    // #[tree(depth(2))]
+    // harmonic_generator: [harmonic_oscillators::BasicConfig<MAX_HARMONICS>;2], //IDEA TO DO THIS INSTEAD OF PARAMETERS?
 
     /// Specifies the config for signal generators to add on to DAC0/DAC1 outputs.
     ///
@@ -282,10 +235,7 @@ impl Default for Settings{
             // The default telemetry period in seconds.
             telemetry_period: 10,
 
-            signal_generator: [signal_generator::BasicConfig::default(); 2],
-
             stream_target: StreamTarget::default(),
-
             //TO DO - CHOOSE BETTER VALUES FOR DEFAULT!
             harmonic_wave_parameters:[HarmonicWaveParameters::default(); MAX_HARMONICS],
 
@@ -299,7 +249,6 @@ impl Default for Settings{
 //Going to follow logic for older version which uses RTIC
 #[rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, LTDC, SDMMC])]
 mod app {
-
     use super::*;
 
     //Define the fact we are using monotonic time - only goes forwards
@@ -312,8 +261,7 @@ mod app {
         network: NetworkUsers<Settings, Telemetry, 3>,
         settings: Settings, //All our settings are shared
         telemetry: TelemetryBuffer,
-        signal_generator: [SignalGenerator; 2], //One signal generator for the channel
-        harmonic_generators: [HarmonicGenerator;MAX_HARMONICS],
+        harmonic_generators: [HarmonicGenerator<MAX_HARMONICS>;2],
         pounder: Option<Pounder>,
         
     }
@@ -374,31 +322,23 @@ mod app {
 
         let generator = network.configure_streaming(StreamFormat::AdcDacData);
 
+        let basic_cfg = BasicConfig::<MAX_HARMONICS> {
+                        zero_order_frequency: MAINS_FREQUENCY,
+                        amplitude: core::array::from_fn(|i| {
+                                    application_settings.harmonic_wave_parameters[i].amp
+                                }),
+                        phase: core::array::from_fn(|i| {application_settings.harmonic_wave_parameters[i].phase/360.0}),
+                    };
+        let cfg = basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE).expect("invalid harmonic configuration");
 
-        //Set up our harmonic generator array - set of harmoncis for each channel
-        let harmonic_generators_array: [HarmonicGenerator; MAX_HARMONICS] = array_init(|harmonic_index| {
-            let freq = MAINS_FREQUENCY * ((harmonic_index + 1) as f32); // harmonic k = 1..MAX_HARMONICS
-            HarmonicGenerator::new_zero_harmonic(SAMPLE_PERIOD, DacCode::FULL_SCALE, freq)
-        });
+
 
         let shared = Shared {
             usb: stabilizer.usb,
             network,
             settings: application_settings,
             telemetry: TelemetryBuffer::default(),
-            signal_generator: [
-                SignalGenerator::new(
-                    application_settings.signal_generator[0]
-                        .try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
-                        .unwrap(),
-                ),
-                SignalGenerator::new(
-                    application_settings.signal_generator[1]
-                        .try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
-                        .unwrap(),
-                ),
-            ],
-            harmonic_generators: harmonic_generators_array,
+            harmonic_generators: [HarmonicGenerator::new(cfg),HarmonicGenerator::new(cfg)],
             pounder,
         };
 
@@ -454,7 +394,7 @@ mod app {
     ///
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
-    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, dacs, iir_state, generator], shared=[settings, signal_generator, telemetry, harmonic_generators], priority=3)]
+    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, dacs, iir_state, generator], shared=[settings, telemetry, harmonic_generators], priority=3)]
     #[link_section = ".itcm.process"]
     fn process(c: process::Context){
 
@@ -462,7 +402,6 @@ mod app {
         let process::SharedResources {
             settings,
             telemetry,
-            signal_generator,
             harmonic_generators,
         } = c.shared;        
         let process::LocalResources {
@@ -474,8 +413,8 @@ mod app {
         } = c.local;
 
         //MAIN DSP ALGORITHM OCCURS HERE
-        (settings, telemetry, signal_generator, harmonic_generators).lock(
-            |settings, telemetry, _signal_generator, mut harmonic_generators| {
+        (settings, telemetry, harmonic_generators).lock(
+            |settings, telemetry, harmonic_generators| {
                 //Single channel build - only DI0 us used so DI1 set to false as intentionally unused
                 let digital_inputs = [digital_inputs.0.is_high(), digital_inputs.1.is_high()];
                 telemetry.digital_inputs = digital_inputs;
@@ -498,7 +437,6 @@ mod app {
 
                     for channel in 0..adc_samples.len() {
                     //Take mutable reference to harmonic slot for this channel
-                        let slots = &mut harmonic_generators;
                     
                         //Need to append the harmoncics to the adc_samples
 
@@ -507,14 +445,12 @@ mod app {
                         zip(dac_samples[channel].iter_mut())
                         .for_each(|(ai, di)|{
 
-
-                            let mut harmonic_sum: i32 = 0;
-                            for slot in slots.iter_mut(){
-                                harmonic_sum = harmonic_sum.saturating_add(slot.next() as i32);
-                            }
-
-
-                            let x = f32::from(*ai as i16 + harmonic_sum as i16);
+                            let harmonic_sum = harmonic_generators[channel].next().unwrap_or(0) as i32;
+                            let adc = *ai as i32;
+                            let mixed = adc + harmonic_sum;
+                            let mixed_i16 = mixed.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                            let x = mixed_i16 as f32;
+                            //let x = f32::from(*ai as i16 + harmonic_sum as i16);
                             let y = settings.iir_ch[channel].iter().zip(iir_state[channel].iter_mut()).fold(x, |yi, (ch, state)|{
                                 let filter = if hold { &iir::Biquad::HOLD} else { ch };
                                 filter.update(state, yi)
@@ -593,7 +529,7 @@ mod app {
 
 
     //Settings update
-    #[task(priority = 1, local=[afes, dds_clock_state], shared=[network, settings, signal_generator, harmonic_generators, pounder])]
+    #[task(priority = 1, local=[afes, dds_clock_state], shared=[network, settings, harmonic_generators, pounder])]
     fn settings_update(mut c: settings_update::Context) {
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());
         c.shared.settings.lock(|current| *current = settings);
@@ -601,43 +537,26 @@ mod app {
         c.local.afes.0.set_gain(settings.afe[0]);
         c.local.afes.1.set_gain(settings.afe[1]);
 
-        // Update the signal generators
-        for (i, &config) in settings.signal_generator.iter().enumerate() {
-            match config.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE) {
-                Ok(config) => {
-                    c.shared
-                        .signal_generator
-                        .lock(|generator| generator[i].update_waveform(config));
-                }
+
+        //Update harmonic generator
+        let harmonic_parameters = &settings.harmonic_wave_parameters;
+
+        let basic_cfg = harmonic_oscillators::BasicConfig::<MAX_HARMONICS> {
+                    zero_order_frequency: MAINS_FREQUENCY,
+                    amplitude: core::array::from_fn(|i| {
+                                harmonic_parameters[i].amp
+                            }),
+                    phase: core::array::from_fn(|i| {harmonic_parameters[i].phase/360.0}),
+                };
+        for i in 0..2{
+            match basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE) {
+                Ok(config)=> {c.shared.harmonic_generators.lock(|harmonic_generator| harmonic_generator[i].update_waveform(config));}
                 Err(err) => log::error!(
-                    "Failed to update signal generation on DAC{}: {:?}",
-                    i,
+                    "Failed to update signal generation on DAC{}: {:?}",i,
                     err
                 ),
             }
         }
-
-
-        //Update harmonic generator
-        let harmonic_parameters = &settings.harmonic_wave_parameters;
-        c.shared.harmonic_generators.lock(|harmonic_generator|{
-
-            for (harmonic_index, parameter) in harmonic_parameters.iter().enumerate(){
-                let freq = MAINS_FREQUENCY * ((harmonic_index+1)as f32);
-
-                //Build the basic configuration now with expected parameters
-                let basic = BasicConfig{
-                    signal: Signal::Cosine,
-                    frequency: freq,
-                    symmetry: 0.5,
-                    amplitude: parameter.amp * DacCode::FULL_SCALE,
-                    phase: parameter.phase/360.0, //Degrees (turns 0 to 1)
-
-                };
-                harmonic_generator[harmonic_index].update_from_basic(basic, SAMPLE_PERIOD, DacCode::FULL_SCALE);
-            }
-        });
-
 
         // Update Pounder configurations
         c.shared.pounder.lock(|pounder| {
