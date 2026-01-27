@@ -90,7 +90,7 @@ const MAX_HARMONICS: usize = 1;
 // Tree - extenral macro - custom derive macro generates code at compile time - must coem from dependency (miniconf in this case)
 
 //Create a Struct for harmonic wave parameters that we can use - unique to this app so keep it here
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, Tree)]
 pub struct HarmonicWaveParameters {
     /// Amplitude in controller units (use f32 for fractional amplitude)
     pub amp: f32,

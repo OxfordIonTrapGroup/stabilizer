@@ -143,7 +143,7 @@ impl<const N: usize> core::iter::Iterator for HarmonicGenerator<N> {
             let phase = self.phase_accumulator[i].wrapping_add(self.config.phase_offset[i]);
             let sign = phase.is_negative();
             self.phase_accumulator[i] = self.phase_accumulator[i].wrapping_add(self.config.phase_increment[i][sign as usize]);
-            let scale = idsp::cossin(phase).0 >> 16;
+            let scale = idsp::cossin(phase).1 >> 16;
             acc = acc.wrapping_add((self.config.amplitude[i] as i32 * scale) >> 15);
             
 
