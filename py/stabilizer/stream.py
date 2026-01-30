@@ -149,7 +149,7 @@ class Parser:
         self.data = self.data.swapaxes(0, 1).reshape(self.n_sources, -1).copy()
 
         return self
-        
+    
     def to_mu(self):
         """ Return the raw data in machine units """
         for (i, decoder) in enumerate(self.decoders):

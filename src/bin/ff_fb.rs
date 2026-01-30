@@ -25,11 +25,13 @@ use mutex_trait::prelude::*;
 use idsp::iir;
 
 //use stabilizer::hardware::signal_generator::{BasicConfig, Signal};
-use stabilizer::hardware::harmonic_oscillators::{BasicConfig};
+use stabilizer::app_utils::harmonic_oscillators::{BasicConfig};
 //Features we need from stabilizer
 use stabilizer::{
+    app_utils::harmonic_oscillators::{HarmonicGenerator},
     hardware::{
         self,
+        
         adc::{Adc0Input, Adc1Input, AdcCode},
         afe::Gain,
         dac::{Dac0Output, Dac1Output, DacCode},
@@ -37,7 +39,6 @@ use stabilizer::{
         pounder::{ClockConfig, PounderConfig},
         setup::PounderDevices as Pounder,
         //signal_generator::{self, SignalGenerator},
-        harmonic_oscillators::{self, HarmonicGenerator},
         timers::SamplingTimer,
         DigitalInput0, DigitalInput1, SerialTerminal, SystemTimer, Systick,
         UsbDevice, AFE0, AFE1,
@@ -192,8 +193,8 @@ pub struct Settings{
     ///
     /// # Value
     /// See [HarmonicWaveParameters]
-    #[tree(depth(1))]
-    harmonic_wave_parameters: [HarmonicWaveParameters;MAX_HARMONICS],
+    #[tree(depth(2))]
+    harmonic_wave_parameters: [[HarmonicWaveParameters;MAX_HARMONICS];2],
 
     // /// Specifies if channel 0 is set for use (true) or channel 1 (false)
     // is_set_channel0 : bool,
@@ -237,7 +238,7 @@ impl Default for Settings{
 
             stream_target: StreamTarget::default(),
             //TO DO - CHOOSE BETTER VALUES FOR DEFAULT!
-            harmonic_wave_parameters:[HarmonicWaveParameters::default(); MAX_HARMONICS],
+            harmonic_wave_parameters:[[HarmonicWaveParameters::default(); MAX_HARMONICS], [HarmonicWaveParameters::default(); MAX_HARMONICS]],
 
 
             //TO DO - MAY NOT NEED THIS TBH
@@ -322,15 +323,19 @@ mod app {
 
         let generator = network.configure_streaming(StreamFormat::AdcDacData);
 
-        let basic_cfg = BasicConfig::<MAX_HARMONICS> {
+        let harmonic_generators_arr = core::array::from_fn(|channel| {
+            let basic_cfg = BasicConfig::<MAX_HARMONICS> {
                         zero_order_frequency: MAINS_FREQUENCY,
                         amplitude: core::array::from_fn(|i| {
-                                    application_settings.harmonic_wave_parameters[i].amp
+                                    application_settings.harmonic_wave_parameters[channel][i].amp
                                 }),
-                        phase: core::array::from_fn(|i| {application_settings.harmonic_wave_parameters[i].phase/360.0}),
-                    };
-        let cfg = basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE).expect("invalid harmonic configuration");
+                        phase: core::array::from_fn(|i| {application_settings.harmonic_wave_parameters[channel][i].phase/360.0}),
+            };
 
+            let cfg = basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE).expect("invalid harmonic configuration");
+
+            HarmonicGenerator::new(cfg)
+        });
 
 
         let shared = Shared {
@@ -338,7 +343,7 @@ mod app {
             network,
             settings: application_settings,
             telemetry: TelemetryBuffer::default(),
-            harmonic_generators: [HarmonicGenerator::new(cfg),HarmonicGenerator::new(cfg)],
+            harmonic_generators: harmonic_generators_arr,
             pounder,
         };
 
@@ -444,12 +449,15 @@ mod app {
                         .iter().
                         zip(dac_samples[channel].iter_mut())
                         .for_each(|(ai, di)|{
-
-                            let harmonic_sum = harmonic_generators[channel].next().unwrap_or(0) as i32;
-                            let adc = *ai as i32;
-                            let mixed = adc + harmonic_sum;
-                            let mixed_i16 = mixed.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                            let x = mixed_i16 as f32;
+                            let x = f32::from(*ai as i16);
+                            // TO DO FIGER THIS OUT
+                            let _harmonic_sum = harmonic_generators[channel].next().unwrap_or(0) as i32;
+                            // let x = x.saturating_add(harmonic_sum);
+                            
+                            //let adc = *ai as i32;
+                            //let mixed = adc; //+ harmonic_sum;
+                            //let mixed_i16 = mixed.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                            //let x = mixed_i16 as f32;
                             //let x = f32::from(*ai as i16 + harmonic_sum as i16);
                             let y = settings.iir_ch[channel].iter().zip(iir_state[channel].iter_mut()).fold(x, |yi, (ch, state)|{
                                 let filter = if hold { &iir::Biquad::HOLD} else { ch };
@@ -540,19 +548,21 @@ mod app {
 
         //Update harmonic generator
         let harmonic_parameters = &settings.harmonic_wave_parameters;
+        
+        for channel in 0..2{
 
-        let basic_cfg = harmonic_oscillators::BasicConfig::<MAX_HARMONICS> {
+            let basic_cfg = BasicConfig::<MAX_HARMONICS> {
                     zero_order_frequency: MAINS_FREQUENCY,
                     amplitude: core::array::from_fn(|i| {
-                                harmonic_parameters[i].amp
+                                harmonic_parameters[channel][i].amp
                             }),
-                    phase: core::array::from_fn(|i| {harmonic_parameters[i].phase/360.0}),
+                    phase: core::array::from_fn(|i| {harmonic_parameters[channel][i].phase/360.0}),
                 };
-        for i in 0..2{
+
             match basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE) {
-                Ok(config)=> {c.shared.harmonic_generators.lock(|harmonic_generator| harmonic_generator[i].update_waveform(config));}
+                Ok(config)=> {c.shared.harmonic_generators.lock(|harmonic_generator| harmonic_generator[channel].update_waveform(config));}
                 Err(err) => log::error!(
-                    "Failed to update signal generation on DAC{}: {:?}",i,
+                    "Failed to update harmonic generation on channel{}: {:?}",channel,
                     err
                 ),
             }
