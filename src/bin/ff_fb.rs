@@ -584,6 +584,14 @@ mod app {
 
         let target = settings.stream_target.into();
         c.shared.network.lock(|net| net.direct_stream(target));
+        log::info!(
+                "Stream target set to {}.{}.{}.{}:{}",
+                settings.stream_target.ip[0],
+                settings.stream_target.ip[1],
+                settings.stream_target.ip[2],
+                settings.stream_target.ip[3],
+                settings.stream_target.port,
+            );
     }
 
 
