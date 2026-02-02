@@ -332,7 +332,7 @@ mod app {
                         phase: core::array::from_fn(|i| {application_settings.harmonic_wave_parameters[channel][i].phase/360.0}),
             };
 
-            let cfg = basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE).expect("invalid harmonic configuration");
+            let cfg = basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE).unwrap();
 
             HarmonicGenerator::new(cfg)
         });
@@ -446,19 +446,21 @@ mod app {
                         //Need to append the harmoncics to the adc_samples
 
                         adc_samples[channel]
-                        .iter().
-                        zip(dac_samples[channel].iter_mut())
-                        .for_each(|(ai, di)|{
-                            let x = f32::from(*ai as i16);
+                        .iter()
+                        .zip(dac_samples[channel].iter_mut())
+                        .zip(&mut harmonic_generators[channel])
+                        .for_each(|((ai, di), harmonic)|{
+
+                            // let adc_i32: i32 = *ai as i32 + i16::MIN as i32;
+                            // let mixed_i16 = adc_i32.saturating_add(harmonic as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+
+                            let ai_i16 = *ai as i16;
+                            let mixed = ai_i16.saturating_add(harmonic);
+
+                            let x = f32::from(mixed);
+                            //let x = f32::from(*ai as i16);
                             // TO DO FIGER THIS OUT
-                            let _harmonic_sum = harmonic_generators[channel].next().unwrap_or(0) as i32;
-                            // let x = x.saturating_add(harmonic_sum);
-                            
-                            //let adc = *ai as i32;
-                            //let mixed = adc; //+ harmonic_sum;
-                            //let mixed_i16 = mixed.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                            //let x = mixed_i16 as f32;
-                            //let x = f32::from(*ai as i16 + harmonic_sum as i16);
+
                             let y = settings.iir_ch[channel].iter().zip(iir_state[channel].iter_mut()).fold(x, |yi, (ch, state)|{
                                 let filter = if hold { &iir::Biquad::HOLD} else { ch };
                                 filter.update(state, yi)
