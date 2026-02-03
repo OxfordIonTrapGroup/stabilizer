@@ -28,33 +28,43 @@ pub enum Error {
 impl<const N: usize> BasicConfig<N> {
 
     pub fn try_into_config(self, sample_period: f32, full_scale: f32)->Result<Config<N>, Error>{
-        const SYMMETRY: f32 = 0.5;
-        const NYQUIST: f32 = (1u32 << 31) as _;
+        //const SYMMETRY: f32 = 0.5;
+        //const NYQUIST: f32 = (1u32 << 31) as _;
+        const PHASE_SCALE: f32 = (1u32 << 31) as f32; //added
 
         let ftw: [f32; N] = core::array::from_fn(|i| {
             self.zero_order_frequency
                 * ((i + 1) as f32)
                 * sample_period
-                * NYQUIST
+                * PHASE_SCALE//NYQUIST //changed
         });
-        // Check for valid frequencies
-        for &f in &ftw {
-            if f < 0.0 || 2.0 * f > NYQUIST {
+        // // Check for valid frequencies
+        // for &f in &ftw {
+        //     if f < 0.0 || 2.0 * f > NYQUIST {
+        //         return Err(Error::InvalidFrequency);
+        //     }
+        // }
+
+        let nyquist_hz = 1.0/(2.0*sample_period);
+        for i in 0..N {
+            let freq = self.zero_order_frequency * (i as f32 + 1.0);
+            if freq > nyquist_hz {
                 return Err(Error::InvalidFrequency);
             }
         }
 
-        let phase_increment: [[i32;2];N] = core::array::from_fn(|i| {
-            let f = ftw[i];
-            let val =
-                (if SYMMETRY * NYQUIST > f {
-                    f / SYMMETRY
-                } else {
-                    NYQUIST
-                }) as i32;
+        // let phase_increment: [[i32;2];N] = core::array::from_fn(|i| {
+        //     let f = ftw[i];
+        //     let val =
+        //         (if SYMMETRY * NYQUIST > f {
+        //             f / SYMMETRY
+        //         } else {
+        //             NYQUIST
+        //         }) as i32;
 
-                [val, val]
-        });
+        //         [val, val]
+        // });
+        let phase_increment: [i32; N] = core::array::from_fn(|i| {ftw[i] as i32});
 
         let amps_f32: [f32; N] = core::array::from_fn(|i: usize| {
             let scale = i16::MAX as f32 / full_scale;
@@ -72,7 +82,8 @@ impl<const N: usize> BasicConfig<N> {
         });
         
         let phases_i32: [i32; N] = core::array::from_fn(|i: usize| {
-           let p =  self.phase[i] * (1u64 << 32) as f32;
+           let p =  self.phase[i] * (1u32 << 31) as f32; //changed to u32
+           
            p as i32
             
         });
@@ -89,7 +100,7 @@ impl<const N: usize> BasicConfig<N> {
 #[derive(Copy, Clone, Debug)]
 pub struct Config<const N: usize> {
     pub amplitude: [i16; N],
-    pub phase_increment: [[i32;2];N],
+    pub phase_increment: [i32;N],
     pub phase_offset: [i32; N],
 }
 
@@ -97,7 +108,7 @@ impl<const N: usize> Default for Config<N>{
     fn default() -> Self {
         Self {
             amplitude: [0;N],
-            phase_increment: [[0,0];N],
+            phase_increment: [0;N],
             phase_offset: [0;N],
         }
     }
@@ -141,8 +152,8 @@ impl<const N: usize> core::iter::Iterator for HarmonicGenerator<N> {
         {
 
             let phase = self.phase_accumulator[i].wrapping_add(self.config.phase_offset[i]);
-            let sign = phase.is_negative();
-            self.phase_accumulator[i] = self.phase_accumulator[i].wrapping_add(self.config.phase_increment[i][sign as usize]);
+            //let sign = phase.is_negative();
+            self.phase_accumulator[i] = self.phase_accumulator[i].wrapping_add(self.config.phase_increment[i]);
             let scale = idsp::cossin(phase).1 >> 16;
             acc = acc.wrapping_add((self.config.amplitude[i] as i32 * scale) >> 15);
             

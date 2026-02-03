@@ -64,7 +64,7 @@ const IIR_CASCADE_LENGTH: usize = 1;
 const BATCH_SIZE: usize = 8;
 
 //Logarithm of number of 100MHz timer ticks between each sample - set to 7 ,eaning value of 128 (2^7) - 1.28us per sample or 781.25kGHz here
-const SAMPLE_TICKS_LOG2: u8 = 7;
+const SAMPLE_TICKS_LOG2: u8 = 8;
 
 //This just converts to seconds
 const SAMPLE_TICKS: u32 = 1 << SAMPLE_TICKS_LOG2;
@@ -77,7 +77,7 @@ const SAMPLE_PERIOD: f32 =
 const MAINS_FREQUENCY: f32 = 50.0;
 
 //MAX HARMONCIS
-const MAX_HARMONICS: usize = 1;
+const MAX_HARMONICS: usize = 5;
 
 // NOTE: Use log 2 as hardware timers work best with powers of 2 and allows fast bit shifts instead of division
 // NOTE: Use batching as DMA transfers in chunks not one by one - processig batch reduces interrupt overhead and keeps the pipelines for ADC and DAC full - 
@@ -569,6 +569,23 @@ mod app {
                 ),
             }
         }
+        log::info!(
+                "Harmonic Amplitudes are {}, {}, {}, {}, {}",
+                harmonic_parameters[0][0].amp,
+                harmonic_parameters[0][1].amp,
+                harmonic_parameters[0][2].amp,
+                harmonic_parameters[0][3].amp,
+                harmonic_parameters[0][4].amp,
+            );
+        log::info!(
+                "Harmonic Phases are {}, {}, {}, {}, {}",
+                harmonic_parameters[0][0].phase,
+                harmonic_parameters[0][1].phase,
+                harmonic_parameters[0][2].phase,
+                harmonic_parameters[0][3].phase,
+                harmonic_parameters[0][4].phase,
+
+            );
 
         // Update Pounder configurations
         c.shared.pounder.lock(|pounder| {
@@ -584,14 +601,14 @@ mod app {
 
         let target = settings.stream_target.into();
         c.shared.network.lock(|net| net.direct_stream(target));
-        log::info!(
-                "Stream target set to {}.{}.{}.{}:{}",
-                settings.stream_target.ip[0],
-                settings.stream_target.ip[1],
-                settings.stream_target.ip[2],
-                settings.stream_target.ip[3],
-                settings.stream_target.port,
-            );
+        // log::info!(
+        //         "Stream target set to {}.{}.{}.{}:{}",
+        //         settings.stream_target.ip[0],
+        //         settings.stream_target.ip[1],
+        //         settings.stream_target.ip[2],
+        //         settings.stream_target.ip[3],
+        //         settings.stream_target.port,
+        //     );
     }
 
 
