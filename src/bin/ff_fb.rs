@@ -108,6 +108,15 @@ impl Default for HarmonicWaveParameters {
 }
 
 
+// pub struct VOffset {
+//     pub offset: f32
+// }
+// impl fn default() -> Self {
+//     Self {
+//         offset: 0.0
+//     }
+// }
+
 
 #[derive(Clone, Copy, Debug, Tree)]
 pub struct Settings{
@@ -212,9 +221,8 @@ pub struct Settings{
     #[tree]
     pounder: Option<PounderConfig>,
 
-    #[tree]
     //Add in the V_offset
-    v_offset: u16,
+    v_offset: f32,
 
 }
 
@@ -247,7 +255,7 @@ impl Default for Settings{
 
             //TO DO - MAY NOT NEED THIS TBH
             pounder: None.into(),
-            v_offset: 10,
+            v_offset: 0.0,
         }
     }
 }
@@ -552,7 +560,10 @@ mod app {
         c.local.afes.0.set_gain(settings.afe[0]);
         c.local.afes.1.set_gain(settings.afe[1]);
 
-         
+        let offset_1 = &settings.v_offset;
+        log::info!("Offset is {}", offset_1);
+
+        
         //TO DO - This would be where we update the SPI to CURRENT SENSE BOARD
         //Update harmonic generator
         let harmonic_parameters = &settings.harmonic_wave_parameters;

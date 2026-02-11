@@ -362,7 +362,6 @@ mod app {
 
                     // Preserve instruction and data ordering w.r.t. DMA flag access.
                     fence(Ordering::SeqCst);
-
                     for channel in 0..adc_samples.len() {
                         adc_samples[channel]
                             .iter()
@@ -391,6 +390,7 @@ mod app {
 
                                 // Convert to DAC code
                                 *di = DacCode::from(y).0;
+                                //*di = DacCode::try_from(0.5_f32).unwrap().0;
                             })
                             .last();
                     }
