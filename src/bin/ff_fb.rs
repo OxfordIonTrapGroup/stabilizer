@@ -200,7 +200,7 @@ pub struct Settings{
     // is_set_channel0 : bool,
 
 
-    //TO DO - MAY NOT NEED THIS TBH
+    //TO DO - MAY NOT NEED THIS
     /// Specifies the config for pounder DDS clock configuration, DDS channels & attenuations
     ///
     /// # Path
@@ -211,6 +211,10 @@ pub struct Settings{
     /// TODO: this was #[miniconf(defer)] -- is this right? Also, miniconf::Option vs Option?
     #[tree]
     pounder: Option<PounderConfig>,
+
+    #[tree]
+    //Add in the V_offset
+    v_offset: u16,
 
 }
 
@@ -243,6 +247,7 @@ impl Default for Settings{
 
             //TO DO - MAY NOT NEED THIS TBH
             pounder: None.into(),
+            v_offset: 10,
         }
     }
 }
@@ -547,7 +552,8 @@ mod app {
         c.local.afes.0.set_gain(settings.afe[0]);
         c.local.afes.1.set_gain(settings.afe[1]);
 
-
+         
+        //TO DO - This would be where we update the SPI to CURRENT SENSE BOARD
         //Update harmonic generator
         let harmonic_parameters = &settings.harmonic_wave_parameters;
         
