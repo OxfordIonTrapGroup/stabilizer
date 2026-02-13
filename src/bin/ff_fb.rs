@@ -347,6 +347,10 @@ mod app {
             current_sense_dac,
         };
 
+        // Explicitly write to DAC on set up
+        if let Some(dac) = local.current_sense_dac.as_mut() {
+            dac.write_voltage(application_settings.v_offset);
+        }
 
         local.adcs.0.start();
         local.adcs.1.start();
