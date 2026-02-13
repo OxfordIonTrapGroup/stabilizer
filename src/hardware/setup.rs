@@ -831,9 +831,7 @@ pub fn setup(
     // Current sense board - unfortunately not build with probe - I cannot add a condition to check if there is a current sense board connected
     // Have to unconditionally init spi1 - currently only initi with pounder
     // Problem - conflict with pounder
-    // Solution - will init SPI1 outside this unconditionally then do pounder board detection - if pounder is being used then it moves ownership into pounder
-    // ff_fb app should not be used with pounder - hopefully no conflict?
-
+    // Solution - check for pounder first and then apply if not no pounder regardless
 
 
     // Measure the Pounder PGOOD output to detect if pounder is present on Stabilizer.
