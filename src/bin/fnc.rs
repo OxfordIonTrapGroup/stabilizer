@@ -226,7 +226,7 @@ mod app {
         let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
 
         // Configure the microcontroller
-        let (stabilizer, pounder) = hardware::setup::setup(
+        let (stabilizer, pounder, _current_sense_dac) = hardware::setup::setup(
             c.core,
             c.device,
             clock,

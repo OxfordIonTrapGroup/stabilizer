@@ -19,6 +19,7 @@ pub mod setup;
 pub mod shared_adc;
 pub mod signal_generator;
 pub mod timers;
+pub mod current_sense_dac;
 
 // Type alias for the analog front-end (AFE) for ADC0.
 pub type AFE0 = afe::ProgrammableGainAmplifier<

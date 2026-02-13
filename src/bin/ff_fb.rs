@@ -36,6 +36,7 @@ use stabilizer::{
         afe::Gain,
         dac::{Dac0Output, Dac1Output, DacCode},
         hal,
+        current_sense_dac::CurrentSenseDac,
         pounder::{ClockConfig, PounderConfig},
         setup::PounderDevices as Pounder,
         //signal_generator::{self, SignalGenerator},
@@ -85,11 +86,6 @@ const MAX_HARMONICS: usize = 5;
 
 //----------------------------------------------------------------------------------------------
 
-// Clone - allows explicit duplication of values used .clone()
-// Copy - enables implicit copying instead of moves - happens automatically on assignment, function calls etc. (copy is a clone)
-// Debug - enable formatting with {:?} used for logging and debugging
-// Tree - extenral macro - custom derive macro generates code at compile time - must coem from dependency (miniconf in this case)
-
 //Create a Struct for harmonic wave parameters that we can use - unique to this app so keep it here
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, Tree)]
 pub struct HarmonicWaveParameters {
@@ -106,16 +102,6 @@ impl Default for HarmonicWaveParameters {
         }
     }
 }
-
-
-// pub struct VOffset {
-//     pub offset: f32
-// }
-// impl fn default() -> Self {
-//     Self {
-//         offset: 0.0
-//     }
-// }
 
 
 #[derive(Clone, Copy, Debug, Tree)]
@@ -183,18 +169,6 @@ pub struct Settings{
     /// Specifies the config for signal generators to add on to DAC0/DAC1 outputs.
     ///
     /// # Path
-    /// `harmonic_generator/<n>`
-    ///
-    /// * `<n>` specifies which channel to configure. `<n>` := [0, 1]
-    ///
-    /// # Value
-    /// See [harmonic_generator::BasicConfig#miniconf]
-    // #[tree(depth(2))]
-    // harmonic_generator: [harmonic_oscillators::BasicConfig<MAX_HARMONICS>;2], //IDEA TO DO THIS INSTEAD OF PARAMETERS?
-
-    /// Specifies the config for signal generators to add on to DAC0/DAC1 outputs.
-    ///
-    /// # Path
     /// `harmonic_wave_parameters/<n>`
     /// 
     /// * `<n>` specifies which harmonic order to configure. `<n>` := [0,1,2,3,4]
@@ -204,10 +178,6 @@ pub struct Settings{
     /// See [HarmonicWaveParameters]
     #[tree(depth(2))]
     harmonic_wave_parameters: [[HarmonicWaveParameters;MAX_HARMONICS];2],
-
-    // /// Specifies if channel 0 is set for use (true) or channel 1 (false)
-    // is_set_channel0 : bool,
-
 
     //TO DO - MAY NOT NEED THIS
     /// Specifies the config for pounder DDS clock configuration, DDS channels & attenuations
@@ -263,6 +233,8 @@ impl Default for Settings{
 //Going to follow logic for older version which uses RTIC
 #[rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, LTDC, SDMMC])]
 mod app {
+
+
     use super::*;
 
     //Define the fact we are using monotonic time - only goes forwards
@@ -294,6 +266,7 @@ mod app {
         dds_clock_state: Option<ClockConfig>,
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
+        current_sense_dac: Option<CurrentSenseDac>,
     }
 
     #[init]
@@ -303,7 +276,7 @@ mod app {
         let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
 
         //Configure the MCU
-        let (stabilizer, pounder) = hardware::setup::setup(
+        let (stabilizer, pounder, current_sense_dac) = hardware::setup::setup(
             c.core,
             c.device,
             clock,
@@ -371,6 +344,7 @@ mod app {
             dds_clock_state,
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
+            current_sense_dac,
         };
 
 
@@ -552,7 +526,7 @@ mod app {
 
 
     //Settings update
-    #[task(priority = 1, local=[afes, dds_clock_state], shared=[network, settings, harmonic_generators, pounder])]
+    #[task(priority = 1, local=[afes, dds_clock_state, current_sense_dac], shared=[network, settings, harmonic_generators, pounder])]
     fn settings_update(mut c: settings_update::Context) {
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());
         c.shared.settings.lock(|current| *current = settings);
@@ -562,7 +536,10 @@ mod app {
 
         let offset_1 = &settings.v_offset;
         log::info!("Offset is {}", offset_1);
-
+        
+        if let Some(dac) = c.local.current_sense_dac.as_mut() {
+            dac.write_voltage(settings.v_offset);
+        }
         
         //TO DO - This would be where we update the SPI to CURRENT SENSE BOARD
         //Update harmonic generator

@@ -215,6 +215,7 @@ impl Default for Settings {
 
 #[rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, SDMMC])]
 mod app {
+
     use super::*;
 
     #[monotonic(binds = SysTick, default = true, priority = 2)]
@@ -249,7 +250,7 @@ mod app {
         let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
 
         // Configure the microcontroller
-        let (mut stabilizer, _pounder) = hardware::setup::setup(
+        let (mut stabilizer, _pounder, _current_sense_dac) = hardware::setup::setup(
             c.core,
             c.device,
             clock,
