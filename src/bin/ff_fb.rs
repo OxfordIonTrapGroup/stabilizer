@@ -37,8 +37,8 @@ use stabilizer::{
         dac::{Dac0Output, Dac1Output, DacCode},
         hal,
         current_sense_dac::CurrentSenseDac,
-        pounder::{ClockConfig, PounderConfig},
-        setup::PounderDevices as Pounder,
+        //pounder::{ClockConfig, PounderConfig},
+        //setup::PounderDevices as Pounder,
         //signal_generator::{self, SignalGenerator},
         timers::SamplingTimer,
         DigitalInput0, DigitalInput1, SerialTerminal, SystemTimer, Systick,
@@ -188,8 +188,8 @@ pub struct Settings{
     /// # Value
     /// See [PounderConfig#miniconf]
     /// TODO: this was #[miniconf(defer)] -- is this right? Also, miniconf::Option vs Option?
-    #[tree]
-    pounder: Option<PounderConfig>,
+    // #[tree]
+    // pounder: Option<PounderConfig>,
 
     //Add in the V_offset
     v_offset: f32,
@@ -224,7 +224,7 @@ impl Default for Settings{
 
 
             //TO DO - MAY NOT NEED THIS TBH
-            pounder: None.into(),
+            //pounder: None.into(),
             v_offset: 0.0,
         }
     }
@@ -248,7 +248,7 @@ mod app {
         settings: Settings, //All our settings are shared
         telemetry: TelemetryBuffer,
         harmonic_generators: [HarmonicGenerator<MAX_HARMONICS>;2],
-        pounder: Option<Pounder>,
+       // pounder: Option<Pounder>,
         
     }
 
@@ -263,7 +263,7 @@ mod app {
         adcs: (Adc0Input, Adc1Input),
         dacs: (Dac0Output, Dac1Output),
         iir_state: [[[f32; 4]; IIR_CASCADE_LENGTH]; 2],
-        dds_clock_state: Option<ClockConfig>,
+        //dds_clock_state: Option<ClockConfig>,
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
         current_sense_dac: Option<CurrentSenseDac>,
@@ -276,7 +276,7 @@ mod app {
         let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
 
         //Configure the MCU
-        let (stabilizer, pounder, current_sense_dac) = hardware::setup::setup(
+        let (stabilizer, _pounder, current_sense_dac) = hardware::setup::setup(
             c.core,
             c.device,
             clock,
@@ -285,15 +285,17 @@ mod app {
         );
 
         let device_settings = stabilizer.usb_serial.settings();
-        let mut application_settings = Settings::default(); //Use default application settings
-        if pounder.is_some() {
-            application_settings
-                .pounder
-                .replace(PounderConfig::default());
-        }
+        let application_settings = Settings::default(); //Use default application settings
+        //Removed mut form above ^
+        
+        // if pounder.is_some() {
+        //     application_settings
+        //         .pounder
+        //         .replace(PounderConfig::default());
+        // }
 
         //Define the dds clock state
-        let dds_clock_state = pounder.as_ref().map(|_| ClockConfig::default());
+       // let dds_clock_state = pounder.as_ref().map(|_| ClockConfig::default());
 
         //Define the network settings
         let mut network = NetworkUsers::new(
@@ -330,7 +332,7 @@ mod app {
             settings: application_settings,
             telemetry: TelemetryBuffer::default(),
             harmonic_generators: harmonic_generators_arr,
-            pounder,
+           // pounder,
         };
 
         let mut local = Local {
@@ -341,7 +343,7 @@ mod app {
             adcs: stabilizer.adcs,
             dacs: stabilizer.dacs,
             iir_state: [[[0.; 4]; IIR_CASCADE_LENGTH]; 2],
-            dds_clock_state,
+           // dds_clock_state,
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
             current_sense_dac,
@@ -530,7 +532,7 @@ mod app {
 
 
     //Settings update
-    #[task(priority = 1, local=[afes, dds_clock_state, current_sense_dac], shared=[network, settings, harmonic_generators, pounder])]
+    #[task(priority = 1, local=[afes, current_sense_dac], shared=[network, settings, harmonic_generators])]
     fn settings_update(mut c: settings_update::Context) {
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());
         c.shared.settings.lock(|current| *current = settings);
@@ -586,16 +588,16 @@ mod app {
             );
 
         // Update Pounder configurations
-        c.shared.pounder.lock(|pounder| {
-            if let Some(pounder) = pounder {
-                let pounder_settings = settings.pounder.as_ref().unwrap();
-                // let mut clocking = c.local.dds_clock_state;
-                pounder.update_dds(
-                    *pounder_settings,
-                    &mut c.local.dds_clock_state,
-                );
-            }
-        });
+        // c.shared.pounder.lock(|pounder| {
+        //     if let Some(pounder) = pounder {
+        //         let pounder_settings = settings.pounder.as_ref().unwrap();
+        //         // let mut clocking = c.local.dds_clock_state;
+        //         pounder.update_dds(
+        //             *pounder_settings,
+        //             &mut c.local.dds_clock_state,
+        //         );
+        //     }
+        // });
 
         let target = settings.stream_target.into();
         c.shared.network.lock(|net| net.direct_stream(target));
@@ -611,17 +613,17 @@ mod app {
 
 
     //Telemetry update
-    #[task(priority = 1, shared=[network, settings, telemetry, pounder], local=[cpu_temp_sensor])]
+    #[task(priority = 1, shared=[network, settings, telemetry], local=[cpu_temp_sensor])]
     fn telemetry(mut c: telemetry::Context) {
         let telemetry: TelemetryBuffer =
             c.shared.telemetry.lock(|telemetry| *telemetry);
 
-        let (gains, telemetry_period, pounder_telemetry) =
-            (c.shared.settings, c.shared.pounder).lock(|settings, pounder| {
+        let (gains, telemetry_period) = //pounder_telemetry) =
+            (c.shared.settings).lock(|settings| { //c.shared.pounder
                 (
                     settings.afe,
                     settings.telemetry_period,
-                    pounder.as_mut().map(|pdr| pdr.get_telemetry()),
+                    //pounder.as_mut().map(|pdr| pdr.get_telemetry()),
                 )
             });
 
@@ -630,7 +632,8 @@ mod app {
                 gains[0],
                 gains[1],
                 c.local.cpu_temp_sensor.get_temperature().unwrap(),
-                pounder_telemetry,
+                None,
+                //pounder_telemetry,
             ))
         });
 
