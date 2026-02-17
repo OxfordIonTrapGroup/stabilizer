@@ -179,18 +179,6 @@ pub struct Settings{
     #[tree(depth(2))]
     harmonic_wave_parameters: [[HarmonicWaveParameters;MAX_HARMONICS];2],
 
-    //TO DO - MAY NOT NEED THIS
-    /// Specifies the config for pounder DDS clock configuration, DDS channels & attenuations
-    ///
-    /// # Path
-    /// `pounder`
-    ///
-    /// # Value
-    /// See [PounderConfig#miniconf]
-    /// TODO: this was #[miniconf(defer)] -- is this right? Also, miniconf::Option vs Option?
-    // #[tree]
-    // pounder: Option<PounderConfig>,
-
     //Add in the V_offset
     v_offset: f32,
 
@@ -222,9 +210,6 @@ impl Default for Settings{
             //TO DO - CHOOSE BETTER VALUES FOR DEFAULT!
             harmonic_wave_parameters:[[HarmonicWaveParameters::default(); MAX_HARMONICS], [HarmonicWaveParameters::default(); MAX_HARMONICS]],
 
-
-            //TO DO - MAY NOT NEED THIS TBH
-            //pounder: None.into(),
             v_offset: 0.0,
         }
     }
@@ -248,7 +233,6 @@ mod app {
         settings: Settings, //All our settings are shared
         telemetry: TelemetryBuffer,
         harmonic_generators: [HarmonicGenerator<MAX_HARMONICS>;2],
-       // pounder: Option<Pounder>,
         
     }
 
@@ -263,7 +247,6 @@ mod app {
         adcs: (Adc0Input, Adc1Input),
         dacs: (Dac0Output, Dac1Output),
         iir_state: [[[f32; 4]; IIR_CASCADE_LENGTH]; 2],
-        //dds_clock_state: Option<ClockConfig>,
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
         current_sense_dac: Option<CurrentSenseDac>,
@@ -286,16 +269,6 @@ mod app {
 
         let device_settings = stabilizer.usb_serial.settings();
         let application_settings = Settings::default(); //Use default application settings
-        //Removed mut form above ^
-        
-        // if pounder.is_some() {
-        //     application_settings
-        //         .pounder
-        //         .replace(PounderConfig::default());
-        // }
-
-        //Define the dds clock state
-       // let dds_clock_state = pounder.as_ref().map(|_| ClockConfig::default());
 
         //Define the network settings
         let mut network = NetworkUsers::new(
@@ -332,7 +305,6 @@ mod app {
             settings: application_settings,
             telemetry: TelemetryBuffer::default(),
             harmonic_generators: harmonic_generators_arr,
-           // pounder,
         };
 
         let mut local = Local {
@@ -343,7 +315,6 @@ mod app {
             adcs: stabilizer.adcs,
             dacs: stabilizer.dacs,
             iir_state: [[[0.; 4]; IIR_CASCADE_LENGTH]; 2],
-           // dds_clock_state,
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
             current_sense_dac,
@@ -426,8 +397,6 @@ mod app {
                     let adc_samples = [adc0, adc1];
                     let dac_samples = [dac0, dac1];
 
-                    //let channel_index: usize = if settings.is_set_channel0{0} else {1};
-
                     // Preserve instruction and data ordering w.r.t. DMA flag access.
                     fence(Ordering::SeqCst);
 
@@ -444,15 +413,10 @@ mod app {
                         .zip(&mut harmonic_generators[channel])
                         .for_each(|((ai, di), harmonic)|{
 
-                            // let adc_i32: i32 = *ai as i32 + i16::MIN as i32;
-                            // let mixed_i16 = adc_i32.saturating_add(harmonic as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-
                             let ai_i16 = *ai as i16;
                             let mixed = ai_i16.saturating_add(harmonic);
 
                             let x = f32::from(mixed);
-                            //let x = f32::from(*ai as i16);
-                            // TO DO FIGER THIS OUT
 
                             let y = settings.iir_ch[channel].iter().zip(iir_state[channel].iter_mut()).fold(x, |yi, (ch, state)|{
                                 let filter = if hold { &iir::Biquad::HOLD} else { ch };
@@ -587,18 +551,6 @@ mod app {
 
             );
 
-        // Update Pounder configurations
-        // c.shared.pounder.lock(|pounder| {
-        //     if let Some(pounder) = pounder {
-        //         let pounder_settings = settings.pounder.as_ref().unwrap();
-        //         // let mut clocking = c.local.dds_clock_state;
-        //         pounder.update_dds(
-        //             *pounder_settings,
-        //             &mut c.local.dds_clock_state,
-        //         );
-        //     }
-        // });
-
         let target = settings.stream_target.into();
         c.shared.network.lock(|net| net.direct_stream(target));
         // log::info!(
@@ -618,12 +570,11 @@ mod app {
         let telemetry: TelemetryBuffer =
             c.shared.telemetry.lock(|telemetry| *telemetry);
 
-        let (gains, telemetry_period) = //pounder_telemetry) =
-            (c.shared.settings).lock(|settings| { //c.shared.pounder
+        let (gains, telemetry_period) = 
+            (c.shared.settings).lock(|settings| { 
                 (
                     settings.afe,
                     settings.telemetry_period,
-                    //pounder.as_mut().map(|pdr| pdr.get_telemetry()),
                 )
             });
 
@@ -633,7 +584,6 @@ mod app {
                 gains[1],
                 c.local.cpu_temp_sensor.get_temperature().unwrap(),
                 None,
-                //pounder_telemetry,
             ))
         });
 
@@ -666,6 +616,11 @@ mod app {
     #[task(binds = ETH, priority = 1)]
     fn eth(_: eth::Context) {
         unsafe { hal::ethernet::interrupt_handler() }
+    }
+
+    #[task(binds = SPI1, priority = 4)]
+    fn spi1(_: spi1::Context) {
+        panic!("Current Sense DAC error");
     }
 
     #[task(binds = SPI2, priority = 4)]

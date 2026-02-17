@@ -21,7 +21,6 @@ impl CurrentSenseDac{
         let bytes = value.to_be_bytes();
         self.cs.set_low();
         log::info!("Writing value {}", value);
-        //log::info!("Writing bytes {}", &bytes);
         match self.spi.write(&bytes) {
             Ok(_) => {}
             Err(e) => {
@@ -34,18 +33,17 @@ impl CurrentSenseDac{
 
         const DAC_MAX: f32 = u16::MAX as f32;
         const VREF: f32 = 2.5;
+        
+        //Check voltage is not none
         if v.is_nan(){
             log::error!("NaN voltage requested");
         }
 
-        // Next need to clamp the code to a safe range
+        // Need to clamp code to valid range (0 to 2.5V for the current_sense stabiliser)
         let v_clamped = v.clamp(0.0, VREF);
         let scaled = (v_clamped / VREF) * DAC_MAX;
         let code = (scaled + 0.5) as u16;
         self.write_raw(code);
         
-        
-        // let code = DacCode::try_from(v).unwrap().0;
-        // self.write_raw(code);s
     }
 }

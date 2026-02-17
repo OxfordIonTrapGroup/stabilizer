@@ -827,12 +827,9 @@ pub fn setup(
 
 
 
-
-    // Current sense board - unfortunately not build with probe - I cannot add a condition to check if there is a current sense board connected
-    // Have to unconditionally init spi1 - currently only initi with pounder
-    // Problem - conflict with pounder
-    // Solution - check for pounder first and then apply if not no pounder regardless
-
+    // Both pounder and current sense board use SPI1 - need to set up SPI1 depending which is in use
+    // If pounder detected - SPI1 set up for use for pounder
+    // If pounder not detected - always set up for current board even if no current board attached (need to add a way to detect current board if possible?)
 
     // Measure the Pounder PGOOD output to detect if pounder is present on Stabilizer.
     let pounder_pgood = gpiob.pb13.into_pull_down_input();
@@ -1038,19 +1035,13 @@ pub fn setup(
                 let mut cs = gpiog.pg10.into_push_pull_output();
                 cs.set_high();
 
+                // Unipolar, set to Mode 0 CPOL0 & CPHA 0
                 let config = hal::spi::Config::new(hal::spi::Mode {
-                    //Not sure on this - they seem to use MODE 3 for other DACs but data sheet suggests MODE 0
-                    //CPOL0 & CPHA 0
-
                     polarity: hal::spi::Polarity::IdleLow, 
                     phase: hal::spi::Phase::CaptureOnFirstTransition,
                 });
-                // .communication_mode(hal::spi::CommunicationMode::Transmitter);
 
-                //ABOVE IS SAME AS spi::MODE_0
-                //Recommend 1.MHz()
-                
-                //Do not need to add cs since not alternate - not owned by peripheral *we control the pin not the peripheral*
+                //Recommend 1.MHz()                
                 let spi = device.SPI1.spi((sck, hal::spi::NoMiso, mosi), config, 1.MHz(), ccdr.peripheral.SPI1, &ccdr.clocks,);
                 (spi, cs)
 
