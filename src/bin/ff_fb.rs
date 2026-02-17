@@ -480,7 +480,18 @@ mod app {
                 NetworkState::SettingsChanged(_path) => {
                     settings_update::spawn().unwrap()
                 }
-                NetworkState::Updated => {}
+                NetworkState::Updated => {
+
+
+                    // c.shared.network.lock(|net| {
+                    //     net.processor.stack.lock(|stack| {
+                    //         for cidr in stack.interface().ip_addrs() {
+                    //             log::info!("IP address: {}", cidr);
+                    //         }
+                    //     });
+                    // });
+
+                }
                 NetworkState::NoChange => {
                     // We can't sleep if USB is not in suspend.
                     if c.shared.usb.lock(|usb| {

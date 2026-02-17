@@ -760,6 +760,9 @@ pub fn setup(
         let mut stack =
             smoltcp_nal::NetworkStack::new(interface, eth_dma, sockets, clock);
 
+        log::info!("Configured IP: {}", ip_addrs);
+        
+
         stack.seed_random_port(&random_seed);
 
         NetworkDevices {
