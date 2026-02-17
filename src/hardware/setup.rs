@@ -1044,8 +1044,8 @@ pub fn setup(
 
                     polarity: hal::spi::Polarity::IdleLow, 
                     phase: hal::spi::Phase::CaptureOnFirstTransition,
-                })
-                .communication_mode(hal::spi::CommunicationMode::Transmitter);
+                });
+                // .communication_mode(hal::spi::CommunicationMode::Transmitter);
 
                 //ABOVE IS SAME AS spi::MODE_0
                 //Recommend 1.MHz()
