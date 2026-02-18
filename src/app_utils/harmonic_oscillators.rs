@@ -30,7 +30,7 @@ impl<const N: usize> BasicConfig<N> {
     pub fn try_into_config(self, sample_period: f32, full_scale: f32)->Result<Config<N>, Error>{
         //const SYMMETRY: f32 = 0.5;
         //const NYQUIST: f32 = (1u32 << 31) as _;
-        const PHASE_SCALE: f32 = (1u32 << 31) as f32; //added
+        const PHASE_SCALE: f32 = (u32::MAX as f32) + 1.0; //added
 
         let ftw: [f32; N] = core::array::from_fn(|i| {
             self.zero_order_frequency
@@ -82,7 +82,7 @@ impl<const N: usize> BasicConfig<N> {
         });
         
         let phases_i32: [i32; N] = core::array::from_fn(|i: usize| {
-           let p =  self.phase[i] * (1u32 << 31) as f32; //changed to u32
+           let p =  self.phase[i] * (u32::MAX as f32) + 1.0; //changed to u32
            
            p as i32
             

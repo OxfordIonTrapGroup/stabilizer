@@ -36,6 +36,7 @@ use stabilizer::{
         afe::Gain,
         dac::{Dac0Output, Dac1Output, DacCode},
         hal,
+        input_stamper::InputStamper,
         current_sense_dac::CurrentSenseDac,
         //pounder::{ClockConfig, PounderConfig},
         //setup::PounderDevices as Pounder,
@@ -182,6 +183,8 @@ pub struct Settings{
     //Add in the V_offset
     v_offset: f32,
 
+    pll_alpha: f32,
+
 }
 
 impl Default for Settings{
@@ -211,6 +214,7 @@ impl Default for Settings{
             harmonic_wave_parameters:[[HarmonicWaveParameters::default(); MAX_HARMONICS], [HarmonicWaveParameters::default(); MAX_HARMONICS]],
 
             v_offset: 0.0,
+            pll_alpha: 0.05,
         }
     }
 }
@@ -233,7 +237,7 @@ mod app {
         settings: Settings, //All our settings are shared
         telemetry: TelemetryBuffer,
         harmonic_generators: [HarmonicGenerator<MAX_HARMONICS>;2],
-        
+        alpha: f32,
     }
 
 
@@ -246,10 +250,15 @@ mod app {
         afes: (AFE0, AFE1),
         adcs: (Adc0Input, Adc1Input),
         dacs: (Dac0Output, Dac1Output),
+        timestamper: InputStamper,
+        //harmonic_synced: bool,
         iir_state: [[[f32; 4]; IIR_CASCADE_LENGTH]; 2],
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
         current_sense_dac: Option<CurrentSenseDac>,
+        phase_offset: f32,
+        last_ts: Option<u32>,
+        
     }
 
     #[init]
@@ -259,7 +268,7 @@ mod app {
         let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
 
         //Configure the MCU
-        let (stabilizer, _pounder, current_sense_dac) = hardware::setup::setup(
+        let (mut stabilizer, _pounder, current_sense_dac) = hardware::setup::setup(
             c.core,
             c.device,
             clock,
@@ -305,6 +314,7 @@ mod app {
             settings: application_settings,
             telemetry: TelemetryBuffer::default(),
             harmonic_generators: harmonic_generators_arr,
+            alpha: application_settings.pll_alpha, //maybe?
         };
 
         let mut local = Local {
@@ -314,10 +324,14 @@ mod app {
             afes: stabilizer.afes,
             adcs: stabilizer.adcs,
             dacs: stabilizer.dacs,
+            timestamper: stabilizer.timestamper,
+            //harmonic_synced: false,
             iir_state: [[[0.; 4]; IIR_CASCADE_LENGTH]; 2],
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
             current_sense_dac,
+            phase_offset: 0.0,
+            last_ts: None,
         };
 
         // Explicitly write to DAC on set up
@@ -336,7 +350,11 @@ mod app {
         telemetry::spawn().unwrap();
         ethernet_link::spawn().unwrap();
         usb::spawn().unwrap();
+        mains_sync::spawn_after(5u64.millis()).unwrap();
         start::spawn_after(100.millis()).unwrap();
+
+        stabilizer.timestamp_timer.start();
+        local.timestamper.start();
 
         (shared, local, init::Monotonics(stabilizer.systick))
     }
@@ -506,8 +524,88 @@ mod app {
     }
 
 
+    #[task(priority=2, local=[timestamper, phase_offset, last_ts], shared=[settings, harmonic_generators])]
+    fn mains_sync(c: mains_sync::Context) {
+
+        let tick_s = hardware::design_parameters::TIMER_PERIOD;
+        //const KP: f32 = 0.2;
+        let T_nom = 1.0 / MAINS_FREQUENCY;
+        let mut last_phase_error: Option<f32> = None;
+
+        // Drain captures first
+        loop {
+            match c.local.timestamper.latest_timestamp() {
+
+                Ok(Some(ts)) => {
+
+                    if let Some(prev) = *c.local.last_ts {
+                        let dt_ticks = ts.wrapping_sub(prev);
+                        let dt_s = dt_ticks as f32 * tick_s;
+                        let phase_error = (dt_s - T_nom) / T_nom;
+                        last_phase_error = Some(phase_error);
+                    }
+                    *c.local.last_ts = Some(ts);
+                }
+
+                Ok(None) => break,
+
+                Err(Some(ts)) => {
+                    log::warn!("Overcapture detected, ts={}", ts);
+                    *c.local.last_ts = Some(ts);
+                }
+
+                Err(None) => break,
+            }
+        }
+
+        // Apply correction once, outside loop
+        if let Some(phase_error) = last_phase_error {
+            
+            
+
+            (c.shared.settings, c.shared.harmonic_generators).lock(|settings, gens| {
+                *c.local.phase_offset += settings.pll_alpha * phase_error;
+
+                if *c.local.phase_offset > 0.5 {
+                    *c.local.phase_offset -= 1.0;
+                }
+                if *c.local.phase_offset < -0.5 {
+                    *c.local.phase_offset += 1.0;
+                }
+
+                for ch in 0..gens.len() {
+
+                    let basic_cfg = BasicConfig::<MAX_HARMONICS> {
+                        zero_order_frequency: MAINS_FREQUENCY,
+                        amplitude: core::array::from_fn(|i| {
+                            settings.harmonic_wave_parameters[ch][i].amp
+                        }),
+                        phase: core::array::from_fn(|i| {
+                            let mut p =
+                                settings.harmonic_wave_parameters[ch][i].phase / 360.0
+                                + *c.local.phase_offset;
+
+                            p %= 1.0;
+                            if p < 0.0 { p += 1.0; }
+                            p
+                        }),
+                    };
+
+                    if let Ok(cfg) =
+                        basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
+                    {
+                        gens[ch].update_waveform(cfg);
+                    }
+                }
+            });
+        }
+
+        mains_sync::spawn_after(5u64.millis()).unwrap();
+    }
+
+
     //Settings update
-    #[task(priority = 1, local=[afes, current_sense_dac], shared=[network, settings, harmonic_generators])]
+    #[task(priority = 1, local=[afes, current_sense_dac], shared=[network, settings, harmonic_generators, alpha])]
     fn settings_update(mut c: settings_update::Context) {
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());
         c.shared.settings.lock(|current| *current = settings);
@@ -521,6 +619,12 @@ mod app {
         if let Some(dac) = c.local.current_sense_dac.as_mut() {
             dac.write_voltage(settings.v_offset);
         }
+
+        c.shared.alpha.lock(|alpha| {
+            if settings.pll_alpha > 0.01 && settings.pll_alpha < 1.0{
+                *alpha = settings.pll_alpha;
+            };
+        });
         
         //TO DO - This would be where we update the SPI to CURRENT SENSE BOARD
         //Update harmonic generator
@@ -544,23 +648,23 @@ mod app {
                 ),
             }
         }
-        log::info!(
-                "Harmonic Amplitudes are {}, {}, {}, {}, {}",
-                harmonic_parameters[0][0].amp,
-                harmonic_parameters[0][1].amp,
-                harmonic_parameters[0][2].amp,
-                harmonic_parameters[0][3].amp,
-                harmonic_parameters[0][4].amp,
-            );
-        log::info!(
-                "Harmonic Phases are {}, {}, {}, {}, {}",
-                harmonic_parameters[0][0].phase,
-                harmonic_parameters[0][1].phase,
-                harmonic_parameters[0][2].phase,
-                harmonic_parameters[0][3].phase,
-                harmonic_parameters[0][4].phase,
+        // log::info!(
+        //         "Harmonic Amplitudes are {}, {}, {}, {}, {}",
+        //         harmonic_parameters[0][0].amp,
+        //         harmonic_parameters[0][1].amp,
+        //         harmonic_parameters[0][2].amp,
+        //         harmonic_parameters[0][3].amp,
+        //         harmonic_parameters[0][4].amp,
+        //     );
+        // log::info!(
+        //         "Harmonic Phases are {}, {}, {}, {}, {}",
+        //         harmonic_parameters[0][0].phase,
+        //         harmonic_parameters[0][1].phase,
+        //         harmonic_parameters[0][2].phase,
+        //         harmonic_parameters[0][3].phase,
+        //         harmonic_parameters[0][4].phase,
 
-            );
+            // );
 
         let target = settings.stream_target.into();
         c.shared.network.lock(|net| net.direct_stream(target));
