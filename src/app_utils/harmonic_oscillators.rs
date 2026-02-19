@@ -140,6 +140,28 @@ impl<const N: usize> HarmonicGenerator<N> {
     pub fn clear_phase_accumulator(&mut self) {
         self.phase_accumulator = [0;N];
     }
+    
+    pub fn set_base_frequency(&mut self, freq: f32, sample_period: f32) {
+        const PHASE_SCALE: f32 = (u32::MAX as f32) + 1.0;
+        for i in 0..N {
+            let harmonic = (i+1) as f32;
+            let ftw = freq * harmonic * sample_period * PHASE_SCALE;
+            self.config.phase_increment[i] = ftw as i32;
+        }
+    }
+
+    pub fn set_phase_offset_cycles(&mut self, phase_cycle: f32){
+        const PHASE_SCALE: f32 = (u32::MAX as f32) + 1.0;
+        let offset = (phase_cycle * PHASE_SCALE) as i32;
+        for i in 0..N {
+            self.config.phase_offset[i] = offset;
+        }
+    }
+
+    pub fn current_phase(&self) -> f32 {
+        const PHASE_SCALE: f32 = (u32::MAX as f32) + 1.0;
+        self.phase_accumulator[0] as f32 / PHASE_SCALE // interested in fundamental
+    }
 
 }
 
