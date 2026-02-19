@@ -566,6 +566,7 @@ mod app {
                     Ok(None) => break,
                     Err(Some(ts)) => {
                         log::warn!("Overcapture detected, ts={}", ts);
+                        *c.local.last_ts = Some(ts);
                     }
                     Err(None) => break,
                 }
@@ -575,15 +576,28 @@ mod app {
             //Phase lock
             loop {
                 match c.local.timestamper.latest_timestamp() {
-                    Ok(Some(_ts)) => {
+
+                    Ok(Some(ts)) => {
+                        
+                        if let Some(last) = *c.local.last_ts {
+                            let dt = ts.wrapping_sub(last);
+                            //Reject if less than 5ms
+                            let min_ticks = (0.005 / SAMPLE_PERIOD) as u32;
+                            if dt < min_ticks {
+                                continue;
+                            }
+                        }
+                        
                         c.shared.harmonic_generators.lock(|gens| {
                             let mut phase = gens[0].current_phase();
                             if phase < 0.0 {phase += 1.0;}
                             let mut phase_error = -phase; //lock zero crossing to phase 0
+                            
                             if phase_error > 0.5 {phase_error -= 1.0;}
                             if phase_error < -0.5 {phase_error += 1.0;}
 
                             c.shared.settings.lock(|sets| {
+
                                 *c.local.frequency_corr += sets.ki_alpha * phase_error;
                                 if *c.local.frequency_corr > MAX_FREQ_CORR {
                                     *c.local.frequency_corr = MAX_FREQ_CORR;
@@ -594,16 +608,22 @@ mod app {
 
                                 let freq = MAINS_FREQUENCY + sets.kp_alpha * phase_error + *c.local.frequency_corr;
                                 *c.local.dds_frequency = freq;
+                                
                                 for ch in 0..gens.len() {
                                     gens[ch].set_base_frequency(freq, SAMPLE_PERIOD);
-                                    gens[ch].set_phase_offset_cycles(0.5); //set to antiphase
+                                    gens[ch].set_global_phase_offset(0.5); //set to antiphase
                                 }
                             });
+
+                           
                         });
+                        *c.local.last_ts = Some(ts);
+
                     }
                     Ok(None) => break,
                     Err(Some(ts)) => {
                         log::warn!("Overcapture detected, ts={}", ts);
+                        *c.local.last_ts = Some(ts);
                     }
                     Err(None) => break,
                 }

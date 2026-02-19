@@ -119,6 +119,7 @@ impl<const N: usize> Default for Config<N>{
 pub struct HarmonicGenerator<const N: usize>{
     phase_accumulator: [i32;N],
     config: Config<N>,
+    global_phase_offset: i32,
 }
 
 impl<const N: usize> HarmonicGenerator<N> {
@@ -127,6 +128,7 @@ impl<const N: usize> HarmonicGenerator<N> {
         Self {
             config,
             phase_accumulator: [0;N],
+            global_phase_offset: 0,
             
         }
     }
@@ -150,17 +152,30 @@ impl<const N: usize> HarmonicGenerator<N> {
         }
     }
 
-    pub fn set_phase_offset_cycles(&mut self, phase_cycle: f32){
-        const PHASE_SCALE: f32 = (u32::MAX as f32) + 1.0;
-        let offset = (phase_cycle * PHASE_SCALE) as i32;
-        for i in 0..N {
-            self.config.phase_offset[i] = offset;
-        }
-    }
+    // pub fn set_phase_offset_cycles(&mut self, phase_cycle: f32){
+    //     const PHASE_SCALE: f32 = (u32::MAX as f32) + 1.0;
+    //     let offset = (phase_cycle * PHASE_SCALE) as i32;
+    //     for i in 0..N {
+    //         self.config.phase_offset[i] = offset;
+    //     }
+    // }
+
+    // pub fn add_global_offset(&mut self, phase_cycle: f32){
+    //     const PHASE_SCALE: f32 = (u32::MAX as f32) + 1.0;
+    //     let offset = (phase_cycle * PHASE_SCALE) as i32;
+    //     for i in 0..N{
+    //         self.config.phase_offset[i] = self.config.phase_offset[i].wrapping_add(offset);
+    //     }
+    // }   
 
     pub fn current_phase(&self) -> f32 {
         const PHASE_SCALE: f32 = (u32::MAX as f32) + 1.0;
         self.phase_accumulator[0] as f32 / PHASE_SCALE // interested in fundamental
+    }
+
+    pub fn set_global_phase_offset(&mut self, phase_cycle: f32){
+        const PHASE_SCALE: f32 = (u32::MAX as f32)+ 1.0;
+        self.global_phase_offset = (phase_cycle * PHASE_SCALE) as i32;
     }
 
 }
@@ -173,7 +188,7 @@ impl<const N: usize> core::iter::Iterator for HarmonicGenerator<N> {
         for i in 0..N
         {
 
-            let phase = self.phase_accumulator[i].wrapping_add(self.config.phase_offset[i]);
+            let phase = self.phase_accumulator[i].wrapping_add(self.config.phase_offset[i]).wrapping_add(self.global_phase_offset);
             //let sign = phase.is_negative();
             self.phase_accumulator[i] = self.phase_accumulator[i].wrapping_add(self.config.phase_increment[i]);
             let scale = idsp::cossin(phase).1 >> 16;
