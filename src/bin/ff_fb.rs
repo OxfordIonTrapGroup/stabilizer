@@ -183,8 +183,8 @@ pub struct Settings{
     //Add in the V_offset
     v_offset: f32,
 
-    pll_alpha: f32,
-
+    kp_alpha: f32,
+    ki_alpha: f32,
 }
 
 impl Default for Settings{
@@ -214,7 +214,8 @@ impl Default for Settings{
             harmonic_wave_parameters:[[HarmonicWaveParameters::default(); MAX_HARMONICS], [HarmonicWaveParameters::default(); MAX_HARMONICS]],
 
             v_offset: 0.0,
-            pll_alpha: 0.05,
+            kp_alpha: 0.05,
+            ki_alpha: 0.5,
         }
     }
 }
@@ -237,7 +238,6 @@ mod app {
         settings: Settings, //All our settings are shared
         telemetry: TelemetryBuffer,
         harmonic_generators: [HarmonicGenerator<MAX_HARMONICS>;2],
-        alpha: f32,
     }
 
 
@@ -258,6 +258,8 @@ mod app {
         current_sense_dac: Option<CurrentSenseDac>,
         phase_offset: f32,
         last_ts: Option<u32>,
+        frequency_corr: f32,
+        dds_frequency: f32,
         
     }
 
@@ -314,7 +316,6 @@ mod app {
             settings: application_settings,
             telemetry: TelemetryBuffer::default(),
             harmonic_generators: harmonic_generators_arr,
-            alpha: application_settings.pll_alpha, //maybe?
         };
 
         let mut local = Local {
@@ -332,6 +333,8 @@ mod app {
             current_sense_dac,
             phase_offset: 0.0,
             last_ts: None,
+            frequency_corr: 0.0,
+            dds_frequency: MAINS_FREQUENCY,
         };
 
         // Explicitly write to DAC on set up
@@ -524,7 +527,7 @@ mod app {
     }
 
 
-    #[task(priority=2, local=[timestamper, phase_offset, last_ts], shared=[settings, harmonic_generators])]
+    #[task(priority=2, local=[timestamper, phase_offset, last_ts, frequency_corr, dds_frequency], shared=[settings, harmonic_generators])]
     fn mains_sync(c: mains_sync::Context) {
 
         let tick_s = hardware::design_parameters::TIMER_PERIOD;
@@ -560,11 +563,10 @@ mod app {
 
         // Apply correction once, outside loop
         if let Some(phase_error) = last_phase_error {
-            
-            
 
             (c.shared.settings, c.shared.harmonic_generators).lock(|settings, gens| {
-                *c.local.phase_offset += settings.pll_alpha * phase_error;
+                //Update phase correction
+                *c.local.phase_offset += settings.kp_alpha * phase_error;
 
                 if *c.local.phase_offset > 0.5 {
                     *c.local.phase_offset -= 1.0;
@@ -573,29 +575,44 @@ mod app {
                     *c.local.phase_offset += 1.0;
                 }
 
+                //Fix the frequency
+                *c.local.frequency_corr += settings.ki_alpha * phase_error;
+                
+                if *c.local.frequency_corr > 1.0 {
+                    *c.local.frequency_corr = 1.0;
+                }
+                if *c.local.frequency_corr < -1.0 {
+                    *c.local.frequency_corr = -1.0;
+                }
+
+                *c.local.dds_frequency = MAINS_FREQUENCY + *c.local.frequency_corr;
+
                 for ch in 0..gens.len() {
+                    gens[ch].set_base_frequency(*c.local.dds_frequency, SAMPLE_PERIOD);
+                    gens[ch].set_phase_offset_cycles(*c.local.phase_offset);
 
-                    let basic_cfg = BasicConfig::<MAX_HARMONICS> {
-                        zero_order_frequency: MAINS_FREQUENCY,
-                        amplitude: core::array::from_fn(|i| {
-                            settings.harmonic_wave_parameters[ch][i].amp
-                        }),
-                        phase: core::array::from_fn(|i| {
-                            let mut p =
-                                settings.harmonic_wave_parameters[ch][i].phase / 360.0
-                                + *c.local.phase_offset;
+                    // let basic_cfg = BasicConfig::<MAX_HARMONICS> {
+                    //     zero_order_frequency: *c.local.dds_frequency,
+                    //     amplitude: core::array::from_fn(|i| {
+                    //         settings.harmonic_wave_parameters[ch][i].amp
+                    //     }),
+                    //     phase: core::array::from_fn(|i| {
+                    //         let mut p =
+                    //             settings.harmonic_wave_parameters[ch][i].phase / 360.0
+                    //             + *c.local.phase_offset;
 
-                            p %= 1.0;
-                            if p < 0.0 { p += 1.0; }
-                            p
-                        }),
-                    };
+                    //         p %= 1.0;
+                    //         if p < 0.0 { p += 1.0; }
+                    //         p
+                    //     }),
+                    // };
+                    
 
-                    if let Ok(cfg) =
-                        basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
-                    {
-                        gens[ch].update_waveform(cfg);
-                    }
+                    // if let Ok(cfg) =
+                    //     basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
+                    // {
+                    //     gens[ch].update_waveform(cfg);
+                    // }
                 }
             });
         }
@@ -605,7 +622,7 @@ mod app {
 
 
     //Settings update
-    #[task(priority = 1, local=[afes, current_sense_dac], shared=[network, settings, harmonic_generators, alpha])]
+    #[task(priority = 1, local=[afes, current_sense_dac], shared=[network, settings, harmonic_generators])]
     fn settings_update(mut c: settings_update::Context) {
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());
         c.shared.settings.lock(|current| *current = settings);
@@ -619,12 +636,6 @@ mod app {
         if let Some(dac) = c.local.current_sense_dac.as_mut() {
             dac.write_voltage(settings.v_offset);
         }
-
-        c.shared.alpha.lock(|alpha| {
-            if settings.pll_alpha > 0.01 && settings.pll_alpha < 1.0{
-                *alpha = settings.pll_alpha;
-            };
-        });
         
         //TO DO - This would be where we update the SPI to CURRENT SENSE BOARD
         //Update harmonic generator
