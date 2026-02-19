@@ -212,7 +212,7 @@ class StabilizerStream(asyncio.DatagramProtocol):
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, group + iface)
             sock.bind(('', port))
         else:
-            sock.bind((addr, port))
+            sock.bind(("0.0.0.0", port))
             print("Socket bound to:", sock.getsockname())
 
         transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), sock=sock)
