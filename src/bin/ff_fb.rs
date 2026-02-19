@@ -528,33 +528,57 @@ mod app {
 
 
     #[task(priority=2, local=[timestamper, phase_offset, last_ts, frequency_corr, dds_frequency], shared=[settings, harmonic_generators])]
-    fn mains_sync(c: mains_sync::Context) {
+    fn mains_sync(mut c: mains_sync::Context) {
 
-        let tick_s = hardware::design_parameters::TIMER_PERIOD;
-        //const KP: f32 = 0.2;
-        let T_nom = 1.0 / MAINS_FREQUENCY;
+        // let tick_s = hardware::design_parameters::TIMER_PERIOD;
+        // //const KP: f32 = 0.2;
+        // let T_nom = 1.0 / MAINS_FREQUENCY;
         let mut last_phase_error: Option<f32> = None;
-
+        let TARGET_PHASE = 0.5;
         // Drain captures first
         loop {
             match c.local.timestamper.latest_timestamp() {
 
-                Ok(Some(ts)) => {
+                Ok(Some(_ts)) => {
 
-                    if let Some(prev) = *c.local.last_ts {
-                        let dt_ticks = ts.wrapping_sub(prev);
-                        let dt_s = dt_ticks as f32 * tick_s;
-                        let phase_error = (dt_s - T_nom) / T_nom;
-                        last_phase_error = Some(phase_error);
+
+
+                    let phase_curr = c.shared.harmonic_generators.lock(|gens| {
+                        gens[0].current_phase()
+                    });
+                    
+                    let mut phase_error = TARGET_PHASE - phase_curr;
+                    // Wrap phase
+                    if phase_error > 0.5 {
+                        phase_error -= 1.0;
                     }
-                    *c.local.last_ts = Some(ts);
+                    if phase_error < -0.5{
+                        phase_error += 1.0;
+                    }
+                    last_phase_error = Some(phase_error);
+
+                    // if let Some(prev) = *c.local.last_ts {
+                    //     let dt_ticks = ts.wrapping_sub(prev);
+                    //     let dt_s = dt_ticks as f32 * tick_s;
+                        
+                    //     if dt_s < (T_nom  / 2.0 ) || dt_s > (T_nom * 2.0) {
+                    //         *c.local.last_ts = Some(ts);
+                    //         continue;
+                    //     }
+                        
+                    //     let phase_error = (dt_s - T_nom) / T_nom;
+
+
+                    //     last_phase_error = Some(phase_error);
+                    // }
+                    // *c.local.last_ts = Some(ts);
                 }
 
                 Ok(None) => break,
 
                 Err(Some(ts)) => {
                     log::warn!("Overcapture detected, ts={}", ts);
-                    *c.local.last_ts = Some(ts);
+                    //*c.local.last_ts = Some(ts);
                 }
 
                 Err(None) => break,
@@ -563,6 +587,8 @@ mod app {
 
         // Apply correction once, outside loop
         if let Some(phase_error) = last_phase_error {
+            
+            
 
             (c.shared.settings, c.shared.harmonic_generators).lock(|settings, gens| {
                 //Update phase correction
