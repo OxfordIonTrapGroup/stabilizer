@@ -193,6 +193,7 @@ class StabilizerStream(asyncio.DatagramProtocol):
         _parsers = {parser.format_id: parser for parser in parsers}
 
         loop = asyncio.get_running_loop()
+        print("Transport loop id:", id(loop))
         print("open() loop:", asyncio.get_running_loop())
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -216,7 +217,7 @@ class StabilizerStream(asyncio.DatagramProtocol):
         else:
             sock.bind((addr, port))
             print("Socket bound to:", sock.getsockname())
-
+        
         transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), sock=sock)
         
         return transport, protocol
@@ -233,10 +234,16 @@ class StabilizerStream(asyncio.DatagramProtocol):
 
     def datagram_received(self, data, addr):
         print("DATA GRAM RECEIVED")
+
+
         header = self.header._make(self.header_fmt.unpack_from(data))
+        
+        
         print("Header:", header)
         body = data[self.header_fmt.size:]
         print("Body (first 16 bytes):", body[:16])
+        
+        
         if header.magic != self.magic:
             logger.warning("Bad frame magic: %#04x, ignoring", header.magic)
             return
