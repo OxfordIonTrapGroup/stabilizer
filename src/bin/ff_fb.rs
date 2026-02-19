@@ -528,68 +528,83 @@ mod app {
 
     #[task(priority=2, local=[timestamper, phase_offset, last_ts, frequency_corr, dds_frequency], shared=[settings, harmonic_generators])]
     fn mains_sync(mut c: mains_sync::Context) {
-        if false{
-            return;
-        }else{
+        let fll: bool = true;
+        let MAX_FREQ_CORR = 0.5;
+        if fll {
             
-            let MAX_FREQ_CORR = 0.2;
-            let TARGET_PHASE = 0.5;
-
-            // Drain captures first
             loop {
                 match c.local.timestamper.latest_timestamp() {
-
-                    Ok(Some(_ts)) => {
-
-                        c.shared.harmonic_generators.lock(|gens|{
-                            let mut phase_curr = gens[0].current_phase();
-                            if phase_curr < 0.0 {
-                                phase_curr += 1.0;
-                            }
-                            let mut phase_error = TARGET_PHASE - phase_curr;
-                            if phase_error > 0.5 {
-                                phase_error -= 1.0;
-                            }
-                            if phase_error < -0.5 {
-                                phase_error += 1.0;
-                            }
-                            c.shared.settings.lock(|sets|{
-                                *c.local.phase_offset += sets.kp_alpha * phase_error;
-                            
-                                if *c.local.phase_offset > 0.5 {
-                                    *c.local.phase_offset -= 1.0;
-                                }
-                                if *c.local.phase_offset < -0.5 {
-                                    *c.local.phase_offset += 1.0;
-                                }
-                                *c.local.frequency_corr += sets.ki_alpha * phase_error;
-
+                    Ok(Some(ts)) => {            
+                        if let Some(last) = c.local.last_ts {
+                            let measured_ticks = ts.wrapping_sub(*last);
+                            //Expected period is 1/50Hz
+                            //Sample period is ticks per sample
+                            let ticks_nominal = (1.0/MAINS_FREQUENCY) / SAMPLE_PERIOD;
+                            let period_error = measured_ticks as f32 - ticks_nominal;
+                            c.shared.settings.lock(|sets| {
+                                *c.local.frequency_corr += sets.ki_alpha * period_error;
                                 if *c.local.frequency_corr > MAX_FREQ_CORR {
                                     *c.local.frequency_corr = MAX_FREQ_CORR;
                                 }
                                 if *c.local.frequency_corr < -MAX_FREQ_CORR {
                                     *c.local.frequency_corr = -MAX_FREQ_CORR;
                                 }
-                                //log::info!("Freq corr: {}, phase offset {}", *c.local.frequency_corr, *c.local.phase_offset)
 
+
+                                let freq_output = MAINS_FREQUENCY + sets.kp_alpha * period_error + *c.local.frequency_corr;
+                                *c.local.dds_frequency = freq_output;
                             });
                             
-                            *c.local.dds_frequency = MAINS_FREQUENCY + *c.local.frequency_corr;
-                            for ch in 0..gens.len() {
-                                gens[ch].set_base_frequency(*c.local.dds_frequency, SAMPLE_PERIOD);
-                                gens[ch].set_phase_offset_cycles(*c.local.phase_offset);
-                            }
-
-                        });
-
+                            c.shared.harmonic_generators.lock(|gens|{
+                                for ch in 0..gens.len(){
+                                    gens[ch].set_base_frequency(*c.local.dds_frequency, SAMPLE_PERIOD);
+                                }
+                            });
+                        }
+                        *c.local.last_ts = Some(ts);
                     }
-
                     Ok(None) => break,
-
                     Err(Some(ts)) => {
                         log::warn!("Overcapture detected, ts={}", ts);
                     }
+                    Err(None) => break,
+                }
+            }
+        }
+        else {
+            //Phase lock
+            loop {
+                match c.local.timestamper.latest_timestamp() {
+                    Ok(Some(_ts)) => {
+                        c.shared.harmonic_generators.lock(|gens| {
+                            let mut phase = gens[0].current_phase();
+                            if phase < 0.0 {phase += 1.0;}
+                            let mut phase_error = -phase; //lock zero crossing to phase 0
+                            if phase_error > 0.5 {phase_error -= 1.0;}
+                            if phase_error < -0.5 {phase_error += 1.0;}
 
+                            c.shared.settings.lock(|sets| {
+                                *c.local.frequency_corr += sets.ki_alpha * phase_error;
+                                if *c.local.frequency_corr > MAX_FREQ_CORR {
+                                    *c.local.frequency_corr = MAX_FREQ_CORR;
+                                }
+                                if *c.local.frequency_corr < -MAX_FREQ_CORR {
+                                    *c.local.frequency_corr = -MAX_FREQ_CORR;
+                                }
+
+                                let freq = MAINS_FREQUENCY + sets.kp_alpha * phase_error + *c.local.frequency_corr;
+                                *c.local.dds_frequency = freq;
+                                for ch in 0..gens.len() {
+                                    gens[ch].set_base_frequency(freq, SAMPLE_PERIOD);
+                                    gens[ch].set_phase_offset_cycles(0.5); //set to antiphase
+                                }
+                            });
+                        });
+                    }
+                    Ok(None) => break,
+                    Err(Some(ts)) => {
+                        log::warn!("Overcapture detected, ts={}", ts);
+                    }
                     Err(None) => break,
                 }
             }
