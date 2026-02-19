@@ -226,8 +226,15 @@ class StabilizerStream(asyncio.DatagramProtocol):
     def connection_lost(self, _exc):
         logger.info("Connection lost")
 
-    def datagram_received(self, data, _addr):
+    def datagram_received(self, data, addr):
+        print("----- RAW PACKET -----")
+        print("From:", addr)
+        print("Raw bytes:", data[:32])  # first 32 bytes
+        print("Length:", len(data))
         header = self.header._make(self.header_fmt.unpack_from(data))
+        print("Header:", header)
+        body = data[self.header_fmt.size:]
+        print("Body (first 16 bytes):", body[:16])
         if header.magic != self.magic:
             logger.warning("Bad frame magic: %#04x, ignoring", header.magic)
             return
