@@ -224,9 +224,6 @@ impl Default for Settings{
 #[rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, LTDC, SDMMC])]
 mod app {
 
-
-    use stm32h7xx_hal::pac::dfsdm::ch;
-
     use super::*;
 
     //Define the fact we are using monotonic time - only goes forwards
