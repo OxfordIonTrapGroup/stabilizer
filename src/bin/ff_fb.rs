@@ -528,120 +528,73 @@ mod app {
 
     #[task(priority=2, local=[timestamper, phase_offset, last_ts, frequency_corr, dds_frequency], shared=[settings, harmonic_generators])]
     fn mains_sync(mut c: mains_sync::Context) {
+        if false{
+            return;
+        }else{
+            
+            let MAX_FREQ_CORR = 0.2;
+            let TARGET_PHASE = 0.5;
 
-        // let tick_s = hardware::design_parameters::TIMER_PERIOD;
-        // //const KP: f32 = 0.2;
-        // let T_nom = 1.0 / MAINS_FREQUENCY;
-        let mut last_phase_error: Option<f32> = None;
-        let TARGET_PHASE = 0.5;
-        // Drain captures first
-        loop {
-            match c.local.timestamper.latest_timestamp() {
+            // Drain captures first
+            loop {
+                match c.local.timestamper.latest_timestamp() {
 
-                Ok(Some(_ts)) => {
+                    Ok(Some(_ts)) => {
 
+                        c.shared.harmonic_generators.lock(|gens|{
+                            let mut phase_curr = gens[0].current_phase();
+                            if phase_curr < 0.0 {
+                                phase_curr += 1.0;
+                            }
+                            let mut phase_error = TARGET_PHASE - phase_curr;
+                            if phase_error > 0.5 {
+                                phase_error -= 1.0;
+                            }
+                            if phase_error < -0.5 {
+                                phase_error += 1.0;
+                            }
+                            c.shared.settings.lock(|sets|{
+                                *c.local.phase_offset += sets.kp_alpha * phase_error;
+                            
+                                if *c.local.phase_offset > 0.5 {
+                                    *c.local.phase_offset -= 1.0;
+                                }
+                                if *c.local.phase_offset < -0.5 {
+                                    *c.local.phase_offset += 1.0;
+                                }
+                                *c.local.frequency_corr += sets.ki_alpha * phase_error;
 
+                                if *c.local.frequency_corr > MAX_FREQ_CORR {
+                                    *c.local.frequency_corr = MAX_FREQ_CORR;
+                                }
+                                if *c.local.frequency_corr < -MAX_FREQ_CORR {
+                                    *c.local.frequency_corr = -MAX_FREQ_CORR;
+                                }
+                                //log::info!("Freq corr: {}, phase offset {}", *c.local.frequency_corr, *c.local.phase_offset)
 
-                    let phase_curr = c.shared.harmonic_generators.lock(|gens| {
-                        gens[0].current_phase()
-                    });
-                    
-                    let mut phase_error = TARGET_PHASE - phase_curr;
-                    // Wrap phase
-                    if phase_error > 0.5 {
-                        phase_error -= 1.0;
+                            });
+                            
+                            *c.local.dds_frequency = MAINS_FREQUENCY + *c.local.frequency_corr;
+                            for ch in 0..gens.len() {
+                                gens[ch].set_base_frequency(*c.local.dds_frequency, SAMPLE_PERIOD);
+                                gens[ch].set_phase_offset_cycles(*c.local.phase_offset);
+                            }
+
+                        });
+
                     }
-                    if phase_error < -0.5{
-                        phase_error += 1.0;
+
+                    Ok(None) => break,
+
+                    Err(Some(ts)) => {
+                        log::warn!("Overcapture detected, ts={}", ts);
                     }
-                    last_phase_error = Some(phase_error);
 
-                    // if let Some(prev) = *c.local.last_ts {
-                    //     let dt_ticks = ts.wrapping_sub(prev);
-                    //     let dt_s = dt_ticks as f32 * tick_s;
-                        
-                    //     if dt_s < (T_nom  / 2.0 ) || dt_s > (T_nom * 2.0) {
-                    //         *c.local.last_ts = Some(ts);
-                    //         continue;
-                    //     }
-                        
-                    //     let phase_error = (dt_s - T_nom) / T_nom;
-
-
-                    //     last_phase_error = Some(phase_error);
-                    // }
-                    // *c.local.last_ts = Some(ts);
+                    Err(None) => break,
                 }
-
-                Ok(None) => break,
-
-                Err(Some(ts)) => {
-                    log::warn!("Overcapture detected, ts={}", ts);
-                    //*c.local.last_ts = Some(ts);
-                }
-
-                Err(None) => break,
             }
         }
-
-        // Apply correction once, outside loop
-        if let Some(phase_error) = last_phase_error {
-            
-            
-
-            (c.shared.settings, c.shared.harmonic_generators).lock(|settings, gens| {
-                //Update phase correction
-                *c.local.phase_offset += settings.kp_alpha * phase_error;
-
-                if *c.local.phase_offset > 0.5 {
-                    *c.local.phase_offset -= 1.0;
-                }
-                if *c.local.phase_offset < -0.5 {
-                    *c.local.phase_offset += 1.0;
-                }
-
-                //Fix the frequency
-                *c.local.frequency_corr += settings.ki_alpha * phase_error;
-                
-                if *c.local.frequency_corr > 1.0 {
-                    *c.local.frequency_corr = 1.0;
-                }
-                if *c.local.frequency_corr < -1.0 {
-                    *c.local.frequency_corr = -1.0;
-                }
-
-                *c.local.dds_frequency = MAINS_FREQUENCY + *c.local.frequency_corr;
-
-                for ch in 0..gens.len() {
-                    gens[ch].set_base_frequency(*c.local.dds_frequency, SAMPLE_PERIOD);
-                    gens[ch].set_phase_offset_cycles(*c.local.phase_offset);
-
-                    // let basic_cfg = BasicConfig::<MAX_HARMONICS> {
-                    //     zero_order_frequency: *c.local.dds_frequency,
-                    //     amplitude: core::array::from_fn(|i| {
-                    //         settings.harmonic_wave_parameters[ch][i].amp
-                    //     }),
-                    //     phase: core::array::from_fn(|i| {
-                    //         let mut p =
-                    //             settings.harmonic_wave_parameters[ch][i].phase / 360.0
-                    //             + *c.local.phase_offset;
-
-                    //         p %= 1.0;
-                    //         if p < 0.0 { p += 1.0; }
-                    //         p
-                    //     }),
-                    // };
-                    
-
-                    // if let Ok(cfg) =
-                    //     basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
-                    // {
-                    //     gens[ch].update_waveform(cfg);
-                    // }
-                }
-            });
-        }
-
+ 
         mains_sync::spawn_after(5u64.millis()).unwrap();
     }
 
@@ -662,6 +615,8 @@ mod app {
             dac.write_voltage(settings.v_offset);
         }
         
+        log::info!("KI ALPHA: {}", &settings.ki_alpha);
+        log::info!("KP ALPHA: {}", &settings.kp_alpha);
         
         //Update harmonic generator - should all be relative to fundamental harmonic
         let harmonic_parameters = &settings.harmonic_wave_parameters;
@@ -687,7 +642,7 @@ mod app {
                         if rel < 0.0 {
                             rel += 1.0;
                         }
-                        // harmonic_parameters[channel][i].phase/360.0
+                        //harmonic_parameters[channel][i].phase/360.0
                         rel
                        
                     }),
