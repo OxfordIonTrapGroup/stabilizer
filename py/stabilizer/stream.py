@@ -185,6 +185,7 @@ class StabilizerStream(asyncio.DatagramProtocol):
     @classmethod
     async def open(cls, addr, port, broker, parsers:Parser | list[Parser], maxsize=1,):
         """Open a UDP socket and start receiving frames"""
+        print(f"ADDRESS {addr}")
         if isinstance(parsers, Parser):
             parsers = [parsers]
 
