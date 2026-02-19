@@ -225,6 +225,8 @@ impl Default for Settings{
 mod app {
 
 
+    use stm32h7xx_hal::pac::dfsdm::ch;
+
     use super::*;
 
     //Define the fact we are using monotonic time - only goes forwards
@@ -663,18 +665,35 @@ mod app {
             dac.write_voltage(settings.v_offset);
         }
         
-        //TO DO - This would be where we update the SPI to CURRENT SENSE BOARD
-        //Update harmonic generator
+        
+        //Update harmonic generator - should all be relative to fundamental harmonic
         let harmonic_parameters = &settings.harmonic_wave_parameters;
         
         for channel in 0..2{
+
+            let fundamental_phase = harmonic_parameters[channel][0].phase / 360.0;
+
 
             let basic_cfg = BasicConfig::<MAX_HARMONICS> {
                     zero_order_frequency: MAINS_FREQUENCY,
                     amplitude: core::array::from_fn(|i| {
                                 harmonic_parameters[channel][i].amp
                             }),
-                    phase: core::array::from_fn(|i| {harmonic_parameters[channel][i].phase/360.0}),
+                    phase: core::array::from_fn(|i| {
+                        
+                        let phi = harmonic_parameters[channel][i].phase / 360.0;
+                        let mut rel = phi - fundamental_phase;
+                        //Wrap
+                        if rel >= 1.0 {
+                            rel -= 1.0;
+                        }
+                        if rel < 0.0 {
+                            rel += 1.0;
+                        }
+                        // harmonic_parameters[channel][i].phase/360.0
+                        rel
+                       
+                    }),
                 };
 
             match basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE) {
