@@ -208,21 +208,17 @@ class StabilizerStream(asyncio.DatagramProtocol):
         # We need to specify which interface to receive broadcasts from, or Windows may choose the
         # wrong one. Thus, use the broker address to figure out our local address for the interface
         # of interest.
-        # if ipaddress.ip_address(addr).is_multicast:
-        #     print('Subscribing to multicast')
-        #     group = socket.inet_aton(addr)
-        #     iface = socket.inet_aton('.'.join([str(x) for x in get_local_ip(broker)]))
-        #     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, group + iface)
-        #     sock.bind(('', port))
-        # else:
-        #     sock.bind((addr, port))
-        #     print("Socket bound to:", sock.getsockname())
-        transport, protocol = await loop.create_datagram_endpoint(
-            lambda: cls(maxsize, _parsers),
-            local_addr=("0.0.0.0", port),
-        )
+        if ipaddress.ip_address(addr).is_multicast:
+            print('Subscribing to multicast')
+            group = socket.inet_aton(addr)
+            iface = socket.inet_aton('.'.join([str(x) for x in get_local_ip(broker)]))
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, group + iface)
+            sock.bind(('', port))
+        else:
+            sock.bind((addr, port))
+            print("Socket bound to:", sock.getsockname())
         
-        #transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), sock=sock)
+        transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), sock=sock)
         
         return transport, protocol
 
