@@ -186,12 +186,14 @@ class StabilizerStream(asyncio.DatagramProtocol):
     async def open(cls, addr, port, broker, parsers:Parser | list[Parser], maxsize=1,):
         """Open a UDP socket and start receiving frames"""
         print(f"ADDRESS {addr}")
+        
         if isinstance(parsers, Parser):
             parsers = [parsers]
 
         _parsers = {parser.format_id: parser for parser in parsers}
 
         loop = asyncio.get_running_loop()
+        print("open() loop:", asyncio.get_running_loop())
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
@@ -217,8 +219,6 @@ class StabilizerStream(asyncio.DatagramProtocol):
 
         transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), sock=sock)
         
-        print("Protocol")
-        print(protocol)
         return transport, protocol
 
     def __init__(self, maxsize, parsers):
@@ -232,10 +232,7 @@ class StabilizerStream(asyncio.DatagramProtocol):
         logger.info("Connection lost")
 
     def datagram_received(self, data, addr):
-        print("----- RAW PACKET -----")
-        print("From:", addr)
-        print("Raw bytes:", data[:32])  # first 32 bytes
-        print("Length:", len(data))
+        print("DATA GRAM RECEIVED")
         header = self.header._make(self.header_fmt.unpack_from(data))
         print("Header:", header)
         body = data[self.header_fmt.size:]
