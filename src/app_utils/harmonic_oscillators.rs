@@ -82,7 +82,7 @@ impl<const N: usize> BasicConfig<N> {
         });
         
         let phases_i32: [i32; N] = core::array::from_fn(|i: usize| {
-           let p =  self.phase[i] * (u32::MAX as f32) + 1.0; //changed to u32
+           let p =  self.phase[i] * ((u32::MAX as f32) + 1.0); //changed to u32
            
            p as i32
             
@@ -176,6 +176,11 @@ impl<const N: usize> HarmonicGenerator<N> {
     pub fn set_global_phase_offset(&mut self, phase_cycle: f32){
         const PHASE_SCALE: f32 = (u32::MAX as f32)+ 1.0;
         self.global_phase_offset = (phase_cycle * PHASE_SCALE) as i32;
+    }
+    
+    pub fn get_current_state(&self) -> (f32, f32){
+        const PHASE_SCALE: f32 = (u32::MAX as f32)+ 1.0;
+        (self.phase_accumulator[0] as f32 / PHASE_SCALE, self.config.phase_increment[0] as f32 / PHASE_SCALE)
     }
 
 }
