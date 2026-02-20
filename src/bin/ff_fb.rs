@@ -352,7 +352,7 @@ mod app {
         telemetry::spawn().unwrap();
         ethernet_link::spawn().unwrap();
         usb::spawn().unwrap();
-        mains_sync::spawn_after(5u64.millis()).unwrap();
+        // mains_sync::spawn_after(5u64.millis()).unwrap();
         start::spawn_after(100.millis()).unwrap();
 
         stabilizer.timestamp_timer.start();
@@ -524,114 +524,203 @@ mod app {
             }
         }
     }
+    
+    
+    #[task(binds = TIM5, priority =2, local=[timestamper, phase_offset, frequency_corr, dds_frequency, last_ts], shared=[settings, harmonic_generators])]
+    fn mains_sync(mut c: mains_sync::Context){
+        loop{
+            match c.local.timestamper.latest_timestamp() {
 
+                Ok(Some(ts)) => {
 
-    #[task(priority=2, local=[timestamper, phase_offset, last_ts, frequency_corr, dds_frequency], shared=[settings, harmonic_generators])]
-    fn mains_sync(mut c: mains_sync::Context) {
-        let fll: bool = true;
-        let MAX_FREQ_CORR = 0.5;
-        if fll {
-            
-            loop {
-                match c.local.timestamper.latest_timestamp() {
-                    Ok(Some(ts)) => {            
-                        if let Some(last) = c.local.last_ts {
-                            let measured_ticks = ts.wrapping_sub(*last);
-                            //Expected period is 1/50Hz
-                            //Sample period is ticks per sample
-                            let ticks_nominal = (1.0/MAINS_FREQUENCY) / SAMPLE_PERIOD;
-                            let period_error = measured_ticks as f32 - ticks_nominal;
-                            c.shared.settings.lock(|sets| {
-                                *c.local.frequency_corr += sets.ki_alpha * period_error;
-                                if *c.local.frequency_corr > MAX_FREQ_CORR {
-                                    *c.local.frequency_corr = MAX_FREQ_CORR;
-                                }
-                                if *c.local.frequency_corr < -MAX_FREQ_CORR {
-                                    *c.local.frequency_corr = -MAX_FREQ_CORR;
-                                }
-
-
-                                let freq_output = MAINS_FREQUENCY + sets.kp_alpha * period_error + *c.local.frequency_corr;
-                                *c.local.dds_frequency = freq_output;
-                            });
-                            
-                            c.shared.harmonic_generators.lock(|gens|{
-                                for ch in 0..gens.len(){
-                                    gens[ch].set_base_frequency(*c.local.dds_frequency, SAMPLE_PERIOD);
-                                }
-                            });
+                    // Check it is a valid capture i.e. not a jitter
+                    if let Some(last) = *c.local.last_ts {
+                        let dt = ts.wrapping_sub(last);
+                        //Reject if less than 5ms
+                        let min_ticks = (0.005 / hardware::design_parameters::TIMER_PERIOD) as u32;
+                        if dt < min_ticks {
+                            continue;
                         }
-                        *c.local.last_ts = Some(ts);
                     }
-                    Ok(None) => break,
-                    Err(Some(ts)) => {
-                        log::warn!("Overcapture detected, ts={}", ts);
-                        *c.local.last_ts = Some(ts);
-                    }
-                    Err(None) => break,
-                }
-            }
-        }
-        else {
-            //Phase lock
-            loop {
-                match c.local.timestamper.latest_timestamp() {
 
-                    Ok(Some(ts)) => {
-                        
-                        if let Some(last) = *c.local.last_ts {
-                            let dt = ts.wrapping_sub(last);
-                            //Reject if less than 5ms
-                            let min_ticks = (0.005 / SAMPLE_PERIOD) as u32;
-                            if dt < min_ticks {
-                                continue;
+                    let now_ticks = unsafe { (*stm32h7xx_hal::stm32::TIM5::ptr()).cnt.read().bits() };
+                    let dt_ticks = now_ticks.wrapping_sub(ts);
+                    let dt_s = dt_ticks as f32 * hardware::design_parameters::TIMER_PERIOD;
+                    let (kp, ki) = c.shared.settings.lock(|s| (s.kp_alpha, s.ki_alpha));
+                    //Get the current state of wave
+                    //Only doing for channel 0 at the moment 
+                    c.shared.harmonic_generators.lock(|gens| {
+                        for ch in 0..gens.len(){
+                            let (phase_now, phase_increase_per_sample) = gens[ch].get_current_state();
+                            
+                            //Then we need to back propagate it to the edge and assume phase of signal is zero at edge
+                            let samples_elapsed = dt_s / SAMPLE_PERIOD; //How many samples have elapsed since then
+                            
+
+                            let mut phase_at_edge = phase_now - phase_increase_per_sample * samples_elapsed;
+                            //Then we need ot wrap
+                            if phase_at_edge >= 1.0 {
+                                phase_at_edge -= 1.0;
                             }
-                        }
-                        
-                        c.shared.harmonic_generators.lock(|gens| {
-                            let mut phase = gens[0].current_phase();
-                            if phase < 0.0 {phase += 1.0;}
-                            let mut phase_error = -phase; //lock zero crossing to phase 0
+                            else if phase_at_edge < 0.0 {
+                                phase_at_edge += 1.0;
+                            }
+
+                            // This was our phase at the actual timestamp!
+                            let mut phase_error = 0.0 - phase_at_edge;
+
+                            //Now need ot wrap this error to between [-0.5, 0.5] or -180 to 180
+                            if phase_error > 0.5 {
+                                phase_error -= 1.0;
+                            }
+                            if phase_error < -0.5 {
+                                phase_error += 1.0;
+                            }
+
+                            // Calulacte the proportional and integral term to be used
+                            *c.local.frequency_corr += ki * phase_error;
+
+
+                            let MAX_FREQ_CORR = 1.0;
+                            //Now we clamp the integrator
+                            if *c.local.frequency_corr > MAX_FREQ_CORR {
+                                *c.local.frequency_corr = MAX_FREQ_CORR;
+                            }
+                            if *c.local.frequency_corr < -MAX_FREQ_CORR {
+                                *c.local.frequency_corr = -MAX_FREQ_CORR;
+                            }
                             
-                            if phase_error > 0.5 {phase_error -= 1.0;}
-                            if phase_error < -0.5 {phase_error += 1.0;}
+                            
+                            let freq = MAINS_FREQUENCY + *c.local.frequency_corr + kp * phase_error;
+                            *c.local.dds_frequency = freq;
+                            
+                            gens[ch].set_base_frequency(freq, SAMPLE_PERIOD);
+                            gens[ch].set_global_phase_offset(0.5);
 
-                            c.shared.settings.lock(|sets| {
+                        }
+                    });     
+                }
+            
+                Ok(None) => break,
+                Err(Some(ts)) => {
+                    log::warn!("Overcapture detected, ts={}", ts);
+                    *c.local.last_ts = Some(ts);
+                }
+                Err(None) => break,
+            
+            }
 
-                                *c.local.frequency_corr += sets.ki_alpha * phase_error;
-                                if *c.local.frequency_corr > MAX_FREQ_CORR {
-                                    *c.local.frequency_corr = MAX_FREQ_CORR;
-                                }
-                                if *c.local.frequency_corr < -MAX_FREQ_CORR {
-                                    *c.local.frequency_corr = -MAX_FREQ_CORR;
-                                }
+        }
+     
+    }
 
-                                let freq = MAINS_FREQUENCY + sets.kp_alpha * phase_error + *c.local.frequency_corr;
-                                *c.local.dds_frequency = freq;
+
+    // #[task(priority=2, local=[timestamper, phase_offset, last_ts, frequency_corr, dds_frequency], shared=[settings, harmonic_generators])]
+    // fn mains_sync(mut c: mains_sync::Context) {
+    //     let fll: bool = true;
+    //     let MAX_FREQ_CORR = 0.5;
+    //     if fll {
+            
+    //         loop {
+    //             match c.local.timestamper.latest_timestamp() {
+    //                 Ok(Some(ts)) => {            
+    //                     if let Some(last) = c.local.last_ts {
+    //                         let measured_ticks = ts.wrapping_sub(*last);
+    //                         //Expected period is 1/50Hz
+    //                         //Sample period is ticks per sample
+    //                         let ticks_nominal = (1.0/MAINS_FREQUENCY) / SAMPLE_PERIOD;
+    //                         let period_error = measured_ticks as f32 - ticks_nominal;
+    //                         c.shared.settings.lock(|sets| {
+    //                             *c.local.frequency_corr += sets.ki_alpha * period_error;
+    //                             if *c.local.frequency_corr > MAX_FREQ_CORR {
+    //                                 *c.local.frequency_corr = MAX_FREQ_CORR;
+    //                             }
+    //                             if *c.local.frequency_corr < -MAX_FREQ_CORR {
+    //                                 *c.local.frequency_corr = -MAX_FREQ_CORR;
+    //                             }
+
+
+    //                             let freq_output = MAINS_FREQUENCY + sets.kp_alpha * period_error + *c.local.frequency_corr;
+    //                             *c.local.dds_frequency = freq_output;
+    //                         });
+                            
+    //                         c.shared.harmonic_generators.lock(|gens|{
+    //                             for ch in 0..gens.len(){
+    //                                 gens[ch].set_base_frequency(*c.local.dds_frequency, SAMPLE_PERIOD);
+    //                             }
+    //                         });
+    //                     }
+    //                     *c.local.last_ts = Some(ts);
+    //                 }
+    //                 Ok(None) => break,
+    //                 Err(Some(ts)) => {
+    //                     log::warn!("Overcapture detected, ts={}", ts);
+    //                     *c.local.last_ts = Some(ts);
+    //                 }
+    //                 Err(None) => break,
+    //             }
+    //         }
+    //     }
+    //     else {
+    //         //Phase lock
+    //         loop {
+    //             match c.local.timestamper.latest_timestamp() {
+
+    //                 Ok(Some(ts)) => {
+                        
+    //                     if let Some(last) = *c.local.last_ts {
+    //                         let dt = ts.wrapping_sub(last);
+    //                         //Reject if less than 5ms
+    //                         let min_ticks = (0.005 / SAMPLE_PERIOD) as u32;
+    //                         if dt < min_ticks {
+    //                             continue;
+    //                         }
+    //                     }
+                        
+    //                     c.shared.harmonic_generators.lock(|gens| {
+    //                         let mut phase = gens[0].current_phase();
+    //                         if phase < 0.0 {phase += 1.0;}
+    //                         let mut phase_error = -phase; //lock zero crossing to phase 0
+                            
+    //                         if phase_error > 0.5 {phase_error -= 1.0;}
+    //                         if phase_error < -0.5 {phase_error += 1.0;}
+
+    //                         c.shared.settings.lock(|sets| {
+
+    //                             *c.local.frequency_corr += sets.ki_alpha * phase_error;
+    //                             if *c.local.frequency_corr > MAX_FREQ_CORR {
+    //                                 *c.local.frequency_corr = MAX_FREQ_CORR;
+    //                             }
+    //                             if *c.local.frequency_corr < -MAX_FREQ_CORR {
+    //                                 *c.local.frequency_corr = -MAX_FREQ_CORR;
+    //                             }
+
+    //                             let freq = MAINS_FREQUENCY + sets.kp_alpha * phase_error + *c.local.frequency_corr;
+    //                             *c.local.dds_frequency = freq;
                                 
-                                for ch in 0..gens.len() {
-                                    gens[ch].set_base_frequency(freq, SAMPLE_PERIOD);
-                                    gens[ch].set_global_phase_offset(0.5); //set to antiphase
-                                }
-                            });
+    //                             for ch in 0..gens.len() {
+    //                                 gens[ch].set_base_frequency(freq, SAMPLE_PERIOD);
+    //                                 gens[ch].set_global_phase_offset(0.5); //set to antiphase
+    //                             }
+    //                         });
 
                            
-                        });
-                        *c.local.last_ts = Some(ts);
+    //                     });
+    //                     *c.local.last_ts = Some(ts);
 
-                    }
-                    Ok(None) => break,
-                    Err(Some(ts)) => {
-                        log::warn!("Overcapture detected, ts={}", ts);
-                        *c.local.last_ts = Some(ts);
-                    }
-                    Err(None) => break,
-                }
-            }
-        }
+    //                 }
+    //                 Ok(None) => break,
+    //                 Err(Some(ts)) => {
+    //                     log::warn!("Overcapture detected, ts={}", ts);
+    //                     *c.local.last_ts = Some(ts);
+    //                 }
+    //                 Err(None) => break,
+    //             }
+    //         }
+    //     }
  
-        mains_sync::spawn_after(5u64.millis()).unwrap();
-    }
+    //     mains_sync::spawn_after(5u64.millis()).unwrap();
+    // }
 
 
     //Settings update
