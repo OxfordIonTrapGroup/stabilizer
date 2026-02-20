@@ -526,6 +526,12 @@ mod app {
     }
     
     
+
+    //Fires whenever a TIM5 interrupt is triggered
+    //TIM5 interrupt fires when any enabled TIM5 interrupt source sets its flag
+    //E.G. CC4 CAPTURE EVENT (WHAT WE WANT), Update event(overflow), possible others?
+    //Practically TIM5 interrup fires almost always for captur
+    //If the interrupt was not caused by CC4 capture then it returns Ok(None) 
     #[task(binds = TIM5, priority =2, local=[timestamper, phase_offset, frequency_corr, dds_frequency, last_ts], shared=[settings, harmonic_generators])]
     fn mains_sync(mut c: mains_sync::Context){
         loop{
