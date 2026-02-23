@@ -194,29 +194,46 @@ class StabilizerStream(asyncio.DatagramProtocol):
         _parsers = {parser.format_id: parser for parser in parsers}
 
         loop = asyncio.get_running_loop()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-        # Increase the OS UDP receive buffer size to 4 MiB so that latency
-        # spikes don't impact much. Achieving 4 MiB may require increasing
-        # the max allowed buffer size, e.g. via
-        # `sudo sysctl net.core.rmem_max=26214400` but nowadays the default
-        # max appears to be ~ 50 MiB already.
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
-
-        # We need to specify which interface to receive broadcasts from, or Windows may choose the
-        # wrong one. Thus, use the broker address to figure out our local address for the interface
-        # of interest.
+        
+        
+        
+        transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), local_addr=("0.0.0.0", port),) 
         if ipaddress.ip_address(addr).is_multicast:
-            print('Subscribing to multicast')
+            print("Subscribe to multicast")
+            sock = transport.get_extra_info("socket")
             group = socket.inet_aton(addr)
-            iface = socket.inet_aton('.'.join([str(x) for x in get_local_ip(broker)]))
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, group + iface)
-            sock.bind(('', port))
-        else:
-            sock.bind((addr, port))
 
-        transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), sock=sock)
+            mreq = struct.pack("4s4s", group, socket.inet_atom("0.0.0.0"))
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq) 
+                  
+        
+        
+        # sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        # sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        # # Increase the OS UDP receive buffer size to 4 MiB so that latency
+        # # spikes don't impact much. Achieving 4 MiB may require increasing
+        # # the max allowed buffer size, e.g. via
+        # # `sudo sysctl net.core.rmem_max=26214400` but nowadays the default
+        # # max appears to be ~ 50 MiB already.
+        # sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+
+        # # We need to specify which interface to receive broadcasts from, or Windows may choose the
+        # # wrong one. Thus, use the broker address to figure out our local address for the interface
+        # # of interest.
+        # if ipaddress.ip_address(addr).is_multicast:
+        #     print('Subscribing to multicast')
+        #     group = socket.inet_aton(addr)
+        #     iface = socket.inet_aton('.'.join([str(x) for x in get_local_ip(broker)]))
+        #     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, group + iface)
+        #     sock.bind(('', port))
+        # else:
+        #     sock.bind((addr, port))
+
+        # transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), sock=sock)
+       
+       
+       
         return transport, protocol
 
     def __init__(self, maxsize, parsers):
