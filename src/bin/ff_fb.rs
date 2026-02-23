@@ -214,8 +214,9 @@ impl Default for Settings{
             harmonic_wave_parameters:[[HarmonicWaveParameters::default(); MAX_HARMONICS], [HarmonicWaveParameters::default(); MAX_HARMONICS]],
 
             v_offset: 0.0,
+            //These values appear to work best if used from start time took about ~2 mins to settle
             kp_alpha: 0.05,
-            ki_alpha: 0.5,
+            ki_alpha: 0.001,
         }
     }
 }
@@ -357,6 +358,11 @@ mod app {
 
         stabilizer.timestamp_timer.start();
         local.timestamper.start();
+        unsafe {
+            cortex_m::peripheral::NVIC::unmask(
+                stabilizer::hardware::hal::stm32::Interrupt::TIM5
+            );
+        }
 
         (shared, local, init::Monotonics(stabilizer.systick))
     }
@@ -548,6 +554,7 @@ mod app {
                             continue;
                         }
                     }
+                    
 
                     let now_ticks = unsafe { (*stm32h7xx_hal::stm32::TIM5::ptr()).cnt.read().bits() };
                     let dt_ticks = now_ticks.wrapping_sub(ts);
@@ -605,6 +612,7 @@ mod app {
 
                         }
                     });     
+                    *c.local.last_ts = Some(ts);
                 }
             
                 Ok(None) => break,
