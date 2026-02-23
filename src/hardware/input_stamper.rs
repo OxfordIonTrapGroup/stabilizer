@@ -61,6 +61,10 @@ impl InputStamper {
     #[allow(dead_code)]
     pub fn start(&mut self) {
         self.capture_channel.enable();
+
+        //ADDED THIS TO ALLOW INTERRUPTS
+        let regs = unsafe { &*stm32h7xx_hal::stm32::TIM5::ptr() };
+        regs.dier.modify(|_, w| w.cc4ie().set_bit());  // ENABLE CAPTURE INTERRUPT
     }
 
     /// Get the latest timestamp that has occurred.
