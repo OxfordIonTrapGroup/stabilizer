@@ -197,6 +197,7 @@ class StabilizerStream(asyncio.DatagramProtocol):
         
         
         
+        
         transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), local_addr=("0.0.0.0", port),) 
         if ipaddress.ip_address(addr).is_multicast:
             print("Subscribe to multicast")
@@ -205,8 +206,9 @@ class StabilizerStream(asyncio.DatagramProtocol):
 
             mreq = struct.pack("4s4s", group, socket.inet_atom("0.0.0.0"))
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq) 
-                  
         
+        sock = transport.get_extra_info("socket")
+        print("UI socket bound to:", sock.getsockname())
         
         # sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         # sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -247,6 +249,7 @@ class StabilizerStream(asyncio.DatagramProtocol):
         logger.info("Connection lost")
 
     def datagram_received(self, data, _addr):
+        print("--- RAN DATAGRAM ---")
         header = self.header._make(self.header_fmt.unpack_from(data))
         if header.magic != self.magic:
             logger.warning("Bad frame magic: %#04x, ignoring", header.magic)
