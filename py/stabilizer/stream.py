@@ -9,11 +9,13 @@ import socket
 import ipaddress
 from collections import namedtuple
 from dataclasses import dataclass
-
+import sys
 import numpy as np
 
 from . import DAC_VOLTS_PER_LSB, ADC_VOLTS_PER_LSB
 from .pounder import PHASE_TURNS_PER_POW_LSB
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 logger = logging.getLogger(__name__)
 
