@@ -86,7 +86,8 @@ class DacDecoder(AbstractDecoder):
     def to_mu(self, data, start=0, stop=-1):
         """Return the raw data in machine units"""
         # convert DAC offset binary to two's complement
-        data[start:stop] ^= np.int16(0x8000)
+        #data[start:stop] ^= np.int16(0x8000)
+        data[start:stop] ^= np.int16(-32768)
         # pass
 
     def to_si(self, data, start=0, stop=-1):
@@ -149,7 +150,7 @@ class Parser:
         self.data = self.data.swapaxes(0, 1).reshape(self.n_sources, -1).copy()
 
         return self
-    
+        
     def to_mu(self):
         """ Return the raw data in machine units """
         for (i, decoder) in enumerate(self.decoders):
@@ -185,15 +186,12 @@ class StabilizerStream(asyncio.DatagramProtocol):
     @classmethod
     async def open(cls, addr, port, broker, parsers:Parser | list[Parser], maxsize=1,):
         """Open a UDP socket and start receiving frames"""
-        print(f"ADDRESS {addr}")
-        
         if isinstance(parsers, Parser):
             parsers = [parsers]
 
         _parsers = {parser.format_id: parser for parser in parsers}
 
         loop = asyncio.get_running_loop()
-        print("open() loop:", asyncio.get_running_loop())
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
@@ -215,10 +213,8 @@ class StabilizerStream(asyncio.DatagramProtocol):
             sock.bind(('', port))
         else:
             sock.bind((addr, port))
-            print("Socket bound to:", sock.getsockname())
-        
+
         transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), sock=sock)
-        
         return transport, protocol
 
     def __init__(self, maxsize, parsers):
@@ -231,18 +227,8 @@ class StabilizerStream(asyncio.DatagramProtocol):
     def connection_lost(self, _exc):
         logger.info("Connection lost")
 
-    def datagram_received(self, data, addr):
-        print("DATA GRAM RECEIVED")
-
-
+    def datagram_received(self, data, _addr):
         header = self.header._make(self.header_fmt.unpack_from(data))
-        
-        
-        print("Header:", header)
-        body = data[self.header_fmt.size:]
-        print("Body (first 16 bytes):", body[:16])
-        
-        
         if header.magic != self.magic:
             logger.warning("Bad frame magic: %#04x, ignoring", header.magic)
             return
