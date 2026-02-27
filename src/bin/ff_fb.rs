@@ -59,6 +59,18 @@
 //! Raw ADC and DAC data are streamed over UDP.
 //! See [`stabilizer::net::data_stream`] for details.
 //! 
+//! # Notes
+//! Can only lock to one external phase reference and cannot independently phase-lock channel 0 and 1 to different triggers
+//! Can not run two separate PLL for each channel
+//! Can not run two separate PLL for each channel
+//! Cannot run two different fundamental frequencies per channel while using one trigger
+//! CANNOT have channel 0 locked to mains A and channel 1 locked to mains B NOR e.g. channel 0 free running and channel 1 phase locked
+//! If want this - need two timestamp inputs, two independent frequency corr and two independent PLL loops
+//!
+//! Cannot mix between channels i.e ADC0/DAC1
+//! 
+//! ASSUME THAT THIS IS RUNNING ON 1 CHANNEL ONLY AT A TIME - BUT LEFT IN DUAL CHANNEL CAPABILITIES FOR POTENTIALLY EASIER ADAPTION IN THE FUTURE
+//! AND SO CAN EASILY SWITCH BETWEEN CHANNELS IF FAULT WITH ONE
 #![deny(warnings)]
 #![no_std]
 #![no_main]
@@ -673,6 +685,7 @@ mod app {
     // - Applies a PI correction (integrator clamped) and updates DDS frequency.
     // - Updates each channel's harmonic generator frequency and applies a global
     //   phase offset (used to align DDS phase to the measured edge).
+    //
     #[task(binds = TIM5, priority =2, local=[timestamper, frequency_corr, dds_frequency, last_ts], shared=[settings, harmonic_generators])]
     fn mains_sync(mut c: mains_sync::Context){
         
