@@ -250,6 +250,7 @@ mod app {
         let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
 
         // Configure the microcontroller
+        // NOTE: Added `_current_sense_dac` (should be set to None for lockin.rs) to support stabilizer compatibility with the current sense board.
         let (mut stabilizer, _pounder, _current_sense_dac) = hardware::setup::setup(
             c.core,
             c.device,

@@ -199,10 +199,17 @@ fn load_itcm() {
 /// * `sample_ticks` - The number of timer ticks between each sample.
 ///
 /// # Returns
-/// (stabilizer, pounder) where `stabilizer` is a `StabilizerDevices` structure containing all
-/// stabilizer hardware interfaces in a disabled state. `pounder` is an `Option` containing
-/// `Some(devices)` if pounder is detected, where `devices` is a `PounderDevices` structure
-/// containing all of the pounder hardware interfaces in a disabled state.
+/// (stabilizer, pounder, curretn_sense_dac)
+/// - `stabilizer`:     A `StabilizerDevices` structure containing all
+///                     stabilizer hardware interfaces in a disabled state. 
+/// 
+/// - `pounder`:        an `Option` containing
+///                     `Some(devices)` if pounder is detected, where `devices` is a `PounderDevices` structure
+///                     containing all of the pounder hardware interfaces in a disabled state.
+/// 
+/// - `current_sense_dac`: `Some(dac)` if the current sense DAC is available, 
+///                         where `dac` is a `CurrentSenseDac` driver instanace init and ready for use
+/// 
 pub fn setup(
     mut core: stm32h7xx_hal::stm32::CorePeripherals,
     device: stm32h7xx_hal::stm32::Peripherals,
@@ -759,8 +766,6 @@ pub fn setup(
 
         let mut stack =
             smoltcp_nal::NetworkStack::new(interface, eth_dma, sockets, clock);
-
-        log::info!("Configured IP: {}", ip_addrs);
         
 
         stack.seed_random_port(&random_seed);
@@ -828,13 +833,34 @@ pub fn setup(
     };
 
 
-
-
-    // Both pounder and current sense board use SPI1 - need to set up SPI1 depending which is in use
-    // If pounder detected - SPI1 set up for use for pounder
-    // If pounder not detected - always set up for current board even if no current board attached (need to add a way to detect current board if possible?)
-
-    // Measure the Pounder PGOOD output to detect if pounder is present on Stabilizer.
+    // ----------------------------------------------------------------------------------------------------------------------------------    
+    // SPI1 Resource Sharing: Pounder vs Current sense baord
+    // 
+    // Both the pounder board and the current sense board use SPI1
+    // But they need different SPI configurations (mode, speed, pin usage etc.)
+    // 
+    // We detect whether pounder is present by sampling PGOOD signal:
+    // 
+    // If pounder is detected:
+    //     - Configure SPI1 for pounder (Mode 3, up to 5MHz)
+    //     - Init all Pounder peripherals (IC2, SPI, QSPI DDS, timers etc.)
+    //     - CurrentSenseDac not instantiated
+    //     
+    // If pounder is NOT detected:
+    //     - Configer SPI1 for Current Sense DAC (Mode 0, ~1MHz)
+    //     - Instantiate CurrentSenseDac
+    //     - Pounder device remain None
+    // Priority:
+    // 1. If Pounder is present → configure SPI1 for Pounder.
+    // 2. Otherwise → configure SPI1 for Current Sense DAC.
+    //
+    // Note:
+    // SPI1 cannot be shared simultaneously. Only one peripheral set is active depending on detected hardware
+    //
+    // TODO:
+    // Add hardware detection for Current Sense board similar to Pounder PGOOD (is this possible - not sure based on schematics?)
+    // Currently, SPI1 is configured for the Current Sense DAC whenever Pounder is not detected, even if current sense board not present
+    // ----------------------------------------------------------------------------------------------------------------------------------
     let pounder_pgood = gpiob.pb13.into_pull_down_input();
     delay.delay_ms(2u8);
 
@@ -1033,22 +1059,30 @@ pub fn setup(
             }), None)
         } else {
             let (spi1, cs) = {
+                // Confgiure SPI1 pins for CurrentSenseDac
+                // (DAC is write only - no MISO)
                 let mosi = gpiod.pd7.into_alternate();
                 let sck = gpiog.pg11.into_alternate();
+                
+                // Add manual chip select (active is low)
                 let mut cs = gpiog.pg10.into_push_pull_output();
+                // Ensure DAC is deselect on init
                 cs.set_high();
 
-                // Unipolar, set to Mode 0 CPOL0 & CPHA 0
+                // Configure SPI for Current Sense DAC:
+                // - Mode 0 (CPOL = 0, CPHA = 0)
+                // - Unipolar DAC, MSB-first transfer
                 let config = hal::spi::Config::new(hal::spi::Mode {
                     polarity: hal::spi::Polarity::IdleLow, 
                     phase: hal::spi::Phase::CaptureOnFirstTransition,
                 });
 
-                //Recommend 1.MHz()                
+                // Limit SPI frequency to 1MHz (DAC timing requirement / signal integrity)
                 let spi = device.SPI1.spi((sck, hal::spi::NoMiso, mosi), config, 1.MHz(), ccdr.peripheral.SPI1, &ccdr.clocks,);
                 (spi, cs)
 
             };
+            // Instantiate Current Sense DAC driver (Pounder not present)
             (None, Some(CurrentSenseDac::new(spi1, cs)))
         };
 

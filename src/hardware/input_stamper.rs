@@ -62,9 +62,9 @@ impl InputStamper {
     pub fn start(&mut self) {
         self.capture_channel.enable();
 
-        //ADDED THIS TO ALLOW INTERRUPTS
+        // Manually enable TIM5 CC4 interrupt (not been exposed through HAL)
         let regs = unsafe { &*stm32h7xx_hal::stm32::TIM5::ptr() };
-        regs.dier.modify(|_, w| w.cc4ie().set_bit());  // ENABLE CAPTURE INTERRUPT
+        regs.dier.modify(|_, w| w.cc4ie().set_bit());
     }
 
     /// Get the latest timestamp that has occurred.

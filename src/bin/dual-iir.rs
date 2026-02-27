@@ -228,6 +228,7 @@ mod app {
         let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
 
         // Configure the microcontroller
+        // NOTE: Added `_current_sense_dac` (should be set to None for dual-iir.rs) to support stabilizer compatibility with the current sense board.
         let (stabilizer, pounder, _current_sense_dac) = hardware::setup::setup(
             c.core,
             c.device,
@@ -362,6 +363,7 @@ mod app {
 
                     // Preserve instruction and data ordering w.r.t. DMA flag access.
                     fence(Ordering::SeqCst);
+
                     for channel in 0..adc_samples.len() {
                         adc_samples[channel]
                             .iter()
@@ -390,7 +392,6 @@ mod app {
 
                                 // Convert to DAC code
                                 *di = DacCode::from(y).0;
-                                //*di = DacCode::try_from(0.5_f32).unwrap().0;
                             })
                             .last();
                     }

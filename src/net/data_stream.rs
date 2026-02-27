@@ -366,12 +366,7 @@ impl DataStream {
                             core::mem::size_of_val(buf),
                         )
                     };
-                    // let nonzero = data.iter().any(|&b| b != 0);
-                    // log::info!(
-                    //     "UDP send: {} bytes, nonzero={}",
-                    //     data.len(),
-                    //     nonzero
-                    // );
+
                     self.stack.send(handle, data).ok();
                     self.frame_pool.free(frame.buffer)
                 }

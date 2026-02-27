@@ -226,6 +226,7 @@ mod app {
         let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
 
         // Configure the microcontroller
+        // NOTE: Added `_current_sense_dac` (should be set to None for fnc.rs) to support stabilizer compatibility with the current sense board.
         let (stabilizer, pounder, _current_sense_dac) = hardware::setup::setup(
             c.core,
             c.device,

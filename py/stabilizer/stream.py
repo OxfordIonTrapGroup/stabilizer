@@ -14,6 +14,7 @@ import numpy as np
 
 from . import DAC_VOLTS_PER_LSB, ADC_VOLTS_PER_LSB
 from .pounder import PHASE_TURNS_PER_POW_LSB
+
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -88,7 +89,8 @@ class DacDecoder(AbstractDecoder):
     def to_mu(self, data, start=0, stop=-1):
         """Return the raw data in machine units"""
         # convert DAC offset binary to two's complement
-        #data[start:stop] ^= np.int16(0x8000)
+
+        # Changed argument input from 0x800 to -32768 as 0x800 overflows a signed 16-bit integer
         data[start:stop] ^= np.int16(-32768)
         # pass
 
@@ -195,21 +197,6 @@ class StabilizerStream(asyncio.DatagramProtocol):
 
         loop = asyncio.get_running_loop()
         
-        
-        
-        
-        # transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), local_addr=("0.0.0.0", port),) 
-        # if ipaddress.ip_address(addr).is_multicast:
-        #     print("Subscribe to multicast")
-        #     sock = transport.get_extra_info("socket")
-        #     group = socket.inet_aton(addr)
-
-        #     mreq = struct.pack("4s4s", group, socket.inet_atom("0.0.0.0"))
-        #     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq) 
-        
-        # sock = transport.get_extra_info("socket")
-        # print("UI socket bound to:", sock.getsockname())
-        
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
@@ -233,9 +220,7 @@ class StabilizerStream(asyncio.DatagramProtocol):
             sock.bind((addr, port))
 
         transport, protocol = await loop.create_datagram_endpoint(lambda: cls(maxsize, _parsers), sock=sock)
-       
-       
-       
+
         return transport, protocol
 
     def __init__(self, maxsize, parsers):
@@ -249,7 +234,6 @@ class StabilizerStream(asyncio.DatagramProtocol):
         logger.info("Connection lost")
 
     def datagram_received(self, data, _addr):
-        print("--- RAN DATAGRAM ---")
         header = self.header._make(self.header_fmt.unpack_from(data))
         if header.magic != self.magic:
             logger.warning("Bad frame magic: %#04x, ignoring", header.magic)

@@ -1,34 +1,78 @@
-//Ignore warnings
+//! # Dual IIR with Mains-Synchronised Harmonic Feedforward
+//!
+//! This application implements a dual-channel real-time DSP pipeline on Stabilizer.
+//! Each channel samples analog input data at a fixed rate, applies cascaded IIR filtering,
+//! optionally injects harmonic feedforward components via DDS, and generates filtered
+//! output signals on the respective DAC outputs.
+//!
+//! In addition, the application includes a digital PLL that synchronizes the generated
+//! fundamental frequency to the mains using hardware timestamp capture.
+//!
+//! ---
+//!
+//! ## Core Signal Path (per channel)
+//!
+//! ADC → Harmonic DDS Injection → Cascaded IIR Filter(s) → DAC
+//!
+//! - Batch-based DMA processing
+//! - Deterministic latency
+//! - f32 biquad filter implementation
+//!
+//! ---
+//!
+//! ## Mains Synchronisation
+//!
+//! - Hardware timestamp capture (TIM5)
+//! - Digital phase-locked loop (PI controller)
+//! - Frequency correction with integrator clamping (anti-windup)
+//! - Harmonics derived from tracked fundamental frequency
+//!
+//! ---
+//!
+//! ## Additional Features
+//!
+//! * Two independent channels
+//! * Up to ~400–800 kHz sample rate (configuration dependent)
+//! * Runtime IIR filter configuration
+//! * Harmonic feedforward (up to `MAX_HARMONICS`)
+//! * Optional DC offset via Current Sense DAC
+//! * Ethernet UDP data streaming (ADC + DAC)
+//! * Telemetry publishing
+//! * Deterministic DMA-driven timing
+//!
+//! ---
+//!
+//! ## Settings
+//! Refer to the [`Settings`] structure for documentation of runtime-configurable
+//! parameters including:
+//! - AFE gain
+//! - IIR coefficients
+//! - Harmonic amplitudes and phases
+//! - PLL gains (Kp, Ki)
+//! - Current sense DAC offset
+//!
+//! ## Telemetry
+//! Refer to [`Telemetry`] for information about reported measurements.
+//!
+//! ## Livestreaming
+//!
+//! Raw ADC and DAC data are streamed over UDP.
+//! See [`stabilizer::net::data_stream`] for details.
+//! 
 #![deny(warnings)]
-//Tells rust to not link standard library so annot use heap unless we add one!
 #![no_std]
-//Do not need main() function in this
 #![no_main]
 
-//From core library
-//MaybeUninit<T> lets you work with uninitialized memory safely
 use core::mem::MaybeUninit;
-//Memory ordering and synchronization at CPU level - ordering defiens how memory operations can be reordered
-//Fence - inserts memory fence that prevents compiler and CPU from reordering memory operations across it
 use core::sync::atomic::{fence, Ordering};
 use core::usize;
-
 use serde::{Deserialize, Serialize};
-//use array_init::array_init;
-
-// External crate - fugit - provides strongly typed time a duration units e.g. 1.secs()
 use fugit::ExtU64;
-//External crate mutex_trait - defines generic mutex abstraction - often used when mutex depends on platform
 use mutex_trait::prelude::*;
-
-//The iir algorithm that we need - inbuilt package
 use idsp::iir;
-
-//use stabilizer::hardware::signal_generator::{BasicConfig, Signal};
-use stabilizer::app_utils::harmonic_oscillators::{BasicConfig};
-//Features we need from stabilizer
+use stabilizer::app_utils::harmonic_dds::{BasicConfig};
 use stabilizer::{
-    app_utils::harmonic_oscillators::{HarmonicGenerator},
+    app_utils::harmonic_dds::{HarmonicGenerator},
     hardware::{
         self,
         
@@ -38,9 +82,6 @@ use stabilizer::{
         hal,
         input_stamper::InputStamper,
         current_sense_dac::CurrentSenseDac,
-        //pounder::{ClockConfig, PounderConfig},
-        //setup::PounderDevices as Pounder,
-        //signal_generator::{self, SignalGenerator},
         timers::SamplingTimer,
         DigitalInput0, DigitalInput1, SerialTerminal, SystemTimer, Systick,
         UsbDevice, AFE0, AFE1,
@@ -53,52 +94,53 @@ use stabilizer::{
     },
 };
 
-//----------------------------------------------------------------------------------------------
-//CONSTANTS
 
-//Max magnitude of 16 bit signed signal
+// Maximum magnitude of a signed 16-bit signal (used for normalization/scaling)
 const SCALE: f32 = i16::MAX as _;
 
-//Number of cascade IIR biquads used (per channel for dual) 1 (second order filter) or 2 (4th order) stored in iir::Biquad<f32>
+// The number of cascaded IIR biquads per channel. Select 1 or 2!
 const IIR_CASCADE_LENGTH: usize = 1;
 
-//Number of sampels in each batch process - set to 8 - used to DMA buffering and real time efficiency
+// Number of samples processed per batch.
 const BATCH_SIZE: usize = 8;
 
-//Logarithm of number of 100MHz timer ticks between each sample - set to 7 ,eaning value of 128 (2^7) - 1.28us per sample or 781.25kGHz here
+// log2 of the number of 100 MHz timer ticks between samples.
+// SAMPLE_TICKS = 2^SAMPLE_TICKS_LOG2
+// Example: 8 → 256 ticks → 2.56 µs/sample → ~390.625 kHz sample rate.
+// Note dual-iir was original 7 - changed to 8 as otherwise too fast for computing harmonics
 const SAMPLE_TICKS_LOG2: u8 = 8;
 
-//This just converts to seconds
+// Number of timer ticks between consecutive samples.
 const SAMPLE_TICKS: u32 = 1 << SAMPLE_TICKS_LOG2;
 
-//This is the period
+// Sampling period in seconds.
 const SAMPLE_PERIOD: f32 =
     SAMPLE_TICKS as f32 * hardware::design_parameters::TIMER_PERIOD;
 
-//Frequency of mains
+// Nominal mains frequency (Hz).
 const MAINS_FREQUENCY: f32 = 50.0;
 
-//MAX HARMONCIS
+// Maximum number of harmonics used in feedforward control.
 const MAX_HARMONICS: usize = 5;
 
-// NOTE: Use log 2 as hardware timers work best with powers of 2 and allows fast bit shifts instead of division
-// NOTE: Use batching as DMA transfers in chunks not one by one - processig batch reduces interrupt overhead and keeps the pipelines for ADC and DAC full - 
-//       else too many interruptions means CPU cannot keep up and ADC gets overrun
-
-//----------------------------------------------------------------------------------------------
-
-//Create a Struct for harmonic wave parameters that we can use - unique to this app so keep it here
+// Application-level harmonic parameters
+//
+// Represents the amplitude and phase of a single harmonic component
+// This struct is specific to this application - define locally
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, Tree)]
 pub struct HarmonicWaveParameters {
-    /// Amplitude in controller units (use f32 for fractional amplitude)
+    // Harmonic amplitude in controller units
+    // Uses f32 to allow fractional values
     pub amp: f32,
-    /// Phase in degrees [0..360)
+    // Harmonic phase in degree - can be [-360, 360) from UI
     pub phase: f32,
 }
 impl Default for HarmonicWaveParameters {
     fn default() -> Self {
         Self {
+            // Zero amplitude  (disabled harmonic)
             amp: 0.0,
+            // Zero phase offset
             phase: 0.0,
         }
     }
@@ -180,19 +222,52 @@ pub struct Settings{
     #[tree(depth(2))]
     harmonic_wave_parameters: [[HarmonicWaveParameters;MAX_HARMONICS];2],
 
-    //Add in the V_offset
+    /// DC voltage offset applied via Current Sense DAC
+    /// 
+    /// This value is written directly to the `CurrentSenseDac`:
+    /// 
+    /// `dac.write_voltage(v_offset)`
+    /// 
+    /// Used to shift the analog output baseline
+    /// 
+    /// # Path
+    /// `v_offset`
+    /// 
+    /// # Value
+    /// Voltage in volts (clamped internally to Current Sense DAC range)
     v_offset: f32,
 
+    /// Proportional gain (Kp) for mains phase-locked loop (PLL)
+    /// 
+    /// Used in frequency correction:
+    /// `freq = MAINS_FREQUENCY + frequency_corr + kp_alpha * phase_error`
+    /// 
+    /// Controls instantaneous response of PLL
+    /// 
+    /// # Path
+    /// `kp_alpha`
     kp_alpha: f32,
+    
+    /// Integral gain (Ki) for the mains PLL.
+    ///
+    /// Used to accumulate long-term phase error:
+    /// `frequency_corr += ki_alpha * phase_error`
+    ///
+    /// The integrator term is clamped to prevent windup.
+    ///
+    /// Controls steady-state frequency tracking accuracy.
+    ///
+    /// # Path
+    /// `ki_alpha`
     ki_alpha: f32,
 }
 
 impl Default for Settings{
     fn default() -> Self {
-        //This is a unity gain filter
+        // Unity-gain identity biquad
         let mut i = iir::Biquad::IDENTITY;
-        i.set_min(-SCALE); //Set the lower output limit
-        i.set_max(SCALE); //Set the upper output limit
+        i.set_min(-SCALE);
+        i.set_max(SCALE);
 
         Self{
             afe: [Gain::G1, Gain::G1],
@@ -210,33 +285,44 @@ impl Default for Settings{
             telemetry_period: 10,
 
             stream_target: StreamTarget::default(),
-            //TO DO - CHOOSE BETTER VALUES FOR DEFAULT!
+
+            // No harmonic injection on start up
             harmonic_wave_parameters:[[HarmonicWaveParameters::default(); MAX_HARMONICS], [HarmonicWaveParameters::default(); MAX_HARMONICS]],
 
+            // No DC offset
             v_offset: 0.0,
-            //These values appear to work best if used from start time took about ~2 mins to settle
-            kp_alpha: 0.05,
-            ki_alpha: 0.001,
+            
+            // No kp or ki for PLL
+            kp_alpha: 0.0,
+            ki_alpha: 0.0,
         }
     }
 }
 
-//Going to follow logic for older version which uses RTIC
 #[rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, LTDC, SDMMC])]
 mod app {
 
     use super::*;
 
-    //Define the fact we are using monotonic time - only goes forwards
     #[monotonic(binds = SysTick, default = true, priority = 2)]
     type Monotonic = Systick;
 
     #[shared]
     struct Shared {
+        /// USB device stack (used in idle + USB task)
         usb: UsbDevice,
+        /// Network stack and configuration interface (Miniconf).
         network: NetworkUsers<Settings, Telemetry, 3>,
-        settings: Settings, //All our settings are shared
+        /// Runtime application settings (updated via network).
+        settings: Settings,
+        /// Telemetry buffer updated in DSP task and published periodically.
         telemetry: TelemetryBuffer,
+        /// Harmonic DDS generators (one per channel).
+        ///
+        /// Updated in:
+        /// - DSP task (sample generation)
+        /// - PLL task (frequency adjustment)
+        /// - Settings update task (reconfiguration)
         harmonic_generators: [HarmonicGenerator<MAX_HARMONICS>;2],
     }
 
@@ -244,32 +330,57 @@ mod app {
 
     #[local]
     struct Local {
+        /// USB serial terminal handler.
         usb_terminal: SerialTerminal,
+        /// Hardware timer driving ADC/DAC sampling.
         sampling_timer: SamplingTimer,
+        /// Digital inputs (DI0, DI1).
         digital_inputs: (DigitalInput0, DigitalInput1),
+        /// Analog Front-End gain controls.
         afes: (AFE0, AFE1),
+        /// ADC input interfaces.
         adcs: (Adc0Input, Adc1Input),
+        /// DAC output interfaces.
         dacs: (Dac0Output, Dac1Output),
+        /// Input timestamp capture for mains synchronisation.
         timestamper: InputStamper,
-        //harmonic_synced: bool,
+        /// IIR filter state memory:
+        /// [channel][cascade_stage][delay_elements]
         iir_state: [[[f32; 4]; IIR_CASCADE_LENGTH]; 2],
+        /// UDP frame generator for livestreaming.
         generator: FrameGenerator,
+        /// Internal CPU temperature sensor.
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
+        /// Optional Current Sense DAC driver (present if board detected).
         current_sense_dac: Option<CurrentSenseDac>,
-        phase_offset: f32,
+        /// Last valid mains timestamp (TIM5 capture).
         last_ts: Option<u32>,
+        /// PLL integrator state (frequency correction term).
         frequency_corr: f32,
+        /// Current DDS fundamental frequency (Hz).
         dds_frequency: f32,
         
     }
 
+    /// System init
+    /// 
+    /// Responsisble for:
+    ///     - Configure hardware peripherals
+    ///     - Init network stack and streaming
+    ///     - Create harmonic DDS generators
+    ///     - Init PLL state
+    ///     - Start background tasks and interrupts
+    /// 
+    /// No real-time DSP runs until `start` task enables sampling timer
     #[init]
     fn init(c: init::Context) -> (Shared, Local, init::Monotonics) {
 
-        //Define the clock
+        // Create system time source used by network stack and scheduling.
         let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
 
-        //Configure the MCU
+        // Perform board-level hardware setup.
+        // Depending on detected hardware, SPI1 may be configured
+        // for Pounder or Current Sense DAC.
         let (mut stabilizer, _pounder, current_sense_dac) = hardware::setup::setup(
             c.core,
             c.device,
@@ -279,9 +390,10 @@ mod app {
         );
 
         let device_settings = stabilizer.usb_serial.settings();
-        let application_settings = Settings::default(); //Use default application settings
+        // Load default application settings (may be overridden via network).
+        let application_settings = Settings::default();
 
-        //Define the network settings
+        // Initialize networking (Miniconf + telemetry + streaming).
         let mut network = NetworkUsers::new(
             stabilizer.net.stack,
             stabilizer.net.phy,
@@ -293,8 +405,12 @@ mod app {
             application_settings,
         );
 
+        // Configure UDP livestream format (ADC + DAC samples).
         let generator = network.configure_streaming(StreamFormat::AdcDacData);
-
+        
+        // Initialize harmonic DDS generators for each channel.
+        // Fundamental starts at MAINS_FREQUENCY.
+        // Phases converted from degrees → cycles.  
         let harmonic_generators_arr = core::array::from_fn(|channel| {
             let basic_cfg = BasicConfig::<MAX_HARMONICS> {
                         zero_order_frequency: MAINS_FREQUENCY,
@@ -309,7 +425,7 @@ mod app {
             HarmonicGenerator::new(cfg)
         });
 
-
+        // Shared resources accessed across RTIC tasks.
         let shared = Shared {
             usb: stabilizer.usb,
             network,
@@ -317,7 +433,7 @@ mod app {
             telemetry: TelemetryBuffer::default(),
             harmonic_generators: harmonic_generators_arr,
         };
-
+        // Local task-owned resources (not shared across tasks).
         let mut local = Local {
             usb_terminal: stabilizer.usb_serial,
             sampling_timer: stabilizer.adc_dac_timer,
@@ -326,36 +442,36 @@ mod app {
             adcs: stabilizer.adcs,
             dacs: stabilizer.dacs,
             timestamper: stabilizer.timestamper,
-            //harmonic_synced: false,
             iir_state: [[[0.; 4]; IIR_CASCADE_LENGTH]; 2],
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
             current_sense_dac,
-            phase_offset: 0.0,
             last_ts: None,
             frequency_corr: 0.0,
             dds_frequency: MAINS_FREQUENCY,
         };
 
-        // Explicitly write to DAC on set up
+        // Apply initial DC offset to Current Sense DAC (if present).
         if let Some(dac) = local.current_sense_dac.as_mut() {
             dac.write_voltage(application_settings.v_offset);
         }
 
+        // Enable ADC and DAC peripherals (DMA-driven).
         local.adcs.0.start();
         local.adcs.1.start();
         local.dacs.0.start();
         local.dacs.1.start();
 
 
-        // Spawn a settings update for default settings.
+        // Schedule background tasks.
+        // Order does not matter here since sampling has not started yet.
         settings_update::spawn().unwrap();
         telemetry::spawn().unwrap();
         ethernet_link::spawn().unwrap();
         usb::spawn().unwrap();
-        // mains_sync::spawn_after(5u64.millis()).unwrap();
         start::spawn_after(100.millis()).unwrap();
-
+        
+        // Enable TIM5 interrupt for mains capture (PLL input).
         stabilizer.timestamp_timer.start();
         local.timestamper.start();
         unsafe {
@@ -393,7 +509,7 @@ mod app {
     #[link_section = ".itcm.process"]
     fn process(c: process::Context){
 
-        //Define Shared and local resources
+        // Shared and local resources
         let process::SharedResources {
             settings,
             telemetry,
@@ -407,19 +523,25 @@ mod app {
             generator,
         } = c.local;
 
-        //MAIN DSP ALGORITHM OCCURS HERE
+        // Real-time DSP work must be bounded; lock shared resources only for the minimum time.
+        // Acquire shared locks and run the per-batch pipeline.
         (settings, telemetry, harmonic_generators).lock(
             |settings, telemetry, harmonic_generators| {
-                //Single channel build - only DI0 us used so DI1 set to false as intentionally unused
+                
+                // Snapshot digital inputs (DI0, DI1) and publish to telemetry.
                 let digital_inputs = [digital_inputs.0.is_high(), digital_inputs.1.is_high()];
                 telemetry.digital_inputs = digital_inputs;
 
-                //Define the hold state - now it is using digial_inputs[0] instead of di1
+                // Compute hold state used by the filter stage:
+                // - force_hold overrides everything
+                // - otherwise DI1 (when allow_hold is enabled) will hold filter state
                 let hold = settings.force_hold
                     || (digital_inputs[1] && settings.allow_hold);
-                (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
-                    //Define our samples
 
+                // Lock ADC/DAC DMA buffers (local hardware resources) for the duration of processing.   
+                (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
+ 
+                    // References to the per-channel sample buffers (each is a batch of i16 samples).
                     let adc_samples = [adc0, adc1];
                     let dac_samples = [dac0, dac1];
 
@@ -427,11 +549,13 @@ mod app {
                     fence(Ordering::SeqCst);
 
 
-
+                    // For each channel, mix DDS harmonic feedforward with ADC sample,
+                    // pass result through cascaded IIR(s), and write to DAC buffer.
                     for channel in 0..adc_samples.len() {
-                    //Take mutable reference to harmonic slot for this channel
-                    
-                        //Need to append the harmoncics to the adc_samples
+                        // Iterate sample-by-sample for this batch. We zip:
+                        //  - input ADC samples (ai)
+                        //  - mutable DAC output slots (di)
+                        //  - a mutable harmonic generator for this channel
 
                         adc_samples[channel]
                         .iter()
@@ -440,23 +564,33 @@ mod app {
                         .for_each(|((ai, di), harmonic)|{
 
                             let ai_i16 = *ai as i16;
+
+                            // harmonic: i16 feedforward sample produced by DDS iterator
+                            // Mix feedforward with ADC input (saturating add to avoid overflow).
                             let mixed = ai_i16.saturating_add(harmonic);
-
+                            
                             let x = f32::from(mixed);
-
+                            // Apply cascaded IIR stages. If `hold` is active, use the HOLD filter
+                            // (which returns the previous output) instead of the configured stage.
+                            //
+                            // Each stage is applied in sequence, feeding the next stage.
                             let y = settings.iir_ch[channel].iter().zip(iir_state[channel].iter_mut()).fold(x, |yi, (ch, state)|{
                                 let filter = if hold { &iir::Biquad::HOLD} else { ch };
                                 filter.update(state, yi)
                             });
+
+                            // Convert filtered f32 back to i16. `to_int_unchecked` is used for
+                            // performance; ensure upstream filters clamp outputs to safe range.
                             let y_i16: i16 = unsafe{ y.to_int_unchecked() };
 
-                            //Write out to DAC buffer
+                            // Store converted code into the DAC DMA buffer (driver expects DacCode raw).
                             *di = DacCode::from(y_i16).0;
                         });
                 
                     }
 
-                    // Stream the data.
+                    // Add batch to UDP stream buffer:
+                    // Copy adc0, adc1, dac0, dac1 (in that order) into the provided `buf`.
                     const N: usize = BATCH_SIZE * core::mem::size_of::<i16>();
                     generator.add(|buf| {
                         // copy adc0, adc1, dac0, dac1 in that order from adc_samples/dac_samples arrays
@@ -474,50 +608,46 @@ mod app {
                             };
                             buf.copy_from_slice(data)
                         }
-                        
+                        // Return number of bytes written for all four buffers
                         N * 4
                     });
                     
-                    // Update telemetry measurements.
-                    // snapshot ADC telemetry: if ADC inactive, report 0 or keep existing snapshot
+                    // Update snapshot telemetry (first sample of each buffer)
                     telemetry.adcs = [
                         AdcCode(adc_samples[0][0]),
                         AdcCode(adc_samples[1][0]),
                         
                     ];
-                    // snapshot DAC telemetry similarly
                     telemetry.dacs = [
                         DacCode(dac_samples[0][0]),
                         DacCode(dac_samples[1][0]),
 
                     ];
-                    // Preserve instruction and data ordering w.r.t. DMA flag access.
+                    // Ensure memory/ordering before releasing locks so DMA flags are observed consistently.
                     fence(Ordering::SeqCst);
-
                 });
             },
         );
     }
 
+    /// Idle task.
+    ///
+    /// Polls the network for updates and spawns a settings update
+    /// task when configuration changes are detected.
+    ///
+    /// Enters low-power sleep (WFI) when USB is suspended.
     #[idle(shared=[network, usb])]
     fn idle(mut c: idle::Context) -> ! {
         loop {
             match c.shared.network.lock(|net| net.update()) {
+                // New settings arrived via network — apply them.
                 NetworkState::SettingsChanged(_path) => {
+                    // Spawn RTIC task to apply the settings and run as priority 1
                     settings_update::spawn().unwrap()
                 }
-                NetworkState::Updated => {
-
-
-                    // c.shared.network.lock(|net| {
-                    //     net.processor.stack.lock(|stack| {
-                    //         for cidr in stack.interface().ip_addrs() {
-                    //             log::info!("IP address: {}", cidr);
-                    //         }
-                    //     });
-                    // });
-
-                }
+                // If network has updated internal state but no settings change - just keep running
+                NetworkState::Updated => {}
+                // Nothing new from the network
                 NetworkState::NoChange => {
                     // We can't sleep if USB is not in suspend.
                     if c.shared.usb.lock(|usb| {
@@ -533,45 +663,67 @@ mod app {
     
     
 
-    //Fires whenever a TIM5 interrupt is triggered
-    //TIM5 interrupt fires when any enabled TIM5 interrupt source sets its flag
-    //E.G. CC4 CAPTURE EVENT (WHAT WE WANT), Update event(overflow), possible others?
-    //Practically TIM5 interrup fires almost always for captur
-    //If the interrupt was not caused by CC4 capture then it returns Ok(None) 
-    #[task(binds = TIM5, priority =2, local=[timestamper, phase_offset, frequency_corr, dds_frequency, last_ts], shared=[settings, harmonic_generators])]
+    // TIM5 capture interrupt — mains synchronisation (digital PLL).
+    //
+    // Behaviour:
+    // - Reads the latest timestamp captured from the mains input (via `timestamper`).
+    // - Rejects random fast captures (jitter).
+    // - Back-propagates the DDS phase to the exact capture instant.
+    // - Computes a wrapped phase error in cycles ([-0.5, 0.5] = ±180°).
+    // - Applies a PI correction (integrator clamped) and updates DDS frequency.
+    // - Updates each channel's harmonic generator frequency and applies a global
+    //   phase offset (used to align DDS phase to the measured edge).
+    #[task(binds = TIM5, priority =2, local=[timestamper, frequency_corr, dds_frequency, last_ts], shared=[settings, harmonic_generators])]
     fn mains_sync(mut c: mains_sync::Context){
+        
+        // Process all pending capture timestamps.
+        //
+        // A single TIM5 interrupt may correspond to multiple captured edges
+        // (e.g. if captures occur faster than this handler runs).
+        //
+        // `latest_timestamp()` returns one timestamp at a time, so we loop
+        // until no more timestamps are available to ensure the capture FIFO
+        // is empty before exiting the interrupt.
         loop{
             match c.local.timestamper.latest_timestamp() {
 
                 Ok(Some(ts)) => {
 
-                    // Check it is a valid capture i.e. not a jitter
+                    // Reject very close captures (likely jitter or noise).
                     if let Some(last) = *c.local.last_ts {
                         let dt = ts.wrapping_sub(last);
-                        //Reject if less than 5ms
+                        // Minimum allowed time between valid captures (5 ms here) - may want to change
                         let min_ticks = (0.005 / hardware::design_parameters::TIMER_PERIOD) as u32;
                         if dt < min_ticks {
+                            // If too close to previous timestamp ignore as jitter.
                             continue;
                         }
                     }
                     
-
+                    // Time difference from capture to now (in seconds).
                     let now_ticks = unsafe { (*stm32h7xx_hal::stm32::TIM5::ptr()).cnt.read().bits() };
                     let dt_ticks = now_ticks.wrapping_sub(ts);
                     let dt_s = dt_ticks as f32 * hardware::design_parameters::TIMER_PERIOD;
+                    
+                    // Read PLL gains atomically from shared settings.
                     let (kp, ki) = c.shared.settings.lock(|s| (s.kp_alpha, s.ki_alpha));
-                    //Get the current state of wave
-                    //Only doing for channel 0 at the moment 
+
+                    // Update all harmonic generators (one per channel)
                     c.shared.harmonic_generators.lock(|gens| {
                         for ch in 0..gens.len(){
+                            // Get generator state: current fractional phase (cycles) and
+                            // phase increment per sample (in cycles/sample).
                             let (phase_now, phase_increase_per_sample) = gens[ch].get_current_state();
                             
-                            //Then we need to back propagate it to the edge and assume phase of signal is zero at edge
-                            let samples_elapsed = dt_s / SAMPLE_PERIOD; //How many samples have elapsed since then
+                            // Estimate how many samples have elapsed between the captured
+                            // timestamp and 'now', then back-propagate the phase to the edge.
+                            let samples_elapsed = dt_s / SAMPLE_PERIOD; 
                             
-
+                            
+                            // Phase error: desired phase at edge is 0.0 cycles.
                             let mut phase_at_edge = phase_now - phase_increase_per_sample * samples_elapsed;
-                            //Then we need ot wrap
+                            
+                            // Wrap phase value into [0.0, 1.0)
                             if phase_at_edge >= 1.0 {
                                 phase_at_edge -= 1.0;
                             }
@@ -582,7 +734,7 @@ mod app {
                             // This was our phase at the actual timestamp!
                             let mut phase_error = 0.0 - phase_at_edge;
 
-                            //Now need ot wrap this error to between [-0.5, 0.5] or -180 to 180
+                            // Wrap phase error into [-0.5, 0.5] cycles or -180 to 180
                             if phase_error > 0.5 {
                                 phase_error -= 1.0;
                             }
@@ -590,12 +742,11 @@ mod app {
                                 phase_error += 1.0;
                             }
 
-                            // Calulacte the proportional and integral term to be used
+                            // PI: integrate (Ki) then compute proportional action (Kp).
                             *c.local.frequency_corr += ki * phase_error;
 
-
+                            // Clamp integrator to prevent windup
                             let MAX_FREQ_CORR = 1.0;
-                            //Now we clamp the integrator
                             if *c.local.frequency_corr > MAX_FREQ_CORR {
                                 *c.local.frequency_corr = MAX_FREQ_CORR;
                             }
@@ -603,23 +754,28 @@ mod app {
                                 *c.local.frequency_corr = -MAX_FREQ_CORR;
                             }
                             
-                            
+                            // New frequency = nominal mains + integrator + proportional correction.
                             let freq = MAINS_FREQUENCY + *c.local.frequency_corr + kp * phase_error;
+                            // Store applied frequency for diagnostics and update generator.
                             *c.local.dds_frequency = freq;
-                            
                             gens[ch].set_base_frequency(freq, SAMPLE_PERIOD);
+                            // Apply a fixed global phase offset (0.5 cycles => 180°).
+                            // This is intentional phase alignment — adjust if your hardware expects a different phase.
                             gens[ch].set_global_phase_offset(0.5);
 
                         }
-                    });     
+                    });  
+                    // Record last valid timestamp.   
                     *c.local.last_ts = Some(ts);
                 }
-            
+                // No timestamp available — exit loop and return from interrupt.
                 Ok(None) => break,
+                // Overcapture condition: we received overflowed timestamps; log and record.
                 Err(Some(ts)) => {
                     log::warn!("Overcapture detected, ts={}", ts);
                     *c.local.last_ts = Some(ts);
                 }
+                // No timestamp and no error — exit.
                 Err(None) => break,
             
             }
@@ -628,164 +784,62 @@ mod app {
      
     }
 
-
-    // #[task(priority=2, local=[timestamper, phase_offset, last_ts, frequency_corr, dds_frequency], shared=[settings, harmonic_generators])]
-    // fn mains_sync(mut c: mains_sync::Context) {
-    //     let fll: bool = true;
-    //     let MAX_FREQ_CORR = 0.5;
-    //     if fll {
-            
-    //         loop {
-    //             match c.local.timestamper.latest_timestamp() {
-    //                 Ok(Some(ts)) => {            
-    //                     if let Some(last) = c.local.last_ts {
-    //                         let measured_ticks = ts.wrapping_sub(*last);
-    //                         //Expected period is 1/50Hz
-    //                         //Sample period is ticks per sample
-    //                         let ticks_nominal = (1.0/MAINS_FREQUENCY) / SAMPLE_PERIOD;
-    //                         let period_error = measured_ticks as f32 - ticks_nominal;
-    //                         c.shared.settings.lock(|sets| {
-    //                             *c.local.frequency_corr += sets.ki_alpha * period_error;
-    //                             if *c.local.frequency_corr > MAX_FREQ_CORR {
-    //                                 *c.local.frequency_corr = MAX_FREQ_CORR;
-    //                             }
-    //                             if *c.local.frequency_corr < -MAX_FREQ_CORR {
-    //                                 *c.local.frequency_corr = -MAX_FREQ_CORR;
-    //                             }
-
-
-    //                             let freq_output = MAINS_FREQUENCY + sets.kp_alpha * period_error + *c.local.frequency_corr;
-    //                             *c.local.dds_frequency = freq_output;
-    //                         });
-                            
-    //                         c.shared.harmonic_generators.lock(|gens|{
-    //                             for ch in 0..gens.len(){
-    //                                 gens[ch].set_base_frequency(*c.local.dds_frequency, SAMPLE_PERIOD);
-    //                             }
-    //                         });
-    //                     }
-    //                     *c.local.last_ts = Some(ts);
-    //                 }
-    //                 Ok(None) => break,
-    //                 Err(Some(ts)) => {
-    //                     log::warn!("Overcapture detected, ts={}", ts);
-    //                     *c.local.last_ts = Some(ts);
-    //                 }
-    //                 Err(None) => break,
-    //             }
-    //         }
-    //     }
-    //     else {
-    //         //Phase lock
-    //         loop {
-    //             match c.local.timestamper.latest_timestamp() {
-
-    //                 Ok(Some(ts)) => {
-                        
-    //                     if let Some(last) = *c.local.last_ts {
-    //                         let dt = ts.wrapping_sub(last);
-    //                         //Reject if less than 5ms
-    //                         let min_ticks = (0.005 / SAMPLE_PERIOD) as u32;
-    //                         if dt < min_ticks {
-    //                             continue;
-    //                         }
-    //                     }
-                        
-    //                     c.shared.harmonic_generators.lock(|gens| {
-    //                         let mut phase = gens[0].current_phase();
-    //                         if phase < 0.0 {phase += 1.0;}
-    //                         let mut phase_error = -phase; //lock zero crossing to phase 0
-                            
-    //                         if phase_error > 0.5 {phase_error -= 1.0;}
-    //                         if phase_error < -0.5 {phase_error += 1.0;}
-
-    //                         c.shared.settings.lock(|sets| {
-
-    //                             *c.local.frequency_corr += sets.ki_alpha * phase_error;
-    //                             if *c.local.frequency_corr > MAX_FREQ_CORR {
-    //                                 *c.local.frequency_corr = MAX_FREQ_CORR;
-    //                             }
-    //                             if *c.local.frequency_corr < -MAX_FREQ_CORR {
-    //                                 *c.local.frequency_corr = -MAX_FREQ_CORR;
-    //                             }
-
-    //                             let freq = MAINS_FREQUENCY + sets.kp_alpha * phase_error + *c.local.frequency_corr;
-    //                             *c.local.dds_frequency = freq;
-                                
-    //                             for ch in 0..gens.len() {
-    //                                 gens[ch].set_base_frequency(freq, SAMPLE_PERIOD);
-    //                                 gens[ch].set_global_phase_offset(0.5); //set to antiphase
-    //                             }
-    //                         });
-
-                           
-    //                     });
-    //                     *c.local.last_ts = Some(ts);
-
-    //                 }
-    //                 Ok(None) => break,
-    //                 Err(Some(ts)) => {
-    //                     log::warn!("Overcapture detected, ts={}", ts);
-    //                     *c.local.last_ts = Some(ts);
-    //                 }
-    //                 Err(None) => break,
-    //             }
-    //         }
-    //     }
- 
-    //     mains_sync::spawn_after(5u64.millis()).unwrap();
-    // }
-
-
-    //Settings update
+    // Apply configuration received from the network (Miniconf).
+    //
+    // Responsibilities:
+    // - Pull the latest settings from the network-miniconf
+    // - Update local copy of settings
+    // - Apply hardware changes (AFE gains, Current Sense DAC)
+    // - Reconfigure harmonic DDS generators (phases are made relative to fundamental)
+    // - Update livestream target
     #[task(priority = 1, local=[afes, current_sense_dac], shared=[network, settings, harmonic_generators])]
     fn settings_update(mut c: settings_update::Context) {
+        // Read configuration from network miniconf and store in shared settings.
         let settings = c.shared.network.lock(|net| *net.miniconf.settings());
         c.shared.settings.lock(|current| *current = settings);
-
+        
+        // Apply AFE gain settings.
         c.local.afes.0.set_gain(settings.afe[0]);
         c.local.afes.1.set_gain(settings.afe[1]);
 
-        let offset_1 = &settings.v_offset;
-        log::info!("Offset is {}", offset_1);
-        
+        // Apply DC offset to Current Sense DAC if present.
         if let Some(dac) = c.local.current_sense_dac.as_mut() {
             dac.write_voltage(settings.v_offset);
         }
         
-        log::info!("KI ALPHA: {}", &settings.ki_alpha);
-        log::info!("KP ALPHA: {}", &settings.kp_alpha);
-        
-        //Update harmonic generator - should all be relative to fundamental harmonic
+        // Update harmonic DDS generators.
+        // Phases in the UI are specified in degrees. We convert them to cycles
+        // (0.0..1.0) and make each harmonic phase relative to the fundamental
+        // (harmonic[0]) so the UI can set a per-harmonic offset.
         let harmonic_parameters = &settings.harmonic_wave_parameters;
         
-        for channel in 0..2{
+        for channel in 0..harmonic_parameters.len(){
 
             let fundamental_phase = harmonic_parameters[channel][0].phase / 360.0;
 
-
+            // Build BasicConfig with amplitudes and phases (relative to fundamental).
             let basic_cfg = BasicConfig::<MAX_HARMONICS> {
                     zero_order_frequency: MAINS_FREQUENCY,
                     amplitude: core::array::from_fn(|i| {
                                 harmonic_parameters[channel][i].amp
                             }),
                     phase: core::array::from_fn(|i| {
-                        
+                        // Convert degrees to cycles and subtract the fundamental to produce a relative phase.
                         let phi = harmonic_parameters[channel][i].phase / 360.0;
                         let mut rel = phi - fundamental_phase;
-                        //Wrap
+                        // Wrap into [0.0, 1.0)
                         if rel >= 1.0 {
                             rel -= 1.0;
                         }
                         if rel < 0.0 {
                             rel += 1.0;
                         }
-                        //harmonic_parameters[channel][i].phase/360.0
                         rel
                        
                     }),
                 };
-
+            
+            // Convert user-facing BasicConfig into the internal fixed-point Config.
             match basic_cfg.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE) {
                 Ok(config)=> {c.shared.harmonic_generators.lock(|harmonic_generator| harmonic_generator[channel].update_waveform(config));}
                 Err(err) => log::error!(
@@ -794,34 +848,10 @@ mod app {
                 ),
             }
         }
-        // log::info!(
-        //         "Harmonic Amplitudes are {}, {}, {}, {}, {}",
-        //         harmonic_parameters[0][0].amp,
-        //         harmonic_parameters[0][1].amp,
-        //         harmonic_parameters[0][2].amp,
-        //         harmonic_parameters[0][3].amp,
-        //         harmonic_parameters[0][4].amp,
-        //     );
-        // log::info!(
-        //         "Harmonic Phases are {}, {}, {}, {}, {}",
-        //         harmonic_parameters[0][0].phase,
-        //         harmonic_parameters[0][1].phase,
-        //         harmonic_parameters[0][2].phase,
-        //         harmonic_parameters[0][3].phase,
-        //         harmonic_parameters[0][4].phase,
 
-            // );
-
+        // Update the streaming target (UDP) based on settings.
         let target = settings.stream_target.into();
         c.shared.network.lock(|net| net.direct_stream(target));
-        // log::info!(
-        //         "Stream target set to {}.{}.{}.{}:{}",
-        //         settings.stream_target.ip[0],
-        //         settings.stream_target.ip[1],
-        //         settings.stream_target.ip[2],
-        //         settings.stream_target.ip[3],
-        //         settings.stream_target.port,
-        //     );
     }
 
 
