@@ -33,7 +33,6 @@ impl CurrentSenseDac{
     pub fn write_raw(&mut self, value: u16){
         let bytes = value.to_be_bytes();
         self.cs.set_low(); // Select DAC
-        log::info!("Writing value {}", value);
         match self.spi.write(&bytes) {
             Ok(_) => {}
             Err(e) => {
