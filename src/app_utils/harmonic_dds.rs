@@ -139,7 +139,6 @@ impl<const N: usize> Default for Config<N>{
 pub struct HarmonicGenerator<const N: usize>{
     phase_accumulator: [i32;N],
     config: Config<N>,
-    global_phase_offset: i32,
 }
 
 impl<const N: usize> HarmonicGenerator<N> {
@@ -150,8 +149,6 @@ impl<const N: usize> HarmonicGenerator<N> {
         Self {
             config,
             phase_accumulator: [0;N],
-            global_phase_offset: 0,
-            
         }
     }
 
@@ -161,40 +158,32 @@ impl<const N: usize> HarmonicGenerator<N> {
         self.config = new_config;
     }
 
-    // Reset all harmonic phase accumulators to zero
-    pub fn clear_phase_accumulator(&mut self) {
-        self.phase_accumulator = [0;N];
-    }
-    
-    /// Update the fundamental frequency 
-    /// All harmonics updated as 1x, 2x, 3x, ..
-    pub fn set_base_frequency(&mut self, freq: f32, sample_period: f32) {
-        const PHASE_SCALE: f32 = (u32::MAX as f32) + 1.0;
+    /// Set the fundamental phase and per-sample phase increment.
+    ///
+    /// Harmonic `k` (0-based) is placed at `(k + 1)` times the fundamental
+    /// phase and advances at `(k + 1)` times the fundamental increment, so
+    /// all harmonics stay exactly phase-coherent with the fundamental.
+    ///
+    /// Intended to be called once per batch with the phase and frequency
+    /// estimate of a PLL tracking an external reference (see [`idsp::RPLL`]).
+    ///
+    /// - `phase`: Fundamental phase at the first sample of the batch, in
+    ///   32-bit phase space (`1 << 32` is one full cycle).
+    /// - `increment`: Fundamental phase increment per sample, in 32-bit
+    ///   phase space.
+    pub fn set_fundamental(&mut self, phase: i32, increment: i32) {
         for i in 0..N {
-            let harmonic = (i+1) as f32;
-            let ftw = freq * harmonic * sample_period * PHASE_SCALE;
-            self.config.phase_increment[i] = ftw as i32;
+            let harmonic = (i + 1) as i32;
+            self.phase_accumulator[i] = phase.wrapping_mul(harmonic);
+            self.config.phase_increment[i] = increment.wrapping_mul(harmonic);
         }
     }
-
-    // Apply an additional phase offset in cycles 0.0-1.0 to all harmonics equally
-    pub fn set_global_phase_offset(&mut self, phase_cycle: f32){
-        const PHASE_SCALE: f32 = (u32::MAX as f32)+ 1.0;
-        self.global_phase_offset = (phase_cycle * PHASE_SCALE) as i32;
-    }
-    
-    // Fetches current phase_accumulator and phase_increment in cycle 0.0-1.0
-    pub fn get_current_state(&self) -> (f32, f32){
-        const PHASE_SCALE: f32 = (u32::MAX as f32)+ 1.0;
-        (self.phase_accumulator[0] as f32 / PHASE_SCALE, self.config.phase_increment[0] as f32 / PHASE_SCALE)
-    }
-
 }
 
 /// Generate the next output sample
 /// 
 /// For each harmonic
-///  - Add phase offset + global offset
+///  - Add phase offset
 ///  - Compute sine value using phase accumulator
 ///  - Scale by amplitude
 ///  - Accumulate into final output
@@ -208,7 +197,7 @@ impl<const N: usize> core::iter::Iterator for HarmonicGenerator<N> {
         for i in 0..N
         {
             // Compute effective phase including offsets
-            let phase = self.phase_accumulator[i].wrapping_add(self.config.phase_offset[i]).wrapping_add(self.global_phase_offset);
+            let phase = self.phase_accumulator[i].wrapping_add(self.config.phase_offset[i]);
             // Advance phase accumulator by freq * time between next() which is sample time
             self.phase_accumulator[i] = self.phase_accumulator[i].wrapping_add(self.config.phase_increment[i]);
             // Get sine from phase (fixed-point lookup)

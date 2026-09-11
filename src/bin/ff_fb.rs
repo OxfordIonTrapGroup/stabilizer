@@ -22,10 +22,10 @@
 //!
 //! ## Mains Synchronisation
 //!
-//! - Hardware timestamp capture (TIM5)
-//! - Digital phase-locked loop (PI controller)
-//! - Frequency correction with integrator clamping (anti-windup)
-//! - Harmonics derived from tracked fundamental frequency
+//! - Hardware timestamp capture (TIM5) of the mains reference on DI0
+//! - Reciprocal PLL ([`idsp::RPLL`]) advanced once per sample batch
+//! - Fundamental phase and frequency taken from the PLL every batch
+//! - Harmonics derived coherently as integer multiples of the fundamental phase
 //!
 //! ---
 //!
@@ -48,7 +48,7 @@
 //! - AFE gain
 //! - IIR coefficients
 //! - Harmonic amplitudes and phases
-//! - PLL gains (Kp, Ki)
+//! - PLL time constants
 //! - Current sense DAC offset
 //!
 //! ## Telemetry
@@ -81,7 +81,7 @@ use core::usize;
 use serde::{Deserialize, Serialize};
 use fugit::ExtU64;
 use mutex_trait::prelude::*;
-use idsp::iir;
+use idsp::{iir, RPLL};
 use stabilizer::app_utils::harmonic_dds::{BasicConfig};
 use stabilizer::{
     app_utils::harmonic_dds::{HarmonicGenerator},
@@ -113,14 +113,25 @@ const SCALE: f32 = i16::MAX as _;
 // The number of cascaded IIR biquads per channel. Select 1 or 2!
 const IIR_CASCADE_LENGTH: usize = 1;
 
+// log2 of the number of samples processed per batch.
+const BATCH_SIZE_LOG2: u32 = 3;
+
 // Number of samples processed per batch.
-const BATCH_SIZE: usize = 8;
+const BATCH_SIZE: usize = 1 << BATCH_SIZE_LOG2;
 
 // log2 of the number of 100 MHz timer ticks between samples.
 // SAMPLE_TICKS = 2^SAMPLE_TICKS_LOG2
 // Example: 8 → 256 ticks → 2.56 µs/sample → ~390.625 kHz sample rate.
 // Note dual-iir was original 7 - changed to 8 as otherwise too fast for computing harmonics
-const SAMPLE_TICKS_LOG2: u8 = 8;
+const SAMPLE_TICKS_LOG2: u32 = 8;
+
+// log2 of the number of timestamp timer ticks between PLL updates (one per batch).
+const PLL_DT2: u32 = SAMPLE_TICKS_LOG2 + BATCH_SIZE_LOG2;
+
+// Minimum spacing between accepted mains timestamps, in timestamp timer ticks.
+// Captures closer than this to the previous accepted one are treated as glitches.
+const MIN_TIMESTAMP_SPACING_TICKS: u32 =
+    (0.005 / hardware::design_parameters::TIMER_PERIOD) as u32;
 
 // Number of timer ticks between consecutive samples.
 const SAMPLE_TICKS: u32 = 1 << SAMPLE_TICKS_LOG2;
@@ -249,29 +260,20 @@ pub struct Settings{
     /// Voltage in volts (clamped internally to Current Sense DAC range)
     v_offset: f32,
 
-    /// Proportional gain (Kp) for mains phase-locked loop (PLL)
-    /// 
-    /// Used in frequency correction:
-    /// `freq = MAINS_FREQUENCY + frequency_corr + kp_alpha * phase_error`
-    /// 
-    /// Controls instantaneous response of PLL
-    /// 
-    /// # Path
-    /// `kp_alpha`
-    kp_alpha: f32,
-    
-    /// Integral gain (Ki) for the mains PLL.
-    ///
-    /// Used to accumulate long-term phase error:
-    /// `frequency_corr += ki_alpha * phase_error`
-    ///
-    /// The integrator term is clamped to prevent windup.
-    ///
-    /// Controls steady-state frequency tracking accuracy.
+    /// Mains PLL time constants.
     ///
     /// # Path
-    /// `ki_alpha`
-    ki_alpha: f32,
+    /// `pll_tc/<n>`
+    ///
+    /// * `<n>` := 0 selects the frequency lock settling time.
+    /// * `<n>` := 1 selects the phase lock settling time (usually one less than `<n>` := 0).
+    ///
+    /// # Value
+    /// The settling time exponent: `1 << pll_tc[n]` is the settling time in 100 MHz
+    /// timestamp timer ticks. The frequency settling time must be longer than one mains
+    /// period (`pll_tc[0] >= 22` at 50 Hz). Both must exceed the batch period
+    /// exponent ([PLL_DT2]) and be at most `PLL_DT2 + 31`. Out-of-range values are clamped.
+    pll_tc: [u32; 2],
 }
 
 impl Default for Settings{
@@ -304,9 +306,9 @@ impl Default for Settings{
             // No DC offset
             v_offset: 0.0,
             
-            // No kp or ki for PLL
-            kp_alpha: 0.0,
-            ki_alpha: 0.0,
+            // Frequency and phase settling time (log2 timestamp timer ticks):
+            // 2^24 ticks ≈ 168 ms and 2^23 ticks ≈ 84 ms at 100 MHz.
+            pll_tc: [24, 23],
         }
     }
 }
@@ -365,13 +367,10 @@ mod app {
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
         /// Optional Current Sense DAC driver (present if board detected).
         current_sense_dac: Option<CurrentSenseDac>,
-        /// Last valid mains timestamp (TIM5 capture).
+        /// Reciprocal PLL tracking the mains reference from TIM5 timestamps.
+        pll: RPLL,
+        /// Last accepted mains timestamp (TIM5 capture), used for glitch rejection.
         last_ts: Option<u32>,
-        /// PLL integrator state (frequency correction term).
-        frequency_corr: f32,
-        /// Current DDS fundamental frequency (Hz).
-        dds_frequency: f32,
-        
     }
 
     /// System init
@@ -380,7 +379,7 @@ mod app {
     ///     - Configure hardware peripherals
     ///     - Init network stack and streaming
     ///     - Create harmonic DDS generators
-    ///     - Init PLL state
+    ///     - Create the mains PLL
     ///     - Start background tasks and interrupts
     /// 
     /// No real-time DSP runs until `start` task enables sampling timer
@@ -458,9 +457,8 @@ mod app {
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
             current_sense_dac,
+            pll: RPLL::new(PLL_DT2),
             last_ts: None,
-            frequency_corr: 0.0,
-            dds_frequency: MAINS_FREQUENCY,
         };
 
         // Apply initial DC offset to Current Sense DAC (if present).
@@ -483,14 +481,9 @@ mod app {
         usb::spawn().unwrap();
         start::spawn_after(100.millis()).unwrap();
         
-        // Enable TIM5 interrupt for mains capture (PLL input).
+        // Start recording mains reference timestamps on DI0 (PLL input).
         stabilizer.timestamp_timer.start();
         local.timestamper.start();
-        unsafe {
-            cortex_m::peripheral::NVIC::unmask(
-                stabilizer::hardware::hal::stm32::Interrupt::TIM5
-            );
-        }
 
         (shared, local, init::Monotonics(stabilizer.systick))
     }
@@ -517,7 +510,7 @@ mod app {
     ///
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
-    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, dacs, iir_state, generator], shared=[settings, telemetry, harmonic_generators], priority=3)]
+    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, dacs, iir_state, generator, timestamper, pll, last_ts], shared=[settings, telemetry, harmonic_generators], priority=3)]
     #[link_section = ".itcm.process"]
     fn process(c: process::Context){
 
@@ -533,6 +526,9 @@ mod app {
             dacs: (dac0, dac1),
             iir_state,
             generator,
+            timestamper,
+            pll,
+            last_ts,
         } = c.local;
 
         // Real-time DSP work must be bounded; lock shared resources only for the minimum time.
@@ -549,6 +545,39 @@ mod app {
                 // - otherwise DI1 (when allow_hold is enabled) will hold filter state
                 let hold = settings.force_hold
                     || (digital_inputs[1] && settings.allow_hold);
+
+                // Mains synchronisation.
+                //
+                // Fetch the latest TIM5 capture of the mains reference edge (if any arrived
+                // since the previous batch). Timestamps from capture overflows are ignored, as
+                // are captures too close to the previously accepted one (glitches).
+                let timestamp = timestamper
+                    .latest_timestamp()
+                    .unwrap_or(None)
+                    .filter(|ts| {
+                        last_ts.map_or(true, |last| {
+                            ts.wrapping_sub(last) >= MIN_TIMESTAMP_SPACING_TICKS
+                        })
+                    });
+                if timestamp.is_some() {
+                    *last_ts = timestamp;
+                }
+
+                // Advance the PLL by one batch. The returned phase is the reference phase at
+                // the start of this batch (zero at the reference edge) and the frequency is
+                // in units of 1 << 32 per batch.
+                let (pll_phase, pll_frequency) = pll.update(
+                    timestamp.map(|t| t as i32),
+                    settings.pll_tc[0],
+                    settings.pll_tc[1],
+                );
+                let phase_increment = (pll_frequency >> BATCH_SIZE_LOG2) as i32;
+
+                // Re-anchor every harmonic generator to the tracked fundamental. The
+                // generators then advance sample-by-sample within the batch.
+                for harmonic_generator in harmonic_generators.iter_mut() {
+                    harmonic_generator.set_fundamental(pll_phase, phase_increment);
+                }
 
                 // Lock ADC/DAC DMA buffers (local hardware resources) for the duration of processing.   
                 (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
@@ -675,128 +704,6 @@ mod app {
     
     
 
-    // TIM5 capture interrupt — mains synchronisation (digital PLL).
-    //
-    // Behaviour:
-    // - Reads the latest timestamp captured from the mains input (via `timestamper`).
-    // - Rejects random fast captures (jitter).
-    // - Back-propagates the DDS phase to the exact capture instant.
-    // - Computes a wrapped phase error in cycles ([-0.5, 0.5] = ±180°).
-    // - Applies a PI correction (integrator clamped) and updates DDS frequency.
-    // - Updates each channel's harmonic generator frequency and applies a global
-    //   phase offset (used to align DDS phase to the measured edge).
-    //
-    #[task(binds = TIM5, priority =2, local=[timestamper, frequency_corr, dds_frequency, last_ts], shared=[settings, harmonic_generators])]
-    fn mains_sync(mut c: mains_sync::Context){
-        
-        // Process all pending capture timestamps.
-        //
-        // A single TIM5 interrupt may correspond to multiple captured edges
-        // (e.g. if captures occur faster than this handler runs).
-        //
-        // `latest_timestamp()` returns one timestamp at a time, so we loop
-        // until no more timestamps are available to ensure the capture FIFO
-        // is empty before exiting the interrupt.
-        loop{
-            match c.local.timestamper.latest_timestamp() {
-
-                Ok(Some(ts)) => {
-
-                    // Reject very close captures (likely jitter or noise).
-                    if let Some(last) = *c.local.last_ts {
-                        let dt = ts.wrapping_sub(last);
-                        // Minimum allowed time between valid captures (5 ms here) - may want to change
-                        let min_ticks = (0.005 / hardware::design_parameters::TIMER_PERIOD) as u32;
-                        if dt < min_ticks {
-                            // If too close to previous timestamp ignore as jitter.
-                            continue;
-                        }
-                    }
-                    
-                    // Time difference from capture to now (in seconds).
-                    let now_ticks = unsafe { (*stm32h7xx_hal::stm32::TIM5::ptr()).cnt.read().bits() };
-                    let dt_ticks = now_ticks.wrapping_sub(ts);
-                    let dt_s = dt_ticks as f32 * hardware::design_parameters::TIMER_PERIOD;
-                    
-                    // Read PLL gains atomically from shared settings.
-                    let (kp, ki) = c.shared.settings.lock(|s| (s.kp_alpha, s.ki_alpha));
-
-                    // Update all harmonic generators (one per channel)
-                    c.shared.harmonic_generators.lock(|gens| {
-                        for ch in 0..gens.len(){
-                            // Get generator state: current fractional phase (cycles) and
-                            // phase increment per sample (in cycles/sample).
-                            let (phase_now, phase_increase_per_sample) = gens[ch].get_current_state();
-                            
-                            // Estimate how many samples have elapsed between the captured
-                            // timestamp and 'now', then back-propagate the phase to the edge.
-                            let samples_elapsed = dt_s / SAMPLE_PERIOD; 
-                            
-                            
-                            // Phase error: desired phase at edge is 0.0 cycles.
-                            let mut phase_at_edge = phase_now - phase_increase_per_sample * samples_elapsed;
-                            
-                            // Wrap phase value into [0.0, 1.0)
-                            if phase_at_edge >= 1.0 {
-                                phase_at_edge -= 1.0;
-                            }
-                            else if phase_at_edge < 0.0 {
-                                phase_at_edge += 1.0;
-                            }
-
-                            // This was our phase at the actual timestamp!
-                            let mut phase_error = 0.0 - phase_at_edge;
-
-                            // Wrap phase error into [-0.5, 0.5] cycles or -180 to 180
-                            if phase_error > 0.5 {
-                                phase_error -= 1.0;
-                            }
-                            if phase_error < -0.5 {
-                                phase_error += 1.0;
-                            }
-
-                            // PI: integrate (Ki) then compute proportional action (Kp).
-                            *c.local.frequency_corr += ki * phase_error;
-
-                            // Clamp integrator to prevent windup
-                            let MAX_FREQ_CORR = 1.0;
-                            if *c.local.frequency_corr > MAX_FREQ_CORR {
-                                *c.local.frequency_corr = MAX_FREQ_CORR;
-                            }
-                            if *c.local.frequency_corr < -MAX_FREQ_CORR {
-                                *c.local.frequency_corr = -MAX_FREQ_CORR;
-                            }
-                            
-                            // New frequency = nominal mains + integrator + proportional correction.
-                            let freq = MAINS_FREQUENCY + *c.local.frequency_corr + kp * phase_error;
-                            // Store applied frequency for diagnostics and update generator.
-                            *c.local.dds_frequency = freq;
-                            gens[ch].set_base_frequency(freq, SAMPLE_PERIOD);
-                            // Apply a fixed global phase offset (0.5 cycles => 180°).
-                            // This is intentional phase alignment — adjust if your hardware expects a different phase.
-                            gens[ch].set_global_phase_offset(0.5);
-
-                        }
-                    });  
-                    // Record last valid timestamp.   
-                    *c.local.last_ts = Some(ts);
-                }
-                // No timestamp available — exit loop and return from interrupt.
-                Ok(None) => break,
-                // Overcapture condition: we received overflowed timestamps; log and record.
-                Err(Some(ts)) => {
-                    log::warn!("Overcapture detected, ts={}", ts);
-                    *c.local.last_ts = Some(ts);
-                }
-                // No timestamp and no error — exit.
-                Err(None) => break,
-            
-            }
-
-        }
-     
-    }
-
     // Apply configuration received from the network (Miniconf).
     //
     // Responsibilities:
@@ -808,7 +715,18 @@ mod app {
     #[task(priority = 1, local=[afes, current_sense_dac], shared=[network, settings, harmonic_generators])]
     fn settings_update(mut c: settings_update::Context) {
         // Read configuration from network miniconf and store in shared settings.
-        let settings = c.shared.network.lock(|net| *net.miniconf.settings());
+        let mut settings = c.shared.network.lock(|net| *net.miniconf.settings());
+
+        // Keep the PLL time constants within the range supported by `RPLL::update`:
+        // both shifts must exceed the batch period exponent and stay within 31 of it.
+        for tc in settings.pll_tc.iter_mut() {
+            let clamped = (*tc).clamp(PLL_DT2 + 1, PLL_DT2 + 31);
+            if clamped != *tc {
+                log::warn!("PLL time constant {} out of range, clamped to {}", *tc, clamped);
+                *tc = clamped;
+            }
+        }
+
         c.shared.settings.lock(|current| *current = settings);
         
         // Apply AFE gain settings.
