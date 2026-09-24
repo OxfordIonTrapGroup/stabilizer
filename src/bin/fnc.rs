@@ -8,7 +8,7 @@
 //! Pounder for maximising feedback bandwidth, but can be easily extended to
 //! expose both channels in the future if required and it proves sufficient
 //!
-//! Currently samples at 195.3 kHz, i.e. once in 5.12 us
+//! Currently samples at 100 kHz, i.e. once in 10 us
 //!
 //! ## Features
 //! * up to 200 kHz rate, timed sampling
@@ -75,9 +75,9 @@ const IIR_CASCADE_LENGTH: usize = 1;
 // This does not strictly need a DMA, but the right interrupt binding is needed otherwise
 const BATCH_SIZE: usize = 1;
 
-// The number of 100MHz timer ticks between each sample. Currently set to 5 us
-// corresponding to a 200 kHz sampling rate.
-const SAMPLE_TICKS: u32 = 500;
+// The number of 100 MHz timer ticks between each sample. A 10 us interval
+// provides sufficient processing headroom for phase control on both FNC channels.
+const SAMPLE_TICKS: u32 = 1_000;
 
 #[derive(Clone, Copy, Debug, Tree)]
 pub struct Settings {
@@ -216,6 +216,8 @@ mod app {
         iir_state: [[[f32; 4]; IIR_CASCADE_LENGTH]; 2],
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
+        output_phase_settings: [f32; 2],
+        output_phase_offsets: [u16; 2],
         phase_offsets: [u16; 2],
     }
 
@@ -274,6 +276,15 @@ mod app {
             iir_state: [[[0.; 4]; IIR_CASCADE_LENGTH]; 2],
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
+            output_phase_settings: application_settings
+                .pounder
+                .map(|settings| settings.phase_offset_dds_out),
+            output_phase_offsets: application_settings.pounder.map(
+                |settings| {
+                    ad9959::phase_to_pow(settings.phase_offset_dds_out)
+                        .unwrap_or(0)
+                },
+            ),
             phase_offsets: [0u16; 2],
         };
 
@@ -313,7 +324,7 @@ mod app {
     ///
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
-    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, iir_state, generator, phase_offsets], shared=[settings, telemetry, dds], priority=3)]
+    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, iir_state, generator, output_phase_settings, output_phase_offsets, phase_offsets], shared=[settings, telemetry, dds], priority=3)]
     #[link_section = ".itcm.process"]
     fn process(c: process::Context) {
         let process::SharedResources {
@@ -327,6 +338,8 @@ mod app {
             adcs: (adc0, adc1),
             iir_state,
             generator,
+            output_phase_settings,
+            output_phase_offsets,
             phase_offsets,
         } = c.local;
 
@@ -338,6 +351,11 @@ mod app {
             let hold = settings.force_hold
                 || (digital_inputs[1] && settings.allow_hold);
 
+            // Serialize both output phase updates into one QSPI transfer and
+            // trigger a single IO-update pulse after they have been queued.
+            // Constructing and writing a profile for each channel exceeds the
+            // 5 us ADC processing deadline at the 200 kHz sample rate.
+            let mut dds_profile = dds.builder();
             let mut phase_offset_codes = [[0u16; BATCH_SIZE]; 2];
 
             (adc0, adc1).lock(|adc0, adc1| {
@@ -351,6 +369,13 @@ mod app {
                     .zip(settings.pounder.iter())
                     .enumerate()
                 {
+                    let configured_phase = dds_channel.phase_offset_dds_out;
+                    if output_phase_settings[channel_idx] != configured_phase {
+                        output_phase_settings[channel_idx] = configured_phase;
+                        output_phase_offsets[channel_idx] =
+                            ad9959::phase_to_pow(configured_phase).unwrap_or(0);
+                    }
+
                     for (dma_idx, ai) in
                         adc_samples[channel_idx].iter().enumerate()
                     {
@@ -369,21 +394,22 @@ mod app {
                             + ad9959::phase_to_pow(iir_out).unwrap_or(0u16))
                             & 0x3FFFu16;
 
-                        let phase = (ad9959::phase_to_pow(
-                            dds_channel.phase_offset_dds_out,
-                        )
-                        .unwrap_or(0)
+                        let phase = (output_phase_offsets[channel_idx]
                             + *phase_offset)
                             & 0x3FFFu16;
-                        dds_channel
-                            .set_output_phase_offset(phase, dds)
-                            .unwrap_or_else(|_| {
-                                log::warn!("Failed to update Pounder phase")
-                            });
+                        let (_, dds_out) = dds_channel.channel.into();
+                        dds_profile.update_channels(
+                            dds_out.into(),
+                            None,
+                            Some(phase),
+                            None,
+                        );
 
                         phase_offset_codes[channel_idx][dma_idx] = phase;
                     }
                 }
+
+                dds_profile.write();
 
                 const N: usize = BATCH_SIZE * core::mem::size_of::<u16>();
 
