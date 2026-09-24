@@ -79,6 +79,11 @@ const BATCH_SIZE: usize = 1;
 // provides sufficient processing headroom for phase control on both FNC channels.
 const SAMPLE_TICKS: u32 = 1_000;
 
+// The phase-control loop runs at 100 kHz, but the UI only needs a decimated
+// view of the ADC and phase data. Keeping frame generation out of most process
+// cycles avoids an ADC DMA overrun while UDP streaming is active.
+const STREAM_DECIMATION: u8 = 10;
+
 #[derive(Clone, Copy, Debug, Tree)]
 pub struct Settings {
     /// Configure the Analog Front End (AFE) gain.
@@ -219,6 +224,7 @@ mod app {
         output_phase_settings: [f32; 2],
         output_phase_offsets: [u16; 2],
         phase_offsets: [u16; 2],
+        stream_sample_counter: u8,
     }
 
     #[init]
@@ -286,6 +292,7 @@ mod app {
                 },
             ),
             phase_offsets: [0u16; 2],
+            stream_sample_counter: 0,
         };
 
         // Enable ADC/DAC events
@@ -324,7 +331,7 @@ mod app {
     ///
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
-    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, iir_state, generator, output_phase_settings, output_phase_offsets, phase_offsets], shared=[settings, telemetry, dds], priority=3)]
+    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, iir_state, generator, output_phase_settings, output_phase_offsets, phase_offsets, stream_sample_counter], shared=[settings, telemetry, dds], priority=3)]
     #[link_section = ".itcm.process"]
     fn process(c: process::Context) {
         let process::SharedResources {
@@ -341,6 +348,7 @@ mod app {
             output_phase_settings,
             output_phase_offsets,
             phase_offsets,
+            stream_sample_counter,
         } = c.local;
 
         (settings, telemetry, dds).lock(|settings, telemetry, dds| {
@@ -413,34 +421,37 @@ mod app {
 
                 const N: usize = BATCH_SIZE * core::mem::size_of::<u16>();
 
-                generator.add(|buf| {
-                    for (data, buf) in
-                        adc_samples.iter().zip(buf.chunks_exact_mut(N))
-                    {
-                        let data = unsafe {
-                            core::slice::from_raw_parts(
-                                data.as_ptr() as *const MaybeUninit<u8>,
-                                N,
-                            )
-                        };
-                        buf.copy_from_slice(data)
-                    }
-                    for (data, buf) in phase_offset_codes
-                        .iter()
-                        .zip(buf.chunks_exact_mut(N).skip(adc_samples.len()))
-                    {
-                        let data = unsafe {
-                            core::slice::from_raw_parts(
-                                data.as_ptr() as *const MaybeUninit<u8>,
-                                N,
-                            )
-                        };
-                        buf.copy_from_slice(data)
-                    }
+                *stream_sample_counter += 1;
+                if *stream_sample_counter == STREAM_DECIMATION {
+                    *stream_sample_counter = 0;
+                    generator.add(|buf| {
+                        for (data, buf) in
+                            adc_samples.iter().zip(buf.chunks_exact_mut(N))
+                        {
+                            let data = unsafe {
+                                core::slice::from_raw_parts(
+                                    data.as_ptr() as *const MaybeUninit<u8>,
+                                    N,
+                                )
+                            };
+                            buf.copy_from_slice(data)
+                        }
+                        for (data, buf) in phase_offset_codes.iter().zip(
+                            buf.chunks_exact_mut(N).skip(adc_samples.len()),
+                        ) {
+                            let data = unsafe {
+                                core::slice::from_raw_parts(
+                                    data.as_ptr() as *const MaybeUninit<u8>,
+                                    N,
+                                )
+                            };
+                            buf.copy_from_slice(data)
+                        }
 
-                    // N bytes each for both adc_samples and phase_offsets over two channels
-                    N * 4
-                });
+                        // N bytes each for both adc_samples and phase_offsets over two channels
+                        N * 4
+                    });
+                }
 
                 // Update telemetry measurements.
                 telemetry.adcs =
