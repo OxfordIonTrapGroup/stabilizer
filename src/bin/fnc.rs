@@ -41,8 +41,6 @@ use mutex_trait::prelude::*;
 
 use idsp::iir;
 
-use ad9959::phase_to_pow;
-
 use stabilizer::{
     app_utils::fnc::{Channel, PounderFncSettings},
     hardware::{
@@ -340,7 +338,6 @@ mod app {
             let hold = settings.force_hold
                 || (digital_inputs[1] && settings.allow_hold);
 
-            let mut dds_profile = dds.builder();
             let mut phase_offset_codes = [[0u16; BATCH_SIZE]; 2];
 
             (adc0, adc1).lock(|adc0, adc1| {
@@ -351,7 +348,7 @@ mod app {
 
                 for (channel_idx, (phase_offset, dds_channel)) in phase_offsets
                     .iter_mut()
-                    .zip([pounder::Channel::Out0, pounder::Channel::Out1])
+                    .zip(settings.pounder.iter())
                     .enumerate()
                 {
                     for (dma_idx, ai) in
@@ -369,20 +366,22 @@ mod app {
                             });
 
                         *phase_offset = (*phase_offset
-                            + phase_to_pow(iir_out).unwrap_or(0u16))
+                            + ad9959::phase_to_pow(iir_out).unwrap_or(0u16))
                             & 0x3FFFu16;
 
-                        dds_profile
-                            .update_channels(
-                                dds_channel.into(),
-                                None,
-                                Some(*phase_offset),
-                                None,
-                            )
-                            .write();
+                        let phase = (ad9959::phase_to_pow(
+                            dds_channel.phase_offset_dds_out,
+                        )
+                        .unwrap_or(0)
+                            + *phase_offset)
+                            & 0x3FFFu16;
+                        dds_channel
+                            .set_output_phase_offset(phase, dds)
+                            .unwrap_or_else(|_| {
+                                log::warn!("Failed to update Pounder phase")
+                            });
 
-                        phase_offset_codes[channel_idx][dma_idx] =
-                            *phase_offset;
+                        phase_offset_codes[channel_idx][dma_idx] = phase;
                     }
                 }
 
@@ -466,10 +465,10 @@ mod app {
         // task so as to avoid a DMA overflow.
         for pounder_setting in incoming_settings.pounder.iter() {
             // DDS update.
-            let (ftw_in, acr_in, ftw_out, acr_out) =
+            let (ftw_in, pow_in, acr_in, ftw_out, pow_out, acr_out) =
                 pounder_setting.get_dds_words().unwrap_or_else(|err| {
                     log::warn!("Failed to update Pounder DDS: {:#?}", err);
-                    (0, 0, 0, 0)
+                    (0, 0, 0, 0, 0, 0)
                 });
             let (in_ch, out_ch) = pounder_setting.channel.into();
 
@@ -478,14 +477,14 @@ mod app {
                 dds_builder.update_channels(
                     in_ch.into(),
                     Some(ftw_in),
-                    None,
+                    Some(pow_in),
                     Some(acr_in),
                 );
                 dds_builder
                     .update_channels(
                         out_ch.into(),
                         Some(ftw_out),
-                        None,
+                        Some(pow_out),
                         Some(acr_out),
                     )
                     .write();

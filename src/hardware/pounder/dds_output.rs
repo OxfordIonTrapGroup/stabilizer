@@ -92,7 +92,7 @@ impl DdsOutput {
 
     /// Get a builder for serializing a Pounder DDS profile.
     #[allow(dead_code)]
-    pub fn builder(&mut self) -> ProfileBuilder {
+    pub fn builder(&mut self) -> ProfileBuilder<'_> {
         let mode = self.mode;
         ProfileBuilder {
             dds_output: self,
