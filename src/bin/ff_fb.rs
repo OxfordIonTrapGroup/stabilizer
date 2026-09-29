@@ -308,6 +308,17 @@ impl Default for Settings{
             
             // Frequency and phase settling time (log2 timestamp timer ticks):
             // 2^24 ticks ≈ 168 ms and 2^23 ticks ≈ 84 ms at 100 MHz.
+            //
+            // Rationale for default choice: grid frequency changes slowly, so trigger
+            // jitter dominates for faster loops. The current settings give the lowest
+            // phase noise for a few tens of µs jitter (as measured on 2025-05-16
+            // between a Tektronix scope, Sinara line_trigger and the legacy trigger
+            // box in lab one with presumably different filters, where the presumably
+            // different filters hopefully would mean that noise doesn't entirely
+            // common-mode out of the comparison). The largest-slew GB grid events seem
+            // to have been around 0.125 Hz/s, giving a tracking error of ~0.6°, which
+            // is still ~25 dB cancellation at the 5th harmonic. The initial lock on
+            // boot-up takes ~1 s.
             pll_tc: [24, 23],
         }
     }
