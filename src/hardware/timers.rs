@@ -172,9 +172,7 @@ macro_rules! timer_channels {
             }
 
             pub mod [< $TY:lower >] {
-                use stm32h7xx_hal as hal;
-                use hal::dma::{traits::TargetAddress, PeripheralToMemory, dma::DMAReq};
-                use hal::stm32::$TY;
+                use super::hal::{stm32::$TY, dma::{traits::TargetAddress, PeripheralToMemory, dma::DMAReq}};
 
                 pub struct UpdateEvent {}
 
@@ -219,12 +217,12 @@ macro_rules! timer_channels {
                     /// This is only safe to call once.
                     #[allow(dead_code)]
                     pub unsafe fn new() -> Self {
-                        Self {
+                        unsafe { Self {
                             ch1: Channel1::new(),
                             ch2: Channel2::new(),
                             ch3: Channel3::new(),
                             ch4: Channel4::new(),
-                        }
+                        } }
                     }
                 }
 

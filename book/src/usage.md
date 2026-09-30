@@ -1,48 +1,38 @@
+# Usage
 
-
-### Table of Contents
-
-<-- TOC -->
-
-
-# Miniconf Run-time Settings
-Stabilizer supports run-time settings configuration using MQTT.
+Stabilizer supports run-time settings configuration using MQTT or the USB port.
 
 Settings can be stored in the MQTT broker so that they are automatically applied whenever
 Stabilizer reboots and connects. This is referred to as "retained" settings. Broker implementations
 may optionally store these retained settings as well such that they will be reapplied between
 restarts of the MQTT broker.
 
+Stabilizer also supports storing run time settings on the device. Any configurations saved to
+stabilizer via the USB port will be automatically reapplied when Stabilizer reboots.
+MQTT settings retained on the broker or settings published after the device has connected to the broker override the settings saved on Stabilizer.
+
 Settings are specific to a device. Any settings configured for one Stabilizer will not be applied
-to another. Disambiguation of devices is done by using Stabilizer's MAC address.
+to another. Disambiguation of devices is done by using Stabilizer's MQTT identifier, which is
+defaulted to Stabilizer's MAC address.
 
 Settings are specific to an application. If two identical settings exist for two different
 applications, each application maintains its own independent value.
 
-## Installation
-Install the Miniconf configuration utilities using a virtual environment:
-```
-python -m venv --system-site-packages vpy
+## Miniconf installation
 
-# Refer to https://docs.python.org/3/tutorial/venv.html for more information on activating the
-# virtual environment. This command is different on different platforms.
-./vpy/Scripts/activate
-```
+Create a virtual python environment with `python -m venv --system-site-packages .venv` and activate it with `source .venv/bin/activate`.
+Refer to the [`venv` tutorial](https://docs.python.org/3/tutorial/venv.html) for more information on activating the
+virtual environment. The command depends on the operating system.
 
-Next, install prerequisite packages
-```
-python -m pip install -e py
-```
+Next, install prerequisite packages with `python -m pip install py/`.
 
-To use `miniconf`, execute it as follows:
-```
-python -m miniconf --help
-```
+To use the `miniconf` command line too see `python -m miniconf --help`.
 
 Miniconf also exposes a programmatic Python API, so it's possible to write automation scripting of
 Stabilizer as well.
 
-## Usage
+## Settings
+
 The Miniconf Python utility utilizes a unique "device prefix". The device prefix is always of the
 form `dt/sinara/<app>/<mac-address>`, where `<app>` is the name of the application and
 `<mac-address>` is the MAC address of the device, formatted with delimiting dashes, and lower case letters.
@@ -50,20 +40,14 @@ form `dt/sinara/<app>/<mac-address>`, where `<app>` is the name of the applicati
 Settings have a `path` and a `value` being configured. The `value` parameter is JSON-encoded data
 and the `path` value is a path-like string.
 
-As an example, for configuring `dual-iir`'s `stream_target`, the following information would be
-used:
-* `path` = `stream_target`
-* `value` = `{"ip": [192, 168, 0, 1], "port": 4000}`
-
-```
-python -m miniconf --broker 10.34.16.1 dt/sinara/dual-iir/00-11-22-33-44-55 stream_target='{"ip": [10, 34, 16, 123], "port": 4000}'
-
-Where `10.34.16.1` is the MQTT broker address that matches the one configured in the source code and `10.34.16.123` and `4000` are the desire stream target IP and port.
+```bash
+python -m miniconf -b mqtt -d dt/sinara/dual-iir/+ stream='"10.34.16.123:4000"'
 ```
 
-The prefix can be found for a specific device by looking at the topic on which telemetry that is
-being published. It can also be automatically discovered if there is only one
-device alive.
+Where `mqtt` is the MQTT broker (host name or address) that matches the one used by the application
+(set using the USB terminal) and `10.34.16.123` and `4000` are the desired stream target IP and port.
+
+The prefix can be discovered as above or determined for a specific device through the USB serial terminal.
 
 Refer to the [application documentation](overview.md#applications) for the exact settings and values exposed
 for each application.
@@ -71,21 +55,11 @@ for each application.
 The rules for constructing `path` values are documented in [`miniconf`'s
 documentation](https://github.com/quartiq/miniconf#settings-paths)
 
-Refer to the documentation for [Miniconf](firmware/miniconf/enum.Error.html) for a
+Refer to the documentation for [Miniconf](firmware/miniconf/enum.SerdeError.html) for a
 description of the possible error codes that Miniconf may return if the settings update was
 unsuccessful.
 
-# IIR Configuration
-For the `dual-iir` application, a Python utility has been written to easily configure the IIR
-filters for a variety of filtering and control applications.
-
-Then, use the built-in help to learn how the utility can automatically configure your IIR filters
-for you:
-```bash
-python -m stabilizer.iir_coefficients --help
-```
-
-# Telemetry
+## Telemetry
 
 Stabilizer applications publish telemetry utilizes MQTT for managing run-time settings configurations as well as live telemetry
 reporting.
@@ -106,13 +80,16 @@ digital input states.
 
 Refer to the respective [application documentation](overview.md#applications) for more information on telemetry.
 
-# Livestream
+## Stream
 
-Stabilizer supports livestream capabilities for streaming real-time data over UDP. The livestream is
+Stabilizer supports streaming real-time data over UDP. The stream is
 intended to be a high-bandwidth mechanism to transfer large amounts of data from Stabilizer to a
 host computer for further analysis.
 
-Livestreamed data is sent with "best effort" - it's possible that data may be lost either due to
-network congestion or by Stabilizer.
+Streamed data is sent with "best effort" - it's possible that data may be lost due to
+network congestion.
 
 Refer to the the respective [application documentation](overview.md#applications) for more information.
+
+[`stabilizer-stream`](https://github.com/quartiq/stabilizer-stream) is an application that supports process
+the stream and measures power spectral density/integrated RMS in real time.

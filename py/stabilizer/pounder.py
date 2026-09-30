@@ -36,7 +36,7 @@ FREQUENCY_PER_FTW_LSB_PER_REFCLK_MHZ = 1 / (1 << 32)
 
 def phase_to_pow(phase_turns):
     """Phase in turns to phase offset word"""
-    return int((phase_turns / PHASE_TURNS_PER_POW_LSB) & 0x3FFF)
+    return int(phase_turns / PHASE_TURNS_PER_POW_LSB) & 0x3FFF
 
 def pow_to_phase(pow):
     return pow * PHASE_TURNS_PER_POW_LSB

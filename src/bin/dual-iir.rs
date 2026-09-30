@@ -16,50 +16,28 @@
 //! * Derivative kick avoidance
 //!
 //! ## Settings
-//! Refer to the [Settings] structure for documentation of run-time configurable settings for this
+//! Refer to the [DualIir] structure for documentation of run-time configurable settings for this
 //! application.
 //!
 //! ## Telemetry
-//! Refer to [Telemetry] for information about telemetry reported by this application.
+//! Refer to [stabilizer::telemetry::Telemetry] for information about telemetry reported by this application.
 //!
-//! ## Livestreaming
+//! ## Stream
 //! This application streams raw ADC and DAC data over UDP. Refer to
-//! [stabilizer::net::data_stream](../stabilizer/net/data_stream/index.html) for more information.
-#![deny(warnings)]
-#![no_std]
-#![no_main]
+//! [stream] for more information.
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
 
-use core::mem::MaybeUninit;
-use core::sync::atomic::{fence, Ordering};
+use miniconf::Tree;
 
-use fugit::ExtU64;
-use mutex_trait::prelude::*;
+use dsp_process::SplitProcess;
+use idsp::iir::{self, pid::Units};
 
-use idsp::iir;
-
-use stabilizer::{
-    hardware::{
-        self,
-        adc::{Adc0Input, Adc1Input, AdcCode},
-        afe::Gain,
-        dac::{Dac0Output, Dac1Output, DacCode},
-        hal,
-        pounder::{ClockConfig, PounderConfig},
-        setup::PounderDevices as Pounder,
-        signal_generator::{self, SignalGenerator},
-        timers::SamplingTimer,
-        DigitalInput0, DigitalInput1, SerialTerminal, SystemTimer, Systick,
-        UsbDevice, AFE0, AFE1,
-    },
-    net::{
-        data_stream::{FrameGenerator, StreamFormat, StreamTarget},
-        miniconf::Tree,
-        telemetry::{Telemetry, TelemetryBuffer},
-        NetworkState, NetworkUsers,
-    },
-};
-
-const SCALE: f32 = i16::MAX as _;
+use platform::{AppSettings, NetSettings};
+use serde::{Deserialize, Serialize};
+use signal_generator::{self, Source};
+use stabilizer::convert::{AdcCode, DacCode, Gain};
+use stabilizer::pounder_config::PounderConfig;
 
 // The number of cascaded IIR biquads per channel. Select 1 or 2!
 const IIR_CASCADE_LENGTH: usize = 1;
@@ -72,224 +50,285 @@ const BATCH_SIZE: usize = 8;
 const SAMPLE_TICKS_LOG2: u8 = 7;
 const SAMPLE_TICKS: u32 = 1 << SAMPLE_TICKS_LOG2;
 const SAMPLE_PERIOD: f32 =
-    SAMPLE_TICKS as f32 * hardware::design_parameters::TIMER_PERIOD;
+    SAMPLE_TICKS as f32 * stabilizer::design_parameters::TIMER_PERIOD;
 
-#[derive(Clone, Copy, Debug, Tree)]
+const UNITS: Units<f32> = Units {
+    t: SAMPLE_PERIOD,
+    x: AdcCode::VOLT_PER_LSB,
+    y: DacCode::VOLT_PER_LSB,
+};
+
+#[derive(Clone, Debug, Tree, Default)]
+#[tree(meta(doc, typename))]
 pub struct Settings {
-    /// Configure the Analog Front End (AFE) gain.
-    ///
-    /// # Path
-    /// `afe/<n>`
-    ///
-    /// * `<n>` specifies which channel to configure. `<n>` := [0, 1]
-    ///
-    /// # Value
-    /// Any of the variants of [Gain] enclosed in double quotes.
-    #[tree]
-    afe: [Gain; 2],
-
-    /// Configure the IIR filter parameters.
-    ///
-    /// # Path
-    /// `iir_ch/<n>/<m>`
-    ///
-    /// * `<n>` specifies which channel to configure. `<n>` := [0, 1]
-    /// * `<m>` specifies which cascade to configure. `<m>` := [0, 1], depending on [IIR_CASCADE_LENGTH]
-    ///
-    /// See [iir::Biquad]
-    #[tree(depth(2))]
-    iir_ch: [[iir::Biquad<f32>; IIR_CASCADE_LENGTH]; 2],
-
-    /// Specified true if DI1 should be used as a "hold" input.
-    ///
-    /// # Path
-    /// `allow_hold`
-    ///
-    /// # Value
-    /// "true" or "false"
-    allow_hold: bool,
-
-    /// Specified true if "hold" should be forced regardless of DI1 state and hold allowance.
-    ///
-    /// # Path
-    /// `force_hold`
-    ///
-    /// # Value
-    /// "true" or "false"
-    force_hold: bool,
-
-    /// Specifies the telemetry output period in seconds.
-    ///
-    /// # Path
-    /// `telemetry_period`
-    ///
-    /// # Value
-    /// Any non-zero value less than 65536.
-    telemetry_period: u16,
-
-    /// Specifies the target for data livestreaming.
-    ///
-    /// # Path
-    /// `stream_target`
-    ///
-    /// # Value
-    /// See [StreamTarget#miniconf]
-    stream_target: StreamTarget,
-
-    /// Specifies the config for signal generators to add on to DAC0/DAC1 outputs.
-    ///
-    /// # Path
-    /// `signal_generator/<n>`
-    ///
-    /// * `<n>` specifies which channel to configure. `<n>` := [0, 1]
-    ///
-    /// # Value
-    /// See [signal_generator::BasicConfig#miniconf]
-    #[tree(depth(2))]
-    signal_generator: [signal_generator::BasicConfig; 2],
-
-    /// Specifies the config for pounder DDS clock configuration, DDS channels & attenuations
-    ///
-    /// # Path
-    /// `pounder`
-    ///
-    /// # Value
-    /// See [PounderConfig#miniconf]
-    /// TODO: this was #[miniconf(defer)] -- is this right? Also, miniconf::Option vs Option?
-    #[tree]
-    pounder: Option<PounderConfig>,
+    dual_iir: DualIir,
+    net: NetSettings,
 }
 
-impl Default for Settings {
-    fn default() -> Self {
-        let mut i = iir::Biquad::IDENTITY;
-        i.set_min(-SCALE);
-        i.set_max(SCALE);
+impl AppSettings for Settings {
+    fn new(net: NetSettings) -> Self {
         Self {
-            // Analog frontend programmable gain amplifier gains (G1, G2, G5, G10)
-            afe: [Gain::G1, Gain::G1],
-            // IIR filter tap gains are an array `[b0, b1, b2, a1, a2]` such that the
-            // new output is computed as `y0 = a1*y1 + a2*y2 + b0*x0 + b1*x1 + b2*x2`.
-            // The array is `iir_state[channel-index][cascade-index][coeff-index]`.
-            // The IIR coefficients can be mapped to other transfer function
-            // representations, for example as described in https://arxiv.org/abs/1508.06319
-            iir_ch: [[i; IIR_CASCADE_LENGTH]; 2],
+            net,
+            dual_iir: DualIir::default(),
+        }
+    }
 
-            // Permit the DI1 digital input to suppress filter output updates.
-            allow_hold: false,
-            // Force suppress filter output updates.
-            force_hold: false,
-            // The default telemetry period in seconds.
-            telemetry_period: 10,
+    fn net(&self) -> &NetSettings {
+        &self.net
+    }
+}
 
-            signal_generator: [signal_generator::BasicConfig::default(); 2],
-
-            stream_target: StreamTarget::default(),
-
-            pounder: None.into(),
+impl serial_settings::Settings for Settings {
+    fn reset(&mut self) {
+        *self = Self {
+            dual_iir: DualIir::default(),
+            net: NetSettings::new(self.net.mac),
         }
     }
 }
 
-#[rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, LTDC, SDMMC])]
+#[derive(Clone, Debug, Tree)]
+#[tree(meta(doc, typename = "BiquadReprTree"))]
+pub struct BiquadRepr {
+    /// Biquad parameters
+    #[tree(rename="typ", typ="&str", with=miniconf::str_leaf, defer=self.repr)]
+    _typ: (),
+    repr: iir::repr::BiquadRepr<f32, f32>,
+}
+
+impl Default for BiquadRepr {
+    fn default() -> Self {
+        let mut i = iir::BiquadClamp::from(iir::Biquad::IDENTITY);
+        i.min = -i16::MAX as _;
+        i.max = i16::MAX as _;
+        Self {
+            _typ: (),
+            repr: iir::repr::BiquadRepr::Raw(i),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, Default)]
+pub enum Run {
+    #[default]
+    /// Run
+    Run,
+    /// Hold
+    Hold,
+    /// Hold controlled by corresponding digital input
+    External,
+}
+
+impl Run {
+    fn run(&self, di: bool) -> bool {
+        match self {
+            Self::Run => true,
+            Self::Hold => false,
+            Self::External => di,
+        }
+    }
+}
+
+/// A ADC-DAC channel
+#[derive(Clone, Debug, Tree, Default)]
+#[tree(meta(doc, typename))]
+pub struct Channel {
+    /// Analog Front End (AFE) gain.
+    #[tree(with=miniconf::leaf)]
+    gain: Gain,
+    /// Biquad
+    biquad: [BiquadRepr; IIR_CASCADE_LENGTH],
+    /// Run/Hold behavior
+    #[tree(with=miniconf::leaf)]
+    run: Run,
+    /// Signal generator configuration to add to the DAC0/DAC1 outputs
+    source: signal_generator::Config,
+}
+
+impl Channel {
+    fn build(&self) -> Result<Active, signal_generator::Error> {
+        Ok(Active {
+            source: self
+                .source
+                .build(SAMPLE_PERIOD, DacCode::FULL_SCALE.recip())
+                .unwrap(),
+            state: Default::default(),
+            run: self.run,
+            biquad: self
+                .biquad
+                .each_ref()
+                .map(|biquad| biquad.repr.build(&UNITS)),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Tree)]
+#[tree(meta(doc, typename))]
+pub struct DualIir {
+    /// Channel configuration
+    ch: [Channel; 2],
+    /// Trigger both signal sources
+    #[tree(with=miniconf::leaf)]
+    trigger: bool,
+    /// Telemetry output period in seconds.
+    #[tree(with=miniconf::leaf)]
+    telemetry_period: f32,
+    /// Target IP and port for UDP streaming.
+    ///
+    /// Can be multicast.
+    #[tree(with=miniconf::leaf)]
+    stream: stream::Target,
+    /// Pounder DDS clock, DDS channel, and attenuator configuration.
+    ///
+    /// Only present if a Pounder is detected.
+    pounder: Option<PounderConfig>,
+}
+
+impl Default for DualIir {
+    fn default() -> Self {
+        Self {
+            telemetry_period: 10.0,
+            trigger: false,
+            stream: Default::default(),
+            ch: Default::default(),
+            pounder: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Active {
+    run: Run,
+    biquad: [iir::BiquadClamp<f32, f32>; IIR_CASCADE_LENGTH],
+    state: [iir::DirectForm1<f32>; IIR_CASCADE_LENGTH],
+    source: Source,
+}
+
+#[cfg(not(target_os = "none"))]
+fn main() {
+    use miniconf::{json::to_json_value, json_schema::TreeJsonSchema};
+    let s = Settings::default();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&to_json_value(&s).unwrap()).unwrap()
+    );
+    let mut schema = TreeJsonSchema::new(Some(&s)).unwrap();
+    schema
+        .root
+        .insert("title".to_string(), "Stabilizer dual-iir".into());
+    println!("{}", serde_json::to_string_pretty(&schema.root).unwrap());
+}
+
+#[cfg(target_os = "none")]
+#[cfg_attr(target_os = "none", rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, LTDC, SDMMC]))]
 mod app {
     use super::*;
+    use core::sync::atomic::{Ordering, fence};
+    use fugit::ExtU32 as _;
+    use rtic_monotonics::Monotonic;
 
-    #[monotonic(binds = SysTick, default = true, priority = 2)]
-    type Monotonic = Systick;
+    use stabilizer::{
+        hardware::{
+            self, DigitalInput0, DigitalInput1, Pgia, SerialTerminal,
+            SystemTimer, Systick, UsbDevice,
+            adc::{Adc0Input, Adc1Input},
+            dac::{Dac0Output, Dac1Output},
+            hal,
+            net::{NetworkState, NetworkUsers},
+            setup::{Mezzanine, Pounder},
+            timers::SamplingTimer,
+        },
+        pounder_config::ClockConfig,
+        telemetry::TelemetryBuffer,
+    };
+    use stream::FrameGenerator;
 
     #[shared]
     struct Shared {
         usb: UsbDevice,
-        network: NetworkUsers<Settings, Telemetry, 3>,
-
+        network: NetworkUsers<DualIir>,
         settings: Settings,
+        active: [Active; 2],
         telemetry: TelemetryBuffer,
-        signal_generator: [SignalGenerator; 2],
         pounder: Option<Pounder>,
     }
 
     #[local]
     struct Local {
-        usb_terminal: SerialTerminal,
+        usb_terminal: SerialTerminal<Settings>,
         sampling_timer: SamplingTimer,
         digital_inputs: (DigitalInput0, DigitalInput1),
-        afes: (AFE0, AFE1),
+        afes: [Pgia; 2],
         adcs: (Adc0Input, Adc1Input),
         dacs: (Dac0Output, Dac1Output),
-        iir_state: [[[f32; 4]; IIR_CASCADE_LENGTH]; 2],
-        dds_clock_state: Option<ClockConfig>,
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
+        dds_clock: Option<ClockConfig>,
     }
 
     #[init]
-    fn init(c: init::Context) -> (Shared, Local, init::Monotonics) {
-        let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
+    fn init(c: init::Context) -> (Shared, Local) {
+        let clock = SystemTimer::new(|| Systick::now().ticks());
 
         // Configure the microcontroller
-        let (stabilizer, pounder) = hardware::setup::setup(
-            c.core,
-            c.device,
-            clock,
-            BATCH_SIZE,
-            SAMPLE_TICKS,
-        );
+        let (mut stabilizer, mezzanine, _eem) =
+            hardware::setup::setup::<Settings>(
+                c.core,
+                c.device,
+                clock,
+                BATCH_SIZE,
+                SAMPLE_TICKS,
+            );
 
-        let device_settings = stabilizer.usb_serial.settings();
-        let mut application_settings = Settings::default();
+        let pounder = match mezzanine {
+            Mezzanine::Pounder(pounder) => Some(pounder),
+            Mezzanine::None => None,
+        };
         if pounder.is_some() {
-            application_settings
+            stabilizer
+                .settings
+                .dual_iir
                 .pounder
-                .replace(PounderConfig::default());
+                .get_or_insert_with(Default::default);
         }
-
-        let dds_clock_state = pounder.as_ref().map(|_| ClockConfig::default());
+        // The DDS clock is initially configured to the default by `setup()`.
+        let dds_clock = pounder.as_ref().map(|_| ClockConfig::default());
 
         let mut network = NetworkUsers::new(
-            stabilizer.net.stack,
-            stabilizer.net.phy,
+            stabilizer.network_devices.stack,
+            stabilizer.network_devices.phy,
             clock,
             env!("CARGO_BIN_NAME"),
-            &device_settings.broker,
-            &device_settings.id,
+            &stabilizer.settings.net,
             stabilizer.metadata,
-            application_settings,
         );
 
-        let generator = network.configure_streaming(StreamFormat::AdcDacData);
+        let generator = network.configure_streaming(stream::Format::AdcDacData);
 
         let shared = Shared {
             usb: stabilizer.usb,
             network,
-            settings: application_settings,
+            active: stabilizer
+                .settings
+                .dual_iir
+                .ch
+                .each_ref()
+                .map(|a| a.build().unwrap()),
             telemetry: TelemetryBuffer::default(),
-            signal_generator: [
-                SignalGenerator::new(
-                    application_settings.signal_generator[0]
-                        .try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
-                        .unwrap(),
-                ),
-                SignalGenerator::new(
-                    application_settings.signal_generator[1]
-                        .try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE)
-                        .unwrap(),
-                ),
-            ],
+            settings: stabilizer.settings,
             pounder,
         };
 
         let mut local = Local {
             usb_terminal: stabilizer.usb_serial,
-            sampling_timer: stabilizer.adc_dac_timer,
+            sampling_timer: stabilizer.sampling_timer,
             digital_inputs: stabilizer.digital_inputs,
             afes: stabilizer.afes,
             adcs: stabilizer.adcs,
             dacs: stabilizer.dacs,
-            iir_state: [[[0.; 4]; IIR_CASCADE_LENGTH]; 2],
-            dds_clock_state,
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
+            dds_clock,
         };
 
         // Enable ADC/DAC events
@@ -303,13 +342,14 @@ mod app {
         telemetry::spawn().unwrap();
         ethernet_link::spawn().unwrap();
         usb::spawn().unwrap();
-        start::spawn_after(100.millis()).unwrap();
+        start::spawn().unwrap();
 
-        (shared, local, init::Monotonics(stabilizer.systick))
+        (shared, local)
     }
 
     #[task(priority = 1, local=[sampling_timer])]
-    fn start(c: start::Context) {
+    async fn start(c: start::Context) {
+        Systick::delay(100.millis()).await;
         // Start sampling ADCs and DACs.
         c.local.sampling_timer.start();
     }
@@ -330,113 +370,99 @@ mod app {
     ///
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
-    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, dacs, iir_state, generator], shared=[settings, signal_generator, telemetry], priority=3)]
-    #[link_section = ".itcm.process"]
+    #[task(
+        binds=DMA1_STR4,
+        local=[digital_inputs, adcs, dacs, generator, source: [[i16; BATCH_SIZE]; 2] = [[0; BATCH_SIZE]; 2]],
+        shared=[active, telemetry],
+        priority=3)]
+    #[unsafe(link_section = ".itcm.process")]
     fn process(c: process::Context) {
         let process::SharedResources {
-            settings,
-            telemetry,
-            signal_generator,
+            active, telemetry, ..
         } = c.shared;
 
         let process::LocalResources {
             digital_inputs,
             adcs: (adc0, adc1),
             dacs: (dac0, dac1),
-            iir_state,
             generator,
+            source,
+            ..
         } = c.local;
 
-        (settings, telemetry, signal_generator).lock(
-            |settings, telemetry, signal_generator| {
-                let digital_inputs =
-                    [digital_inputs.0.is_high(), digital_inputs.1.is_high()];
-                telemetry.digital_inputs = digital_inputs;
+        (active, telemetry).lock(|active, telemetry| {
+            (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
+                // Preserve instruction and data ordering w.r.t. DMA flag access before and after.
+                fence(Ordering::SeqCst);
+                let adc: [&[u16; BATCH_SIZE]; 2] = [
+                    (**adc0).try_into().unwrap(),
+                    (**adc1).try_into().unwrap(),
+                ];
+                let mut dac: [&mut [u16; BATCH_SIZE]; 2] =
+                    [(*dac0).try_into().unwrap(), (*dac1).try_into().unwrap()];
 
-                let hold = settings.force_hold
-                    || (digital_inputs[1] && settings.allow_hold);
-
-                (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
-                    let adc_samples = [adc0, adc1];
-                    let dac_samples = [dac0, dac1];
-
-                    // Preserve instruction and data ordering w.r.t. DMA flag access.
-                    fence(Ordering::SeqCst);
-
-                    for channel in 0..adc_samples.len() {
-                        adc_samples[channel]
+                for ((((adc, dac), active), di), source) in adc
+                    .into_iter()
+                    .zip(dac.iter_mut())
+                    .zip(active.iter_mut())
+                    .zip(telemetry.digital_inputs)
+                    .zip(source.iter())
+                {
+                    for ((adc, dac), source) in
+                        adc.iter().zip(dac.iter_mut()).zip(source)
+                    {
+                        let x = f32::from(*adc as i16);
+                        let y = active
+                            .biquad
                             .iter()
-                            .zip(dac_samples[channel].iter_mut())
-                            .zip(&mut signal_generator[channel])
-                            .map(|((ai, di), signal)| {
-                                let x = f32::from(*ai as i16);
-                                let y = settings.iir_ch[channel]
-                                    .iter()
-                                    .zip(iir_state[channel].iter_mut())
-                                    .fold(x, |yi, (ch, state)| {
-                                        let filter = if hold {
-                                            &iir::Biquad::HOLD
-                                        } else {
-                                            ch
-                                        };
+                            .zip(active.state.iter_mut())
+                            .fold(x, |y, (ch, state)| {
+                                if active.run.run(di) {
+                                    ch.process(state, y)
+                                } else {
+                                    iir::Biquad::<f32>::HOLD.process(state, y)
+                                }
+                            });
 
-                                        filter.update(state, yi)
-                                    });
-
-                                // Note(unsafe): The filter limits must ensure that the value is in range.
-                                // The truncation introduces 1/2 LSB distortion.
-                                let y: i16 = unsafe { y.to_int_unchecked() };
-
-                                let y = y.saturating_add(signal);
-
-                                // Convert to DAC code
-                                *di = DacCode::from(y).0;
-                            })
-                            .last();
+                        // Note(unsafe): The filter limits must ensure that the value is in range.
+                        // The truncation introduces 1/2 LSB distortion.
+                        let y: i16 = unsafe { y.to_int_unchecked() };
+                        *dac = DacCode::from(y.saturating_add(*source)).0;
                     }
+                }
+                telemetry.adcs = [AdcCode(adc[0][0]), AdcCode(adc[1][0])];
+                telemetry.dacs = [DacCode(dac[0][0]), DacCode(dac[1][0])];
 
-                    // Stream the data.
-                    const N: usize = BATCH_SIZE * core::mem::size_of::<i16>();
-                    generator.add(|buf| {
-                        for (data, buf) in adc_samples
-                            .iter()
-                            .chain(dac_samples.iter())
-                            .zip(buf.chunks_exact_mut(N))
-                        {
-                            let data = unsafe {
-                                core::slice::from_raw_parts(
-                                    data.as_ptr() as *const MaybeUninit<u8>,
-                                    N,
-                                )
-                            };
-                            buf.copy_from_slice(data)
-                        }
-                        N * 4
-                    });
-                    // Update telemetry measurements.
-                    telemetry.adcs = [
-                        AdcCode(adc_samples[0][0]),
-                        AdcCode(adc_samples[1][0]),
-                    ];
-
-                    telemetry.dacs = [
-                        DacCode(dac_samples[0][0]),
-                        DacCode(dac_samples[1][0]),
-                    ];
-
-                    // Preserve instruction and data ordering w.r.t. DMA flag access.
-                    fence(Ordering::SeqCst);
+                const N: usize = BATCH_SIZE * size_of::<i16>();
+                generator.add(|buf| {
+                    [adc[0], adc[1], dac[0], dac[1]]
+                        .into_iter()
+                        .zip(buf.chunks_exact_mut(N))
+                        .map(|(data, buf)| {
+                            buf.copy_from_slice(bytemuck::cast_slice(data))
+                        })
+                        .count()
+                        * N
                 });
-            },
-        );
+
+                fence(Ordering::SeqCst);
+            });
+            *source = active.each_mut().map(|ch| {
+                core::array::from_fn(|_| (ch.source.next().unwrap() >> 16) as _)
+            });
+            telemetry.digital_inputs =
+                [digital_inputs.0.is_high(), digital_inputs.1.is_high()];
+        });
     }
 
-    #[idle(shared=[network, usb])]
+    #[idle(shared=[network, settings, usb])]
     fn idle(mut c: idle::Context) -> ! {
         loop {
-            match c.shared.network.lock(|net| net.update()) {
-                NetworkState::SettingsChanged(_path) => {
-                    settings_update::spawn().unwrap()
+            match (&mut c.shared.network, &mut c.shared.settings)
+                .lock(|net, settings| net.update(&mut settings.dual_iir))
+            {
+                NetworkState::SettingsChanged => {
+                    settings_update::spawn().unwrap();
                 }
                 NetworkState::Updated => {}
                 NetworkState::NoChange => {
@@ -452,91 +478,111 @@ mod app {
         }
     }
 
-    #[task(priority = 1, local=[afes, dds_clock_state], shared=[network, settings, signal_generator, pounder])]
-    fn settings_update(mut c: settings_update::Context) {
-        let settings = c.shared.network.lock(|net| *net.miniconf.settings());
-        c.shared.settings.lock(|current| *current = settings);
+    #[task(priority = 1, local=[afes, dds_clock], shared=[network, settings, active, pounder])]
+    async fn settings_update(mut c: settings_update::Context) {
+        c.shared.settings.lock(|settings| {
+            c.local.afes[0].set_gain(settings.dual_iir.ch[0].gain);
+            c.local.afes[1].set_gain(settings.dual_iir.ch[1].gain);
 
-        c.local.afes.0.set_gain(settings.afe[0]);
-        c.local.afes.1.set_gain(settings.afe[1]);
-
-        // Update the signal generators
-        for (i, &config) in settings.signal_generator.iter().enumerate() {
-            match config.try_into_config(SAMPLE_PERIOD, DacCode::FULL_SCALE) {
-                Ok(config) => {
-                    c.shared
-                        .signal_generator
-                        .lock(|generator| generator[i].update_waveform(config));
+            if settings.dual_iir.trigger {
+                settings.dual_iir.trigger = false;
+                let s = settings.dual_iir.ch.each_ref().map(|ch| {
+                    let s = ch
+                        .source
+                        .build(SAMPLE_PERIOD, DacCode::FULL_SCALE.recip());
+                    if let Err(err) = &s {
+                        log::error!("Failed to update source: {:?}", err);
+                    }
+                    s
+                });
+                c.shared.active.lock(|ch| {
+                    for (ch, s) in ch.iter_mut().zip(s) {
+                        if let Ok(s) = s {
+                            ch.source = s;
+                        }
+                    }
+                });
+            }
+            let b = settings.dual_iir.ch.each_ref().map(|ch| {
+                (ch.run, ch.biquad.each_ref().map(|b| b.repr.build(&UNITS)))
+            });
+            c.shared.active.lock(|active| {
+                for (a, b) in active.iter_mut().zip(b) {
+                    (a.run, a.biquad) = b;
                 }
-                Err(err) => log::error!(
-                    "Failed to update signal generation on DAC{}: {:?}",
-                    i,
-                    err
-                ),
-            }
-        }
-
-        // Update Pounder configurations
-        c.shared.pounder.lock(|pounder| {
-            if let Some(pounder) = pounder {
-                let pounder_settings = settings.pounder.as_ref().unwrap();
-                // let mut clocking = c.local.dds_clock_state;
-                pounder.update_dds(
-                    *pounder_settings,
-                    &mut c.local.dds_clock_state,
-                );
-            }
+            });
+            c.shared.pounder.lock(|pounder| {
+                if let (Some(pounder), Some(config)) =
+                    (pounder, &settings.dual_iir.pounder)
+                {
+                    pounder.update_dds(config, c.local.dds_clock);
+                }
+            });
+            c.shared
+                .network
+                .lock(|net| net.direct_stream(settings.dual_iir.stream));
         });
-
-        let target = settings.stream_target.into();
-        c.shared.network.lock(|net| net.direct_stream(target));
     }
 
     #[task(priority = 1, shared=[network, settings, telemetry, pounder], local=[cpu_temp_sensor])]
-    fn telemetry(mut c: telemetry::Context) {
-        let telemetry: TelemetryBuffer =
-            c.shared.telemetry.lock(|telemetry| *telemetry);
+    async fn telemetry(mut c: telemetry::Context) -> ! {
+        loop {
+            let telemetry =
+                c.shared.telemetry.lock(|telemetry| telemetry.clone());
 
-        let (gains, telemetry_period, pounder_telemetry) =
-            (c.shared.settings, c.shared.pounder).lock(|settings, pounder| {
-                (
-                    settings.afe,
-                    settings.telemetry_period,
-                    pounder.as_mut().map(|pdr| pdr.get_telemetry()),
-                )
-            });
+            let (gains, telemetry_period) =
+                c.shared.settings.lock(|settings| {
+                    (
+                        settings.dual_iir.ch.each_ref().map(|ch| ch.gain),
+                        settings.dual_iir.telemetry_period,
+                    )
+                });
 
-        c.shared.network.lock(|net| {
-            net.telemetry.publish(&telemetry.finalize(
+            let mut telemetry = telemetry.finalize(
                 gains[0],
                 gains[1],
                 c.local.cpu_temp_sensor.get_temperature().unwrap(),
-                pounder_telemetry,
-            ))
-        });
+            );
+            telemetry.pounder = c.shared.pounder.lock(|pounder| {
+                pounder.as_mut().map(|p| p.pounder.get_telemetry())
+            });
 
-        // Schedule the telemetry task in the future.
-        telemetry::Monotonic::spawn_after((telemetry_period as u64).secs())
-            .unwrap();
+            c.shared.network.lock(|net| {
+                net.telemetry.publish_telemetry("/telemetry", &telemetry)
+            });
+
+            Systick::delay(((telemetry_period * 1000.0) as u32).millis()).await;
+        }
     }
 
-    #[task(priority = 1, shared=[usb], local=[usb_terminal])]
-    fn usb(mut c: usb::Context) {
-        // Handle the USB serial terminal.
-        c.shared.usb.lock(|usb| {
-            usb.poll(&mut [c.local.usb_terminal.interface_mut().inner_mut()]);
-        });
+    #[task(priority = 1, shared=[usb, settings], local=[usb_terminal])]
+    async fn usb(mut c: usb::Context) -> ! {
+        loop {
+            // Handle the USB serial terminal.
+            c.shared.usb.lock(|usb| {
+                usb.poll(&mut [c
+                    .local
+                    .usb_terminal
+                    .interface_mut()
+                    .inner_mut()]);
+            });
 
-        c.local.usb_terminal.process().unwrap();
+            c.shared.settings.lock(|settings| {
+                if c.local.usb_terminal.poll(settings).unwrap() {
+                    settings_update::spawn().unwrap()
+                }
+            });
 
-        // Schedule to run this task every 10 milliseconds.
-        usb::spawn_after(10u64.millis()).unwrap();
+            Systick::delay(10.millis()).await;
+        }
     }
 
     #[task(priority = 1, shared=[network])]
-    fn ethernet_link(mut c: ethernet_link::Context) {
-        c.shared.network.lock(|net| net.processor.handle_link());
-        ethernet_link::Monotonic::spawn_after(1.secs()).unwrap();
+    async fn ethernet_link(mut c: ethernet_link::Context) -> ! {
+        loop {
+            c.shared.network.lock(|net| net.processor.handle_link());
+            Systick::delay(1.secs()).await;
+        }
     }
 
     #[task(binds = ETH, priority = 1)]

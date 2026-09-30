@@ -65,106 +65,43 @@
 //! In this implementation, double buffer mode DMA transfers are used because the SPI RX FIFOs
 //! have finite depth, FIFO access is slower than AXISRAM access, and because the single
 //! buffer mode DMA disable/enable and buffer update sequence is slow.
-#![allow(static_mut_refs)]
-use stm32h7xx_hal as hal;
+use rtic::Mutex;
 
-use mutex_trait::Mutex;
+use grounded::uninit::{GroundedArrayCell, GroundedCell};
 
-use super::design_parameters::{SampleBuffer, MAX_SAMPLE_BUFFER_SIZE};
 use super::timers;
+use crate::design_parameters::SampleBuffer;
 
-use hal::{
+use super::hal::{
+    self,
     dma::{
+        DMAError, MemoryToPeripheral, PeripheralToMemory, Transfer,
         config::Priority,
         dma::{DMAReq, DmaConfig},
         traits::TargetAddress,
-        DMAError, MemoryToPeripheral, PeripheralToMemory, Transfer,
     },
     spi::{HalDisabledSpi, HalEnabledSpi, HalSpi},
 };
 
-/// A type representing an ADC sample.
-#[derive(Copy, Clone)]
-pub struct AdcCode(pub u16);
-
-impl AdcCode {
-    // The ADC has a differential input with a range of +/- 4.096 V and 16-bit resolution.
-    // The gain into the two inputs is 1/5.
-    const FULL_SCALE: f32 = 5.0 / 2.0 * 4.096;
-    const VOLT_PER_LSB: f32 = -Self::FULL_SCALE / i16::MIN as f32;
-    const LSB_PER_VOLT: f32 = 1. / Self::VOLT_PER_LSB;
-}
-
-impl From<u16> for AdcCode {
-    /// Construct an ADC code from a provided binary (ADC-formatted) code.
-    fn from(value: u16) -> Self {
-        Self(value)
-    }
-}
-
-impl From<i16> for AdcCode {
-    /// Construct an ADC code from the stabilizer-defined code (i16 full range).
-    fn from(value: i16) -> Self {
-        Self(value as u16)
-    }
-}
-
-impl From<AdcCode> for i16 {
-    /// Get a stabilizer-defined code from the ADC code.
-    fn from(code: AdcCode) -> i16 {
-        code.0 as i16
-    }
-}
-
-impl From<AdcCode> for u16 {
-    /// Get an ADC-frmatted binary value from the code.
-    fn from(code: AdcCode) -> u16 {
-        code.0
-    }
-}
-
-impl From<AdcCode> for f32 {
-    /// Convert raw ADC codes to/from voltage levels.
-    ///
-    /// # Note
-    /// This does not account for the programmable gain amplifier at the signal input.
-    fn from(code: AdcCode) -> f32 {
-        i16::from(code) as f32 * AdcCode::VOLT_PER_LSB
-    }
-}
-
-impl TryFrom<f32> for AdcCode {
-    type Error = ();
-
-    fn try_from(voltage: f32) -> Result<AdcCode, ()> {
-        let code = voltage * Self::LSB_PER_VOLT;
-        if !(i16::MIN as f32..=i16::MAX as f32).contains(&code) {
-            Err(())
-        } else {
-            Ok(AdcCode::from(code as i16))
-        }
-    }
-}
-
 // The following data is written by the timer ADC sample trigger into the SPI CR1 to start the
 // transfer. Data in AXI SRAM is not initialized on boot, so the contents are random. This value is
 // initialized during setup.
-#[link_section = ".axisram.buffers"]
-static mut SPI_START: [u32; 1] = [0x00; 1];
+#[unsafe(link_section = ".axisram.buffers")]
+static SPI_START: GroundedCell<[u32; 1]> = GroundedCell::uninit();
 
 // The following data is written by the timer flag clear trigger into the SPI IFCR register to clear
 // the EOT flag. Data in AXI SRAM is not initialized on boot, so the contents are random. This
 // value is initialized during setup.
-#[link_section = ".axisram.buffers"]
-static mut SPI_EOT_CLEAR: [u32; 1] = [0x00];
+#[unsafe(link_section = ".axisram.buffers")]
+static SPI_EOT_CLEAR: GroundedCell<[u32; 1]> = GroundedCell::uninit();
 
 // The following global buffers are used for the ADC sample DMA transfers. Two buffers are used for
 // each transfer in a ping-pong buffer configuration (one is being acquired while the other is being
 // processed). Note that the contents of AXI SRAM is uninitialized, so the buffer contents on
 // startup are undefined. The dimensions are `ADC_BUF[adc_index][ping_pong_index][sample_index]`.
-#[link_section = ".axisram.buffers"]
-static mut ADC_BUF: [[SampleBuffer; 2]; 2] =
-    [[[0; MAX_SAMPLE_BUFFER_SIZE]; 2]; 2];
+#[unsafe(link_section = ".axisram.buffers")]
+static ADC_BUF: GroundedArrayCell<[SampleBuffer; 2], 2> =
+    GroundedArrayCell::uninit();
 
 macro_rules! adc_input {
     ($name:ident, $index:literal, $trigger_stream:ident, $data_stream:ident, $clear_stream:ident,
@@ -291,9 +228,14 @@ macro_rules! adc_input {
                         .priority(Priority::VeryHigh)
                         .circular_buffer(true);
 
-                    unsafe {
-                        SPI_EOT_CLEAR[0] = 1 << 3;
-                    }
+                    // Note(unsafe): Because this is a Memory->Peripheral transfer, this data is
+                    // never actually modified. It technically only needs to be immutably
+                    // borrowed, but the current HAL API only supports mutable borrows.
+                    let spi_eot_clear = unsafe {
+                        let ptr = SPI_EOT_CLEAR.get();
+                        ptr.write([1 << 3]);
+                        &mut *ptr
+                    };
 
                     // Generate DMA events when the timer hits zero (roll-over). This must be before
                     // the trigger channel DMA occurs, as if the trigger occurs first, the
@@ -310,10 +252,7 @@ macro_rules! adc_input {
                     > = Transfer::init(
                         clear_stream,
                         [< $spi IFCR >]::new(clear_channel),
-                        // Note(unsafe): Because this is a Memory->Peripheral transfer, this data is
-                        // never actually modified. It technically only needs to be immutably
-                        // borrowed, but the current HAL API only supports mutable borrows.
-                        unsafe { &mut SPI_EOT_CLEAR },
+                        spi_eot_clear,
                         None,
                         clear_config,
                     );
@@ -333,9 +272,14 @@ macro_rules! adc_input {
 
                     // Note(unsafe): This word is initialized once per ADC initialization to verify
                     // it is initialized properly.
-                    unsafe {
-                        // Write a binary code into the SPI control register to initiate a transfer.
-                        SPI_START[0] = 0x201;
+                    // Note(unsafe): Because this is a Memory->Peripheral transfer, this data is never
+                    // actually modified. It technically only needs to be immutably borrowed, but the
+                    // current HAL API only supports mutable borrows.
+                    // Write a binary code into the SPI control register to initiate a transfer.
+                    let spi_start = unsafe {
+                        let ptr = SPI_START.get();
+                        ptr.write([0x201]);
+                        &mut *ptr
                     };
 
                     // Construct the trigger stream to write from memory to the peripheral.
@@ -348,10 +292,7 @@ macro_rules! adc_input {
                     > = Transfer::init(
                         trigger_stream,
                         [< $spi CR >]::new(trigger_channel),
-                        // Note(unsafe): Because this is a Memory->Peripheral transfer, this data is never
-                        // actually modified. It technically only needs to be immutably borrowed, but the
-                        // current HAL API only supports mutable borrows.
-                        unsafe { &mut SPI_START },
+                        spi_start,
                         None,
                         trigger_config,
                     );
@@ -374,6 +315,11 @@ macro_rules! adc_input {
                     let mut spi = spi.disable();
                     spi.listen(hal::spi::Event::Error);
 
+                    let adc_bufs = unsafe {
+                        ADC_BUF.initialize_all_with(|| Default::default());
+                        ADC_BUF.get_element_mut_unchecked($index).split_at_mut(1)
+                    };
+
                     // The data transfer is always a transfer of data from the peripheral to a RAM
                     // buffer.
                     let data_transfer: Transfer<_, _, PeripheralToMemory, _, _> =
@@ -382,8 +328,8 @@ macro_rules! adc_input {
                             spi,
                             // Note(unsafe): The ADC_BUF[$index] is "owned" by this peripheral.
                             // It shall not be used anywhere else in the module.
-                            unsafe { &mut ADC_BUF[$index][0][..batch_size] },
-                            unsafe { Some(&mut ADC_BUF[$index][1][..batch_size]) },
+                            &mut adc_bufs.0[0][..batch_size],
+                            Some(&mut adc_bufs.1[0][..batch_size]),
                             data_config,
                         );
 
@@ -418,15 +364,17 @@ macro_rules! adc_input {
                 where
                     F: FnOnce(&mut &'static mut [u16]) -> R,
                 {
-                    unsafe { self.transfer.next_dbm_transfer_with(|buf, _current| f(buf)) }
+                    unsafe { self.transfer.next_dbm_transfer_with(|buf, _current| {
+                        f(buf)
+                    })}
                 }
             }
 
             // This is not actually a Mutex. It only re-uses the semantics and macros of mutex-trait
             // to reduce rightward drift when jointly calling `with_buffer(f)` on multiple DAC/ADCs.
             impl Mutex for $name {
-                type Data = &'static mut [u16];
-                fn lock<R>(&mut self, f: impl FnOnce(&mut Self::Data) -> R) -> R {
+                type T = &'static mut [u16];
+                fn lock<R>(&mut self, f: impl FnOnce(&mut Self::T) -> R) -> R {
                     self.with_buffer(f).unwrap()
                 }
             }

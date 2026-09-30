@@ -1,30 +1,19 @@
-use core::borrow::BorrowMut;
-
-use self::attenuators::AttenuatorInterface;
-
 use super::hal;
-use crate::hardware::{
-    design_parameters, setup, shared_adc::AdcChannel, I2c1Proxy,
-};
-use crate::net::telemetry::PounderTelemetry;
-use ad9959::{
-    amplitude_to_acr, frequency_to_ftw, phase_to_pow, validate_clocking,
-};
-use embedded_hal::blocking::spi::Transfer;
-use enum_iterator::Sequence;
-use miniconf::Tree;
-use rf_power::PowerMeasurementInterface;
+use crate::hardware::{I2c1Proxy, setup::Pounder, shared_adc::AdcChannel};
+use crate::pounder_config::{ClockConfig, PounderConfig};
+use crate::telemetry::PounderTelemetry;
+use ad9959::Address;
+use embedded_hal_02::blocking::spi::Transfer;
 use serde::{Deserialize, Serialize};
+use strum::IntoEnumIterator;
 
-pub mod attenuators;
 pub mod dds_output;
 pub mod hrtimer;
-pub mod rf_power;
 
 #[cfg(not(feature = "pounder_v1_0"))]
 pub mod timestamp;
 
-#[derive(Debug, Copy, Clone, Sequence)]
+#[derive(Debug, Copy, Clone, strum::EnumIter)]
 pub enum GpioPin {
     Led4Green,
     Led5Red,
@@ -110,7 +99,7 @@ impl From<hal::xspi::QspiError> for Error {
 
 /// The numerical value (discriminant) of the Channel enum is the index in the attenuator shift
 /// register as well as the attenuator latch enable signal index on the GPIO extender.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd, strum::EnumIter)]
 #[allow(dead_code)]
 pub enum Channel {
     In0 = 0,
@@ -130,109 +119,51 @@ impl From<Channel> for GpioPin {
     }
 }
 
-#[derive(Serialize, Deserialize, Copy, Clone, Debug, Tree)]
-pub struct DdsChannelConfig {
-    pub frequency: f32,
+#[derive(Serialize, Deserialize, Copy, Clone, Debug)]
+pub struct DdsChannelState {
     pub phase_offset: f32,
+    pub frequency: f32,
     pub amplitude: f32,
+    pub enabled: bool,
 }
 
-impl Default for DdsChannelConfig {
-    fn default() -> Self {
-        Self {
-            frequency: 0.0,
-            phase_offset: 0.0,
-            amplitude: 0.0,
-        }
-    }
-}
-
-/// Represents a fully defined DDS profile, with parameters expressed in machine units
-pub struct Profile {
-    /// A 32-bits representation of DDS frequency in relation to the system clock frequency.
-    /// This value corresponds to the AD9959 CFTW0 register, which specifies the frequency
-    /// of DDS channels.
-    pub frequency_tuning_word: u32,
-    /// The DDS phase offset. It corresponds to the AD9959 CPOW0 register, which specifies
-    /// the phase offset of DDS channels.
-    pub phase_offset: u16,
-    /// Control amplitudes of DDS channels. It corresponds to the AD9959 ACR register, which
-    /// controls the amplitude scaling factor of DDS channels.
-    pub amplitude_control: u32,
-}
-
-impl TryFrom<(ClockConfig, ChannelConfig)> for Profile {
-    type Error = ad9959::Error;
-
-    fn try_from(
-        (clocking, channel): (ClockConfig, ChannelConfig),
-    ) -> Result<Self, Self::Error> {
-        let system_clock_frequency =
-            clocking.reference_clock_frequency * clocking.multiplier as f32;
-        Ok(Profile {
-            frequency_tuning_word: frequency_to_ftw(
-                channel.dds.frequency,
-                system_clock_frequency,
-            )?,
-            phase_offset: phase_to_pow(channel.dds.phase_offset)?,
-            amplitude_control: amplitude_to_acr(channel.dds.amplitude)?,
-        })
-    }
-}
-
-#[derive(Serialize, Deserialize, Copy, Clone, Debug, Tree)]
-pub struct ChannelConfig {
-    #[tree]
-    pub dds: DdsChannelConfig,
+#[derive(Serialize, Deserialize, Copy, Clone, Debug)]
+pub struct ChannelState {
+    pub parameters: DdsChannelState,
     pub attenuation: f32,
 }
 
-impl Default for ChannelConfig {
-    fn default() -> Self {
-        ChannelConfig {
-            dds: DdsChannelConfig::default(),
-            attenuation: 31.5,
-        }
-    }
+#[derive(Serialize, Deserialize, Copy, Clone, Debug)]
+pub struct InputChannelState {
+    pub attenuation: f32,
+    pub power: f32,
+    pub mixer: DdsChannelState,
 }
 
-#[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Tree)]
-pub struct ClockConfig {
+#[derive(Serialize, Deserialize, Copy, Clone, Debug)]
+pub struct OutputChannelState {
+    pub attenuation: f32,
+    pub channel: DdsChannelState,
+}
+
+#[derive(Serialize, Deserialize, Copy, Clone, Debug)]
+pub struct DdsClockConfig {
     pub multiplier: u8,
-    pub reference_clock_frequency: f32,
+    pub reference_clock: f32,
     pub external_clock: bool,
-}
-
-impl Default for ClockConfig {
-    fn default() -> Self {
-        Self {
-            multiplier: 5,
-            reference_clock_frequency: design_parameters::DDS_REF_CLK.to_Hz()
-                as f32,
-            external_clock: false,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, Tree)]
-pub struct PounderConfig {
-    #[tree]
-    pub clock: ClockConfig,
-    #[tree(depth(3))]
-    pub in_channel: [ChannelConfig; 2],
-    #[tree(depth(3))]
-    pub out_channel: [ChannelConfig; 2],
 }
 
 impl From<Channel> for ad9959::Channel {
     /// Translate pounder channels to DDS output channels.
     fn from(other: Channel) -> Self {
-        match other {
-            Channel::In0 => Self::TWO,
-            Channel::In1 => Self::FOUR,
-            Channel::Out0 => Self::ONE,
-            Channel::Out1 => Self::THREE,
-        }
+        Self::new(
+            1 << match other {
+                Channel::In0 => 1,
+                Channel::In1 => 3,
+                Channel::Out0 => 0,
+                Channel::Out1 => 2,
+            },
+        )
     }
 }
 
@@ -267,7 +198,7 @@ impl QspiInterface {
 
         // Configure QSPI for infinite transaction mode using only a data phase (no instruction or
         // address).
-        let qspi_regs = unsafe { &*hal::stm32::QUADSPI::ptr() };
+        let qspi_regs = self.qspi.inner_mut();
         qspi_regs.fcr.modify(|_, w| w.ctcf().set_bit());
 
         unsafe {
@@ -301,10 +232,8 @@ impl ad9959::Interface for QspiInterface {
     /// Args:
     /// * `addr` - The address to write over QSPI to the DDS.
     /// * `data` - The data to write.
-    fn write(&mut self, addr: u8, data: &[u8]) -> Result<(), Error> {
-        if (addr & 0x80) != 0 {
-            return Err(Error::InvalidAddress);
-        }
+    fn write(&mut self, addr: Address, data: &[u8]) -> Result<(), Error> {
+        let addr = addr.raw_value().value();
 
         // The QSPI interface implementation always operates in 4-bit mode because the AD9959 uses
         // IO3 as SYNC_IO in some output modes. In order for writes to be successful, SYNC_IO must
@@ -327,13 +256,8 @@ impl ad9959::Interface for QspiInterface {
 
                 // Encode the address into the first 4 bytes.
                 for address_bit in 0..8 {
-                    let offset: u8 = {
-                        if address_bit % 2 != 0 {
-                            4
-                        } else {
-                            0
-                        }
-                    };
+                    let offset: u8 =
+                        { if address_bit % 2 != 0 { 4 } else { 0 } };
 
                     // Encode MSB first. Least significant bits are placed at the most significant
                     // byte.
@@ -348,13 +272,7 @@ impl ad9959::Interface for QspiInterface {
                 for byte_index in 0..data.len() {
                     let byte = data[byte_index];
                     for bit in 0..8 {
-                        let offset: u8 = {
-                            if bit % 2 != 0 {
-                                4
-                            } else {
-                                0
-                            }
-                        };
+                        let offset: u8 = { if bit % 2 != 0 { 4 } else { 0 } };
 
                         // Encode MSB first. Least significant bits are placed at the most
                         // significant byte.
@@ -389,10 +307,8 @@ impl ad9959::Interface for QspiInterface {
         }
     }
 
-    fn read(&mut self, addr: u8, dest: &mut [u8]) -> Result<(), Error> {
-        if (addr & 0x80) != 0 {
-            return Err(Error::InvalidAddress);
-        }
+    fn read(&mut self, addr: Address, dest: &mut [u8]) -> Result<(), Error> {
+        let addr = addr.raw_value().value();
 
         // This implementation only supports operation (read) in four-bit-serial mode.
         if self.mode != ad9959::Mode::FourBitSerial {
@@ -542,7 +458,7 @@ impl PounderDevices {
         // Configure power-on-default state for pounder. All LEDs are off, on-board oscillator
         // selected and enabled, attenuators out of reset. Note that testing indicates the
         // output state needs to be set first to properly update the output registers.
-        for pin in enum_iterator::all::<GpioPin>() {
+        for pin in GpioPin::iter() {
             devices.io.set_gpio_level(pin, mcp230xx::Level::Low)?;
             devices.io.set_gpio_dir(pin, mcp230xx::Direction::Output)?;
         }
@@ -554,13 +470,29 @@ impl PounderDevices {
         Ok(devices)
     }
 
+    /// Sample a auxiliary ADC channel and return the raw sample value.
+    pub fn sample_aux_adc_raw(
+        &mut self,
+        channel: Channel,
+    ) -> Result<u32, Error> {
+        match channel {
+            Channel::In0 => self.aux_adc.0.read_raw().or(Err(Error::Adc)),
+            Channel::In1 => self.aux_adc.1.read_raw().or(Err(Error::Adc)),
+            _ => Err(Error::InvalidChannel),
+        }
+    }
+
     /// Sample one of the two auxiliary ADC channels associated with the respective RF input channel.
     pub fn sample_aux_adc(&mut self, channel: Channel) -> Result<f32, Error> {
         let adc_scale = match channel {
-            Channel::In0 => self.aux_adc.0.read_normalized().unwrap(),
-            Channel::In1 => self.aux_adc.1.read_normalized().unwrap(),
+            Channel::In0 => {
+                self.aux_adc.0.read_normalized().or(Err(Error::Adc))
+            }
+            Channel::In1 => {
+                self.aux_adc.1.read_normalized().or(Err(Error::Adc))
+            }
             _ => return Err(Error::InvalidChannel),
-        };
+        }?;
 
         // Convert analog percentage to voltage. Note that the ADC uses an external 2.048V analog
         // reference.
@@ -593,19 +525,9 @@ impl PounderDevices {
     pub fn temperature(&mut self) -> Result<f32, Error> {
         self.lm75.read_temperature().map_err(|_| Error::I2c)
     }
-
-    pub fn get_telemetry(&mut self) -> PounderTelemetry {
-        PounderTelemetry {
-            temperature: self.lm75.read_temperature().unwrap(),
-            input_power: [
-                self.measure_power(Channel::In0).unwrap(),
-                self.measure_power(Channel::In1).unwrap(),
-            ],
-        }
-    }
 }
 
-impl attenuators::AttenuatorInterface for PounderDevices {
+impl PounderDevices {
     /// Reset all of the attenuators to a power-on default state.
     fn reset_attenuators(&mut self) -> Result<(), Error> {
         // Active low
@@ -632,7 +554,7 @@ impl attenuators::AttenuatorInterface for PounderDevices {
     ///
     /// Args:
     /// * `channels` - A 4 byte slice to be shifted into the
-    ///     attenuators and to contain the data shifted out.
+    ///   attenuators and to contain the data shifted out.
     fn transfer_attenuators(
         &mut self,
         channels: &mut [u8; 4],
@@ -643,9 +565,95 @@ impl attenuators::AttenuatorInterface for PounderDevices {
 
         Ok(())
     }
+
+    /// Set all attemuators
+    pub fn set_attenuation_all(
+        &mut self,
+        attenuation: [f32; 4],
+    ) -> Result<[f32; 4], Error> {
+        let mut codes = [0; 4];
+        for (c, a) in codes.iter_mut().zip(attenuation) {
+            if !crate::convert::att_is_valid(a) {
+                return Err(Error::Bounds);
+            }
+            *c = !(((a * 2.0) as u8) << 2);
+        }
+        self.transfer_attenuators(&mut codes)?;
+
+        for c in Channel::iter() {
+            self.latch_attenuator(c)?;
+        }
+        Ok(codes.map(|c| (!c >> 2) as f32 / 2.0))
+    }
+
+    /// Set the attenuation of a single channel.
+    ///
+    /// Args:
+    /// * `channel` - The pounder channel to configure the attenuation of.
+    /// * `attenuation` - The desired attenuation of the channel in dB. This has a resolution of
+    ///   0.5dB.
+    pub fn set_attenuation(
+        &mut self,
+        channel: Channel,
+        attenuation: f32,
+    ) -> Result<f32, Error> {
+        if !crate::convert::att_is_valid(attenuation) {
+            return Err(Error::Bounds);
+        }
+
+        // Calculate the attenuation code to program into the attenuator. The attenuator uses a
+        // code where the LSB is 0.5 dB.
+        let attenuation_code = (attenuation * 2.0) as u8;
+
+        // Read all the channels, modify the channel of interest, and write all the channels back.
+        // This ensures the staging register and the output register are always in sync.
+        let mut channels = [0_u8; 4];
+        self.transfer_attenuators(&mut channels)?;
+
+        // The lowest 2 bits of the 8-bit shift register on the attenuator are ignored. Shift the
+        // attenuator code into the upper 6 bits of the register value. Note that the attenuator
+        // treats inputs as active-low, so the code is inverted before writing.
+        channels[channel as usize] = !(attenuation_code << 2);
+        self.transfer_attenuators(&mut channels)?;
+
+        // Finally, latch the output of the updated channel to force it into an active state.
+        self.latch_attenuator(channel)?;
+
+        Ok(attenuation_code as f32 / 2.0)
+    }
+
+    /// Get the attenuation of a channel.
+    ///
+    /// Args:
+    /// * `channel` - The channel to get the attenuation of.
+    ///
+    /// Returns:
+    /// The programmed attenuation of the channel in dB.
+    pub fn get_attenuation(&mut self, channel: Channel) -> Result<f32, Error> {
+        let mut channels = [0_u8; 4];
+
+        // Reading the data always shifts data out of the staging registers, so a duplicate
+        // write-back will be performed to ensure the staging register is always equal to the
+        // output register.
+        self.transfer_attenuators(&mut channels)?;
+
+        // The attenuation code is stored in the upper 6 bits of the register, where each LSB
+        // represents 0.5 dB. The attenuator stores the code as active-low, so inverting the result
+        // (before the shift) has the affect of transforming the bits of interest (and the
+        // dont-care bits) into an active-high state and then masking off the don't care bits. If
+        // the shift occurs before the inversion, the upper 2 bits (which would then be don't
+        // care) would contain erroneous data.
+        let attenuation_code = (!channels[channel as usize]) >> 2;
+
+        // The write-back transfer is performed. Staging register is now restored.
+        self.transfer_attenuators(&mut channels)?;
+
+        // Convert the desired channel code into dB of attenuation.
+        Ok(attenuation_code as f32 / 2.0)
+    }
 }
 
-impl rf_power::PowerMeasurementInterface for PounderDevices {
+impl PounderDevices {
     /// Sample an ADC channel.
     ///
     /// Args:
@@ -655,94 +663,119 @@ impl rf_power::PowerMeasurementInterface for PounderDevices {
     /// The sampled voltage of the specified channel.
     fn sample_converter(&mut self, channel: Channel) -> Result<f32, Error> {
         let adc_scale = match channel {
-            Channel::In0 => self.pwr.0.read_normalized().unwrap(),
-            Channel::In1 => self.pwr.1.read_normalized().unwrap(),
+            Channel::In0 => self.pwr.0.read_normalized().or(Err(Error::Adc)),
+            Channel::In1 => self.pwr.1.read_normalized().or(Err(Error::Adc)),
             _ => return Err(Error::InvalidChannel),
-        };
+        }?;
 
         // Convert analog percentage to voltage. Note that the ADC uses an external 2.048V analog
         // reference.
         Ok(adc_scale * 2.048)
     }
+
+    /// Measure the power of an input channel in dBm.
+    ///
+    /// Args:
+    /// * `channel` - The pounder input channel to measure the power of.
+    ///
+    /// Returns:
+    /// Power in dBm after the digitally controlled attenuator before the amplifier.
+    pub fn measure_power(&mut self, channel: Channel) -> Result<f32, Error> {
+        let analog_measurement = self.sample_converter(channel)?;
+
+        // The AD8363 with VSET connected to VOUT provides an output voltage of 51.7 mV/dB at
+        // 100MHz with an intercept of -58 dBm.
+        // It is placed behind a 20 dB tap.
+        Ok(analog_measurement * (1. / 0.0517) + (-58. + 20.))
+    }
 }
 
-impl setup::PounderDevices {
+impl PounderDevices {
+    /// Measure Pounder telemetry.
+    pub fn get_telemetry(&mut self) -> PounderTelemetry {
+        PounderTelemetry {
+            temperature: self.temperature().unwrap(),
+            input_power: [
+                self.measure_power(Channel::In0).unwrap(),
+                self.measure_power(Channel::In1).unwrap(),
+            ],
+        }
+    }
+}
+
+impl Pounder {
+    /// Apply a DDS clocking, DDS channel, and attenuator configuration.
+    ///
+    /// # Args
+    /// * `config` - The desired configuration.
+    /// * `current_clock` - The currently active DDS clock configuration, if known.
+    ///   Updated when the clock is reconfigured.
     pub fn update_dds(
         &mut self,
-        settings: PounderConfig,
+        config: &PounderConfig,
         current_clock: &mut Option<ClockConfig>,
     ) {
-        self.update_dds_clock(settings.clock, current_clock.borrow_mut());
-        self.update_dds_waveform(settings);
-    }
-
-    pub fn update_dds_clock(
-        &mut self,
-        new_clock_settings: ClockConfig,
-        current_clock_settings: &mut Option<ClockConfig>,
-    ) {
-        // Note(unwrap): Short-cut evaluation ensures `current_clock_settings` is `Some`
-        if current_clock_settings.is_none()
-            || (current_clock_settings.unwrap() != new_clock_settings)
-        {
-            match validate_clocking(
-                new_clock_settings.reference_clock_frequency,
-                new_clock_settings.multiplier,
-            ) {
-                Ok(_frequency) => {
+        if *current_clock != Some(config.clock) {
+            match config
+                .clock
+                .system_clock_frequency()
+                .and(config.clock.multiplier())
+            {
+                Ok(multiplier) => {
                     self.pounder
-                        .set_ext_clk(new_clock_settings.external_clock)
+                        .set_ext_clk(config.clock.external_clock)
                         .unwrap();
-
-                    self.dds_output
-                        .builder()
+                    let mut builder = self.dds_output.builder();
+                    // Note(unwrap): Validated above
+                    builder
                         .set_system_clock(
-                            new_clock_settings.reference_clock_frequency,
-                            new_clock_settings.multiplier,
+                            config.clock.reference_clock_frequency,
+                            multiplier,
                         )
-                        .unwrap()
-                        .write();
-                    current_clock_settings.replace(new_clock_settings);
+                        .unwrap();
+                    self.dds_output.write(builder);
+                    *current_clock = Some(config.clock);
                 }
                 Err(err) => {
                     log::error!("Invalid AD9959 clocking parameters: {:?}", err)
                 }
             }
         }
-    }
 
-    pub fn update_dds_waveform(&mut self, settings: PounderConfig) {
-        for (channel_config, pounder_channel) in settings
+        // Tuning words are relative to the clock actually in use.
+        let Some(Ok(sysclk)) =
+            current_clock.map(|clock| clock.system_clock_frequency())
+        else {
+            return;
+        };
+
+        for (channel_config, channel) in config
             .in_channel
             .iter()
-            .chain(settings.out_channel.iter())
+            .chain(config.out_channel.iter())
             .zip([Channel::In0, Channel::In1, Channel::Out0, Channel::Out1])
         {
-            match Profile::try_from((settings.clock, *channel_config)) {
-                Ok(dds_profile) => {
-                    self.dds_output
-                        .builder()
-                        .update_channels_with_profile(
-                            pounder_channel.into(),
-                            dds_profile,
-                        )
-                        .write();
-
-                    if let Err(err) = self.pounder.set_attenuation(
-                        pounder_channel,
-                        channel_config.attenuation,
-                    ) {
-                        log::error!("Invalid attenuation settings: {:?}", err)
-                    }
+            match channel_config.dds.profile(sysclk) {
+                Ok(profile) => {
+                    let mut builder = self.dds_output.builder();
+                    builder.push(
+                        channel.into(),
+                        Some(profile.ftw),
+                        Some(profile.pow),
+                        Some(profile.acr),
+                    );
+                    self.dds_output.write(builder);
                 }
                 Err(err) => {
                     log::error!("Invalid AD9959 profile settings: {:?}", err)
                 }
             }
+            if let Err(err) = self
+                .pounder
+                .set_attenuation(channel, channel_config.attenuation)
+            {
+                log::error!("Invalid attenuation settings: {:?}", err)
+            }
         }
-    }
-
-    pub fn get_telemetry(&mut self) -> PounderTelemetry {
-        self.pounder.get_telemetry()
     }
 }

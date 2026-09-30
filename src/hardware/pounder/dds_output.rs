@@ -53,14 +53,13 @@
 //! process can be done once and then register values can be written into a pre-computed serialized
 //! buffer to avoid the software overhead of much of the serialization process.
 use log::warn;
-use stm32h7xx_hal as hal;
 
-use super::{hrtimer::HighResTimerE, Profile, QspiInterface};
-use ad9959::{Channel, Mode, ProfileSerializer};
+use super::{QspiInterface, hrtimer::HighResTimerE};
+use ad9959::{Mode, ProfileSerializer};
 
 /// The DDS profile update stream.
 pub struct DdsOutput {
-    _qspi: QspiInterface,
+    qspi: QspiInterface,
     io_update_trigger: HighResTimerE,
     mode: Mode,
 }
@@ -85,19 +84,14 @@ impl DdsOutput {
         qspi.start_stream().unwrap();
         Self {
             mode,
-            _qspi: qspi,
+            qspi,
             io_update_trigger,
         }
     }
 
     /// Get a builder for serializing a Pounder DDS profile.
-    #[allow(dead_code)]
-    pub fn builder(&mut self) -> ProfileBuilder {
-        let mode = self.mode;
-        ProfileBuilder {
-            dds_output: self,
-            serializer: ProfileSerializer::new(mode),
-        }
+    pub fn builder(&mut self) -> ProfileSerializer {
+        ProfileSerializer::new(self.mode)
     }
 
     /// Write a profile to the stream.
@@ -109,98 +103,23 @@ impl DdsOutput {
     ///
     /// # Args
     /// * `profile` - The serialized DDS profile to write.
-    pub fn write(&mut self, profile: &[u32]) {
+    #[inline]
+    pub fn write(&mut self, mut profile: ProfileSerializer) {
         // Note(unsafe): We own the QSPI interface, so it is safe to access the registers in a raw
         // fashion.
-        let regs = unsafe { &*hal::stm32::QUADSPI::ptr() };
+        let regs = self.qspi.qspi.inner_mut();
 
         // Warn if the fifo is still at least half full.
         if regs.sr.read().flevel().bits() >= 16 {
             warn!("QSPI stalling")
         }
 
-        for word in profile.iter() {
+        for word in profile.finalize().iter() {
             // Note(unsafe): any bit pattern is valid for a TX FIFO write.
             regs.dr.write(|w| unsafe { w.bits(*word) });
         }
 
         // Trigger the IO_update signal generating timer to asynchronous create the IO_Update pulse.
         self.io_update_trigger.trigger();
-    }
-}
-
-/// A temporary builder for serializing and writing profiles.
-pub struct ProfileBuilder<'a> {
-    dds_output: &'a mut DdsOutput,
-    serializer: ProfileSerializer,
-}
-
-impl<'a> ProfileBuilder<'a> {
-    /// Update a number of channels with the provided configuration
-    ///
-    /// # Args
-    /// * `channels` - A list of channels to apply the configuration to.
-    /// * `ftw` - If provided, indicates a frequency tuning word for the channels.
-    /// * `pow` - If provided, indicates a phase offset word for the channels.
-    /// * `acr` - If provided, indicates the amplitude control register for the channels. The
-    ///   24-bits of the ACR should be stored in the last 3 LSB.
-    #[allow(dead_code)]
-    #[inline]
-    pub fn update_channels(
-        &mut self,
-        channels: Channel,
-        ftw: Option<u32>,
-        pow: Option<u16>,
-        acr: Option<u32>,
-    ) -> &mut Self {
-        self.serializer.update_channels(channels, ftw, pow, acr);
-        self
-    }
-
-    /// Update a number of channels with fully defined profile settings.
-    ///
-    /// # Args
-    /// * `channels` - A set of channels to apply the configuration to.
-    /// * `profile` - The complete DDS profile, which defines the frequency tuning word,
-    ///   amplitude control register & the phase offset word of the channels.
-    /// # Note
-    /// The ACR should be stored in the 3 LSB of the word.
-    /// If amplitude scaling is to be used, the "Amplitude multiplier enable" bit must be set.
-    #[inline]
-    pub fn update_channels_with_profile(
-        &mut self,
-        channels: Channel,
-        profile: Profile,
-    ) -> &mut Self {
-        self.serializer.update_channels(
-            channels,
-            Some(profile.frequency_tuning_word),
-            Some(profile.phase_offset),
-            Some(profile.amplitude_control),
-        );
-        self
-    }
-
-    /// Update the system clock configuration.
-    ///
-    /// # Args
-    /// * `reference_clock_frequency` - The reference clock frequency provided to the AD9959 core.
-    /// * `multiplier` - The frequency multiplier of the system clock. Must be 1 or 4-20.
-    #[inline]
-    pub fn set_system_clock(
-        &mut self,
-        reference_clock_frequency: f32,
-        multiplier: u8,
-    ) -> Result<&mut Self, ad9959::Error> {
-        self.serializer
-            .set_system_clock(reference_clock_frequency, multiplier)?;
-        Ok(self)
-    }
-
-    /// Write the profile to the DDS asynchronously.
-    #[allow(dead_code)]
-    #[inline]
-    pub fn write(&mut self) {
-        self.dds_output.write(self.serializer.finalize());
     }
 }

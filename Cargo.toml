@@ -1,24 +1,26 @@
+[workspace.package]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/quartiq/stabilizer"
+edition = "2024"
+
 [package]
 name = "stabilizer"
 # Keep versions in Cargo.toml and py/setup.py synchronized.
-version = "0.9.0"
+version = "0.11.0"
 resolver = "2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 authors = [
 	"Robert Jördens <rj@quartiq.de>",
 	"Ryan Summers <ryan.summers@vertigo-designs.com>",
 ]
 description = "Firmware for the Sinara Stabilizer board (STM32H743, Ethernet, PoE, 2 ADCs, 2 DACs)"
 categories = ["embedded", "no-std", "hardware-support", "science"]
-license = "MIT OR Apache-2.0"
 keywords = ["ethernet", "stm32h7", "adc", "dac", "physics"]
-repository = "https://github.com/quartiq/stabilizer"
 readme = "README.md"
 documentation = "https://docs.rs/stabilizer/"
-edition = "2021"
-# keep MSRV in sync in ci.yaml and Cargo.toml
-rust-version = "1.66.1"
-build = "build.rs"
-exclude = [".gitignore", "doc/", "doc/*"]
+exclude = ["doc/", "doc/*"]
 
 [badges]
 maintenance = { status = "actively-developed" }
@@ -28,80 +30,154 @@ features = []
 default-target = "thumbv7em-none-eabihf"
 
 [workspace]
-members = ["ad9959", "serial-settings"]
+members = [
+	"ad9912",
+	"ad9959",
+	"encoded_pin",
+	"serial_settings",
+	"urukul",
+	"signal_generator",
+	"stream",
+	"platform",
+]
+
+[workspace.dependencies]
+arbitrary-int = { version = "1.3.0", features = ["serde", "hint"] }
+bitbybit = "1.4"
+thiserror = { version = "2.0.11", default-features = false }
+idsp = "0.21.0"
+dsp-process = "0.2.0"
+dsp-fixedpoint = "0.1.0"
+# Keep this synced with the miniconf version in py/setup.py
+miniconf = { version = "0.20.1", features = [
+	"json-core",
+	"derive",
+	"postcard",
+	"heapless",
+] }
+heapless = { version = "0.8", features = ["serde"] }
 
 [dependencies]
 panic-persist = { version = "0.3", features = ["utf8", "custom-panic-handler"] }
-sequential-storage = "0.6"
-embedded-io = "0.6"
 embedded-storage = "0.3"
+embedded-storage-async = "0.4"
+log = { version = "0.4", features = [
+	"max_level_trace",
+	"release_max_level_info",
+] }
+serde = { version = "1.0", features = ["derive"], default-features = false }
+heapless.workspace = true
+rtic-monotonics = { version = "2.0", features = ["cortex-m-systick"] }
+num_enum = { version = "0.7.3", default-features = false }
+paste = "1"
+idsp.workspace = true
+dsp-process.workspace = true
+dsp-fixedpoint.workspace = true
+ad9959 = { path = "ad9959", version = "0.3.0" }
+serial_settings = { version = "0.2", path = "serial_settings" }
+mcp230xx = "1.0"
+fugit = "0.3"
+rtt-logger = "0.2"
+mono-clock = "0.1"
+spin = { version = "0.10", default-features = false, features = ["spin_mutex"] }
+shared-bus = { version = "0.3", features = ["cortex-m"] }
+lm75 = "0.2"
+usb-device = "0.3.2"
+usbd-serial = "0.2"
+miniconf.workspace = true
+miniconf_mqtt = { version = "0.20" }
+tca9539 = "0.2"
+bitbybit.workspace = true
+arbitrary-int.workspace = true
+thiserror.workspace = true
+embedded-hal-compat = "0.13.0"
+embedded-hal-02 = { package = "embedded-hal", version = "0.2.7", features = [
+	"unproven",
+] }
+embedded-hal-1 = { package = "embedded-hal", version = "1.0" }
+embedded-hal-bus = "0.3.0"
+urukul = { version = "0.1.1", path = "urukul" }
+ad9912 = { version = "0.1.1", path = "ad9912" }
+bytemuck = { version = "1.21.0", features = [
+	"zeroable_maybe_uninit",
+	"min_const_generics",
+	"derive",
+] }
+num-complex = { version = "0.4", features = [
+	"bytemuck",
+	"serde",
+], default-features = false }
+num-traits = { version = "0.2.19", default-features = false }
+strum = { version = "0.28", default-features = false, features = ["derive"] }
+grounded = "0.2.0"
+signal_generator = { version = "0.1", path = "signal_generator" }
+stream = { version = "0.1", path = "stream" }
+platform = { version = "0.1", path = "platform" }
+libm = "0.2.15"
+
+[dependencies.smoltcp-nal]
+version = "0.7"
+features = ["shared-stack"]
+
+[build-dependencies]
+built = { version = "0.8", features = ["git2"], default-features = false }
+
+[target.'cfg(target_os = "none")'.dependencies]
+stm32h7xx-hal = { version = "0.16.0", features = [
+	"stm32h743v",
+	"rt",
+	"ethernet",
+	"xspi",
+	"usb_hs",
+], git = "https://github.com/stm32-rs/stm32h7xx-hal.git" }
 cortex-m = { version = "0.7.7", features = [
 	"inline-asm",
 	"critical-section-single-core",
 ] }
 cortex-m-rt = { version = "0.7", features = ["device"] }
-log = { version = "0.4", features = [
-	"max_level_trace",
-	"release_max_level_info",
-] }
+rtic = { version = "2.1", features = ["thumbv7-backend"] }
 rtt-target = "0.3"
-serde = { version = "1.0", features = ["derive"], default-features = false }
-serde-json-core = "0.5"
-heapless = { version = "0.7.16", features = ["serde"] }
-cortex-m-rtic = "1.0"
-embedded-hal = "0.2.7"
-num_enum = { version = "0.7.2", default-features = false }
-paste = "1"
-idsp = "0.15.0"
-ad9959 = { path = "ad9959", version = "0.2.1" }
-serial-settings = { path = "serial-settings" }
-mcp230xx = "1.0"
-mutex-trait = "0.2"
-fugit = "0.3"
-rtt-logger = "0.2"
-systick-monotonic = "1.0"
-mono-clock = "0.1"
-spin = { version = "0.9", default-features = false, features = ["spin_mutex"] }
-shared-bus = { version = "0.3", features = ["cortex-m"] }
-lm75 = "0.2"
-enum-iterator = "1.4.1"
-rand_xorshift = "0.3.0"
-rand_core = "0.6.4"
-minimq = "0.8.0"
-usb-device = "0.3.0"
-usbd-serial = "0.2"
-# Keep this synced with the miniconf version in py/setup.py
-miniconf = "0.9.0"
-tca9539 = "0.2"
-smoltcp-nal = { version = "0.4.1", features = ["shared-stack"] }
-bbqueue = "0.5"
-postcard = "1"
-bit_field = "0.10.2"
 
-[build-dependencies]
-built = { version = "0.7", features = ["git2"], default-features = false }
-
-[dependencies.stm32h7xx-hal]
-git = "https://github.com/stm32-rs/stm32h7xx-hal.git"
-rev = "9bfd5b17e18e1dfd8e596ffdd77be5c0cb214fc5"
-features = ["stm32h743v", "rt", "ethernet", "xspi", "usb_hs"]
-
-[patch.crates-io.usbd-serial]
-git = "https://github.com/rust-embedded-community/usbd-serial"
-rev = "096742c1c480f6f63c1a936a3c23ede7993c624d"
+[target.'cfg(not(target_os = "none"))'.dependencies]
+serde_json = { version = "1.0.133", features = ["preserve_order"] }
+miniconf = { version = "0.20", features = ["schema"] }
 
 [features]
 nightly = []
 pounder_v1_0 = []
+# Reboot instead of halting on panic
 panic-reboot = []
 
 [profile.dev]
 codegen-units = 1
+opt-level = "s"
 incremental = false
+
+[profile.release.package.idsp]
+opt-level = 3
+
+[profile.release.package.ad9959]
+opt-level = 3
+
+[profile.release.package.signal_generator]
+opt-level = 3
+
+[profile.release.package.stream]
+opt-level = 3
+
+[profile.release.package.stabilizer]
 opt-level = 3
 
 [profile.release]
-opt-level = 3
+codegen-units = 1
+opt-level = "s"
 debug = true
 lto = true
-codegen-units = 1
+
+[patch.crates-io]
+idsp = { git = "https://github.com/quartiq/idsp.git" }
+dsp-process = { git = "https://github.com/quartiq/idsp.git" }
+dsp-fixedpoint = { git = "https://github.com/quartiq/idsp.git" }
+miniconf = { git = "https://github.com/quartiq/miniconf.git" }
+miniconf_mqtt = { git = "https://github.com/quartiq/miniconf.git" }
+miniconf_derive = { git = "https://github.com/quartiq/miniconf.git" }

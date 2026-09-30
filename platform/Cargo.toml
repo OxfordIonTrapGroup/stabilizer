@@ -1,0 +1,30 @@
+[package]
+name = "platform"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version = "0.1.0"
+description = "STM32 MQTT Application platform"
+authors = ["Robert Jördens <rj@quartiq.de>"]
+categories = ["embedded", "no-std"]
+keywords = []
+
+[dependencies]
+miniconf.workspace = true
+serde = { version = "1.0", features = ["derive"], default-features = false }
+heapless.workspace = true
+log = { version = "0.4" }
+cortex-m = { version = "0.7.7" }
+sequential-storage = "5"
+serial_settings = { version = "0.2", path = "../serial_settings" }
+embedded-storage = "0.3"
+embedded-storage-async = "0.4"
+postcard = { version = "1", default-features = false }
+embedded-io = "0.6"
+embassy-futures = { version = "0.1", default-features = false }
+serde-json-core = "0.6"
+minimq = "0.10.0"
+embedded-hal-02 = { package = "embedded-hal", version = "0.2.7", features = [
+	"unproven",
+] }
+smoltcp-nal = { version = "0.7", features = ["shared-stack"] }

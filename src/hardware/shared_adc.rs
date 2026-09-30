@@ -1,3 +1,4 @@
+use super::hal;
 /// Shared Internal ADC Support
 ///
 /// # Description
@@ -15,8 +16,7 @@
 /// If the multiple priorities utilize the ADC that results in resource pre-emption, pre-emption is
 /// protected against through the use of an atomic bool. Attempting to utilize the ADC from a
 /// higher priority level while it is in use at a lower level will result in a [AdcError::InUse].
-use embedded_hal::adc::{Channel, OneShot};
-use stm32h7xx_hal as hal;
+use embedded_hal_02::adc::{Channel, OneShot};
 
 #[derive(Debug, Copy, Clone)]
 pub enum AdcError {
@@ -31,7 +31,7 @@ pub struct AdcChannel<'a, Adc, PIN> {
     mutex: &'a spin::Mutex<hal::adc::Adc<Adc, hal::adc::Enabled>>,
 }
 
-impl<'a, Adc, PIN> AdcChannel<'a, Adc, PIN>
+impl<Adc, PIN> AdcChannel<'_, Adc, PIN>
 where
     PIN: Channel<Adc, ID = u8>,
     hal::adc::Adc<Adc, hal::adc::Enabled>: OneShot<Adc, u32, PIN>,

@@ -1,7 +1,21 @@
 #![no_std]
 #![cfg_attr(feature = "nightly", feature(core_intrinsics))]
 
-pub mod app_utils;
+pub mod design_parameters;
+
+#[cfg(target_os = "none")]
 pub mod hardware;
-pub mod net;
-pub mod settings;
+
+pub mod telemetry;
+
+pub mod convert;
+
+pub mod statistics;
+
+pub mod mpll;
+
+pub mod fls;
+
+pub mod fnc;
+
+pub mod pounder_config;

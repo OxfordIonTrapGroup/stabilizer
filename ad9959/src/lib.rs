@@ -1,80 +1,96 @@
 #![no_std]
 
-use bit_field::BitField;
-use bitflags::bitflags;
-use core::ops::Range;
+use core::num::Wrapping;
+
+use arbitrary_int::{Number, u2, u3, u4, u5, u10, u14, u24};
+use bitbybit::{bitenum, bitfield};
 use embedded_hal::{blocking::delay::DelayUs, digital::v2::OutputPin};
-
-/// The minimum reference clock input frequency with REFCLK multiplier disabled.
-const MIN_REFCLK_FREQUENCY: f32 = 1e6;
-/// The minimum reference clock input frequency with REFCLK multiplier enabled.
-const MIN_MULTIPLIED_REFCLK_FREQUENCY: f32 = 10e6;
-/// The system clock frequency range with high gain configured for the internal VCO.
-const HIGH_GAIN_VCO_RANGE: Range<f32> = Range {
-    start: 255e6,
-    end: 500e6,
-};
-/// The system clock frequency range with low gain configured for the internal VCO.
-const LOW_GAIN_VCO_RANGE: Range<f32> = Range {
-    start: 100e6,
-    end: 160e6,
-};
-
-/// A device driver for the AD9959 direct digital synthesis (DDS) chip.
-///
-/// This chip provides four independently controllable digital-to-analog output sinusoids with
-/// configurable phase, amplitude, and frequency. All channels are inherently synchronized as they
-/// are derived off a common system clock.
-///
-/// The chip contains a configurable PLL and supports system clock frequencies up to 500 MHz.
-///
-/// The chip supports a number of serial interfaces to improve data throughput, including normal,
-/// dual, and quad SPI configurations.
-pub struct Ad9959<INTERFACE> {
-    interface: INTERFACE,
-    reference_clock_frequency: f32,
-    system_clock_multiplier: u8,
-    communication_mode: Mode,
-}
 
 /// A trait that allows a HAL to provide a means of communicating with the AD9959.
 pub trait Interface {
     type Error;
-
     fn configure_mode(&mut self, mode: Mode) -> Result<(), Self::Error>;
-
-    fn write(&mut self, addr: u8, data: &[u8]) -> Result<(), Self::Error>;
-
-    fn read(&mut self, addr: u8, dest: &mut [u8]) -> Result<(), Self::Error>;
+    fn write(&mut self, addr: Address, data: &[u8]) -> Result<(), Self::Error>;
+    fn read(
+        &mut self,
+        addr: Address,
+        data: &mut [u8],
+    ) -> Result<(), Self::Error>;
 }
 
 /// Indicates various communication modes of the DDS. The value of this enumeration is equivalent to
 /// the configuration bits of the DDS CSR register.
-#[derive(Copy, Clone, PartialEq, Eq)]
-#[repr(u8)]
+#[derive(PartialEq)]
+#[bitenum(u2, exhaustive = true)]
 pub enum Mode {
-    SingleBitTwoWire = 0b000,
-    SingleBitThreeWire = 0b010,
-    TwoBitSerial = 0b100,
-    FourBitSerial = 0b110,
+    SingleBitTwoWire = 0b00,
+    SingleBitThreeWire = 0b01,
+    TwoBitSerial = 0b10,
+    FourBitSerial = 0b11,
 }
 
-bitflags! {
-    /// Specifies an output channel of the AD9959 DDS chip.
-    pub struct Channel: u8 {
-        const ONE   = 0b00010000;
-        const TWO   = 0b00100000;
-        const THREE = 0b01000000;
-        const FOUR  = 0b10000000;
-        const ALL   = Self::ONE.bits() | Self::TWO.bits() | Self::THREE.bits() | Self::FOUR.bits();
-    }
+pub type Channel = u4;
+
+#[bitfield(u8, default = 0xf0)]
+#[derive(Debug, PartialEq)]
+pub struct Csr {
+    #[bit(0, rw)]
+    lsb_first: bool,
+    #[bits(1..=2, rw)]
+    mode: Mode,
+    #[bits(4..=7, rw)]
+    channel: u4,
 }
 
-/// The configuration registers within the AD9959 DDS device. The values of each register are
-/// equivalent to the address.
+#[bitfield(u24, default = 0)]
+#[derive(Debug, PartialEq)]
+pub struct Fr1 {
+    #[bit(0, rw)]
+    sw_sync: bool,
+    #[bit(1, rw)]
+    hw_sync: bool,
+    #[bit(4, rw)]
+    dac_ref_pd: bool,
+    #[bit(5, rw)]
+    sync_clk_pd: bool,
+    #[bit(6, rw)]
+    ext_pd: bool,
+    #[bit(7, rw)]
+    ext_clk_pd: bool,
+    #[bits(8..=9, rw)]
+    modulation: u2,
+    #[bits(10..=11, rw)]
+    ramp_up_down: u2,
+    #[bits(12..=14, rw)]
+    profile_pin: u3,
+    #[bits(16..=17, rw)]
+    charge_pump: u2,
+    #[bits(18..=22, rw)]
+    pll_divier: u5,
+    #[bit(23, rw)]
+    vco_high: bool,
+}
+
+#[bitfield(u24, default = 0)]
+#[derive(Debug, PartialEq)]
+pub struct Acr {
+    #[bits(0..=9, rw)]
+    asf: u10,
+    #[bit(10, rw)]
+    load_arr: bool,
+    #[bit(11, rw)]
+    ramp: bool,
+    #[bit(12, rw)]
+    multiplier: bool,
+    #[bits(14..=15, rw)]
+    step: u2,
+    #[bits(16..=23, rw)]
+    arr: u8,
+}
+
 #[allow(clippy::upper_case_acronyms)]
-#[repr(u8)]
-pub enum Register {
+#[bitenum(u7)]
+pub enum Address {
     CSR = 0x00,
     FR1 = 0x01,
     FR2 = 0x02,
@@ -112,6 +128,22 @@ pub enum Error {
     Frequency,
 }
 
+/// A device driver for the AD9959 direct digital synthesis (DDS) chip.
+///
+/// This chip provides four independently controllable digital-to-analog output sinusoids with
+/// configurable phase, amplitude, and frequency. All channels are inherently synchronized as they
+/// are derived off a common system clock.
+///
+/// The chip contains a configurable PLL and supports system clock frequencies up to 500 MHz.
+///
+/// The chip supports a number of serial interfaces to improve data throughput, including normal,
+/// dual, and quad SPI configurations.
+pub struct Ad9959<I> {
+    interface: I,
+    ftw_per_hz: f32,
+    mode: Mode,
+}
+
 impl<I: Interface> Ad9959<I> {
     /// Construct and initialize the DDS.
     ///
@@ -126,99 +158,74 @@ impl<I: Interface> Ad9959<I> {
     ///   `clock_frequency` to generate the system clock.
     pub fn new(
         interface: I,
-        mut reset_pin: impl OutputPin,
+        reset: &mut impl OutputPin,
         io_update: &mut impl OutputPin,
         delay: &mut impl DelayUs<u8>,
-        desired_mode: Mode,
-        clock_frequency: f32,
-        multiplier: u8,
+        mode: Mode,
+        reference_clock_frequency: f32,
+        multiplier: u5,
     ) -> Result<Self, Error> {
         let mut ad9959 = Ad9959 {
             interface,
-            reference_clock_frequency: clock_frequency,
-            system_clock_multiplier: 1,
-            communication_mode: desired_mode,
+            ftw_per_hz: 0.0,
+            mode,
         };
-
         io_update.set_low().or(Err(Error::Pin))?;
 
         // Reset the AD9959 (Pounder v1.1 and earlier)
         // On Pounder v1.2 and later the reset has been done through the GPIO extender in
         // PounderDevices before.
-        reset_pin.set_high().or(Err(Error::Pin))?;
-
-        // Delay for at least 1 SYNC_CLK period for the reset to occur. The SYNC_CLK is guaranteed
+        reset.set_high().or(Err(Error::Pin))?;
+        // Delays here are at least 1 SYNC_CLK period. The SYNC_CLK is guaranteed
         // to be at least 250KHz (1/4 of 1MHz minimum REF_CLK). We use 5uS instead of 4uS to
         // guarantee conformance with datasheet requirements.
         delay.delay_us(5);
-
-        reset_pin.set_low().or(Err(Error::Pin))?;
+        reset.set_low().or(Err(Error::Pin))?;
 
         ad9959
             .interface
             .configure_mode(Mode::SingleBitTwoWire)
             .or(Err(Error::Interface))?;
 
-        // Program the interface configuration in the AD9959. Default to all channels enabled.
-        let csr = [Channel::ALL.bits() | desired_mode as u8];
-        ad9959.write(Register::CSR, &csr)?;
+        let csr = Csr::default().with_channel(u4::new(0b1111)).with_mode(mode);
+        ad9959.write(Address::CSR, &csr.raw_value().to_be_bytes())?;
 
-        // Latch the new interface configuration.
         io_update.set_high().or(Err(Error::Pin))?;
-
-        // Delay for at least 1 SYNC_CLK period for the update to occur. The SYNC_CLK is guaranteed
-        // to be at least 250KHz (1/4 of 1MHz minimum REF_CLK). We use 5uS instead of 4uS to
-        // guarantee conformance with datasheet requirements.
         delay.delay_us(5);
-
         io_update.set_low().or(Err(Error::Pin))?;
 
         ad9959
             .interface
-            .configure_mode(desired_mode)
+            .configure_mode(mode)
             .or(Err(Error::Interface))?;
 
         // Empirical evidence indicates a delay is necessary here for the IO update to become
         // active. This is likely due to needing to wait at least 1 clock cycle of the DDS for the
         // interface update to occur.
-        // Delay for at least 1 SYNC_CLK period for the update to occur. The SYNC_CLK is guaranteed
-        // to be at least 250KHz (1/4 of 1MHz minimum REF_CLK). We use 5uS instead of 4uS to
-        // guarantee conformance with datasheet requirements.
         delay.delay_us(5);
 
         // Read back the CSR to ensure it specifies the mode correctly.
-        let mut updated_csr: [u8; 1] = [0];
-        ad9959.read(Register::CSR, &mut updated_csr)?;
-        if updated_csr[0] != csr[0] {
+        let mut updated_csr = 0u8.to_be_bytes();
+        ad9959.read(Address::CSR, &mut updated_csr)?;
+        if updated_csr != csr.raw_value().to_be_bytes() {
             return Err(Error::Check);
         }
 
         // Set the clock frequency to configure the device as necessary.
-        ad9959.configure_system_clock(clock_frequency, multiplier)?;
-
-        // Latch the new clock configuration.
+        ad9959.set_system_clock(reference_clock_frequency, multiplier)?;
         io_update.set_high().or(Err(Error::Pin))?;
-
-        // Delay for at least 1 SYNC_CLK period for the update to occur. The SYNC_CLK is guaranteed
-        // to be at least 250KHz (1/4 of 1MHz minimum REF_CLK). We use 5uS instead of 4uS to
-        // guarantee conformance with datasheet requirements.
         delay.delay_us(5);
-
         io_update.set_low().or(Err(Error::Pin))?;
 
         Ok(ad9959)
     }
 
-    fn read(&mut self, reg: Register, data: &mut [u8]) -> Result<(), Error> {
-        self.interface
-            .read(reg as u8, data)
-            .or(Err(Error::Interface))
+    fn read(&mut self, reg: Address, data: &mut [u8]) -> Result<(), Error> {
+        self.interface.read(reg, data).or(Err(Error::Interface))
     }
 
-    fn write(&mut self, reg: Register, data: &[u8]) -> Result<(), Error> {
-        self.interface
-            .write(reg as u8, data)
-            .or(Err(Error::Interface))
+    fn write(&mut self, reg: Address, data: &[u8]) -> Result<(), Error> {
+        self.interface.write(reg, data).or(Err(Error::Interface))
     }
 
     /// Configure the internal system clock of the chip.
@@ -229,41 +236,34 @@ impl<I: Interface> Ad9959<I> {
     ///
     /// Returns:
     /// The actual frequency configured for the internal system clock.
-    fn configure_system_clock(
+    fn set_system_clock(
         &mut self,
         reference_clock_frequency: f32,
-        multiplier: u8,
+        multiplier: u5,
     ) -> Result<f32, Error> {
-        let frequency =
-            validate_clocking(reference_clock_frequency, multiplier)?;
-        self.reference_clock_frequency = reference_clock_frequency;
-
-        // TODO: Update / disable any enabled channels?
-        let mut fr1: [u8; 3] = [0, 0, 0];
-        self.read(Register::FR1, &mut fr1)?;
-        fr1[0].set_bits(2..=6, multiplier);
-
-        let vco_range = HIGH_GAIN_VCO_RANGE.contains(&frequency)
-            || frequency == HIGH_GAIN_VCO_RANGE.end;
-        fr1[0].set_bit(7, vco_range);
-
-        self.write(Register::FR1, &fr1)?;
-        self.system_clock_multiplier = multiplier;
-
-        Ok(self.system_clock_frequency())
+        let sysclk = validate_clocking(reference_clock_frequency, multiplier)?;
+        let mut fr1 = u24::new(0).to_be_bytes();
+        self.read(Address::FR1, &mut fr1)?;
+        let fr1 = Fr1::new_with_raw_value(u24::from_be_bytes(fr1))
+            .with_pll_divier(multiplier)
+            .with_vco_high(sysclk >= VCO_HIGH_THRESHOLD);
+        self.write(Address::FR1, &fr1.raw_value().to_be_bytes())?;
+        self.ftw_per_hz = (1u64 << 32) as f32 / sysclk;
+        Ok(sysclk)
     }
 
-    /// Get the current reference clock frequency in Hz.
-    pub fn get_reference_clock_frequency(&self) -> f32 {
-        self.reference_clock_frequency
+    /// Get the current CSR register.
+    pub fn csr(&mut self) -> Result<Csr, Error> {
+        let mut data = u8::new(0).to_be_bytes();
+        self.read(Address::CSR, &mut data)?;
+        Ok(Csr::new_with_raw_value(u8::from_be_bytes(data)))
     }
 
-    /// Get the current reference clock multiplier.
-    pub fn get_reference_clock_multiplier(&mut self) -> Result<u8, Error> {
-        let mut fr1: [u8; 3] = [0, 0, 0];
-        self.read(Register::FR1, &mut fr1)?;
-
-        Ok(fr1[0].get_bits(2..=6))
+    /// Get the current FR1 register.
+    pub fn fr1(&mut self) -> Result<Fr1, Error> {
+        let mut data = u24::new(0).to_be_bytes();
+        self.read(Address::FR1, &mut data)?;
+        Ok(Fr1::new_with_raw_value(u24::from_be_bytes(data)))
     }
 
     /// Perform a self-test of the communication interface.
@@ -274,42 +274,39 @@ impl<I: Interface> Ad9959<I> {
     /// Returns:
     /// True if the self test succeeded. False otherwise.
     pub fn self_test(&mut self) -> Result<bool, Error> {
-        let mut csr: [u8; 1] = [0];
-        self.read(Register::CSR, &mut csr)?;
-        let old_csr = csr[0];
+        let mut data = [0];
+
+        // Get current CSR.
+        self.read(Address::CSR, &mut data)?;
+        let old_csr = data;
+
+        let mut csr = Csr::new_with_raw_value(data[0]);
 
         // Enable all channels.
-        csr[0].set_bits(4..8, 0xF);
-        self.write(Register::CSR, &csr)?;
-
-        // Read back the enable.
-        csr[0] = 0;
-        self.read(Register::CSR, &mut csr)?;
-        if csr[0].get_bits(4..8) != 0xF {
+        csr.set_channel(u4::new(0b1111));
+        self.write(Address::CSR, &[csr.raw_value()])?;
+        self.read(Address::CSR, &mut data)?;
+        if Csr::new_with_raw_value(data[0]).channel() != csr.channel() {
             return Ok(false);
         }
 
         // Clear all channel enables.
-        csr[0].set_bits(4..8, 0x0);
-        self.write(Register::CSR, &csr)?;
-
-        // Read back the enable.
-        csr[0] = 0xFF;
-        self.read(Register::CSR, &mut csr)?;
-        if csr[0].get_bits(4..8) != 0 {
+        csr.set_channel(u4::new(0b0000));
+        self.write(Address::CSR, &[csr.raw_value()])?;
+        self.read(Address::CSR, &mut data)?;
+        if Csr::new_with_raw_value(data[0]).channel() != csr.channel() {
             return Ok(false);
         }
 
         // Restore the CSR.
-        csr[0] = old_csr;
-        self.write(Register::CSR, &csr)?;
+        self.write(Address::CSR, &old_csr)?;
 
         Ok(true)
     }
 
     /// Get the current system clock frequency in Hz.
-    fn system_clock_frequency(&self) -> f32 {
-        self.system_clock_multiplier as f32 * self.reference_clock_frequency
+    const fn system_clock_frequency(&self) -> f32 {
+        (1u64 << 32) as f32 / self.ftw_per_hz
     }
 
     /// Update an output channel configuration register.
@@ -318,19 +315,17 @@ impl<I: Interface> Ad9959<I> {
     /// * `channel` - The channel to configure.
     /// * `register` - The register to update.
     /// * `data` - The contents to write to the provided register.
-    fn modify_channel(
+    fn write_channel(
         &mut self,
         channel: Channel,
-        register: Register,
+        register: Address,
         data: &[u8],
     ) -> Result<(), Error> {
         // Disable all other outputs so that we can update the configuration register of only the
         // specified channel.
-        let csr = [self.communication_mode as u8 | channel.bits()];
-
-        self.write(Register::CSR, &csr)?;
+        let csr = Csr::default().with_channel(channel).with_mode(self.mode);
+        self.write(Address::CSR, &csr.raw_value().to_be_bytes())?;
         self.write(register, data)?;
-
         Ok(())
     }
 
@@ -343,22 +338,12 @@ impl<I: Interface> Ad9959<I> {
     fn read_channel(
         &mut self,
         channel: Channel,
-        register: Register,
+        register: Address,
         data: &mut [u8],
     ) -> Result<(), Error> {
-        // Disable all other channels in the CSR so that we can read the configuration register of
-        // only the desired channel.
-        let mut csr = [0];
-        self.read(Register::CSR, &mut csr)?;
-        let new_csr = [self.communication_mode as u8 | channel.bits()];
-
-        self.write(Register::CSR, &new_csr)?;
+        let csr = Csr::default().with_channel(channel).with_mode(self.mode);
+        self.write(Address::CSR, &csr.raw_value().to_be_bytes())?;
         self.read(register, data)?;
-
-        // Restore the previous CSR. Note that the re-enable of the channel happens immediately, so
-        // the CSR update does not need to be latched.
-        self.write(Register::CSR, &csr)?;
-
         Ok(())
     }
 
@@ -373,16 +358,15 @@ impl<I: Interface> Ad9959<I> {
     pub fn set_phase(
         &mut self,
         channel: Channel,
-        phase_turns: f32,
+        phase: f32,
     ) -> Result<f32, Error> {
-        let phase_offset = phase_to_pow(phase_turns)?;
-        self.modify_channel(
+        let pow = u14::new((phase * (1 << 14) as f32) as u16 & 0x3FFF);
+        self.write_channel(
             channel,
-            Register::CPOW0,
-            &phase_offset.to_be_bytes(),
+            Address::CPOW0,
+            &pow.value().to_be_bytes(),
         )?;
-
-        pow_to_phase(phase_offset)
+        Ok(pow.value() as f32 / (1 << 14) as f32)
     }
 
     /// Get the current phase of a specified channel.
@@ -393,12 +377,10 @@ impl<I: Interface> Ad9959<I> {
     /// Returns:
     /// The phase of the channel in turns.
     pub fn get_phase(&mut self, channel: Channel) -> Result<f32, Error> {
-        let mut phase_offset: [u8; 2] = [0; 2];
-        self.read_channel(channel, Register::CPOW0, &mut phase_offset)?;
-
-        let phase_offset = u16::from_be_bytes(phase_offset) & 0x3FFFu16;
-
-        pow_to_phase(phase_offset)
+        let mut pow = 0u16.to_be_bytes();
+        self.read_channel(channel, Address::CPOW0, &mut pow)?;
+        let pow = u16::from_be_bytes(pow) & 0x3FFF;
+        Ok(pow as f32 / (1 << 14) as f32)
     }
 
     /// Configure the amplitude of a specified channel.
@@ -417,26 +399,17 @@ impl<I: Interface> Ad9959<I> {
         if !(0.0..=1.0).contains(&amplitude) {
             return Err(Error::Bounds);
         }
-
-        let amplitude_control: u16 = (amplitude * (1 << 10) as f32) as u16;
-
-        let mut acr: [u8; 3] = [0; 3];
-
-        // Enable the amplitude multiplier for the channel if required. The amplitude control has
-        // full-scale at 0x3FF (amplitude of 1), so the multiplier should be disabled whenever
-        // full-scale is used.
-        if amplitude_control < (1 << 10) {
-            let masked_control = amplitude_control & 0x3FF;
-            acr[1] = masked_control.to_be_bytes()[0];
-            acr[2] = masked_control.to_be_bytes()[1];
-
-            // Enable the amplitude multiplier
-            acr[1].set_bit(4, true);
-        }
-
-        self.modify_channel(channel, Register::ACR, &acr)?;
-
-        Ok(amplitude_control as f32 / (1 << 10) as f32)
+        let asf = (amplitude * (1 << 10) as f32) as u16;
+        let acr = match u10::try_new(asf) {
+            Ok(asf) => Acr::default().with_multiplier(true).with_asf(asf),
+            Err(_) => Acr::default().with_multiplier(false),
+        };
+        self.write_channel(
+            channel,
+            Address::ACR,
+            &acr.raw_value().to_be_bytes(),
+        )?;
+        Ok(asf as f32 / (1 << 10) as f32)
     }
 
     /// Get the configured amplitude of a channel.
@@ -447,16 +420,14 @@ impl<I: Interface> Ad9959<I> {
     /// Returns:
     /// The normalized amplitude of the channel.
     pub fn get_amplitude(&mut self, channel: Channel) -> Result<f32, Error> {
-        let mut acr: [u8; 3] = [0; 3];
-        self.read_channel(channel, Register::ACR, &mut acr)?;
-
-        if acr[1].get_bit(4) {
-            let amplitude_control: u16 =
-                (((acr[1] as u16) << 8) | (acr[2] as u16)) & 0x3FF;
-            Ok(amplitude_control as f32 / (1 << 10) as f32)
+        let mut acr = u24::new(0).to_be_bytes();
+        self.read_channel(channel, Address::ACR, &mut acr)?;
+        let acr = Acr::new_with_raw_value(u24::from_be_bytes(acr));
+        Ok(if acr.multiplier() {
+            1.0
         } else {
-            Ok(1.0)
-        }
+            acr.asf().value() as f32 / (1 << 10) as f32
+        })
     }
 
     /// Configure the frequency of a specified channel.
@@ -475,19 +446,9 @@ impl<I: Interface> Ad9959<I> {
         if frequency < 0.0 || frequency > self.system_clock_frequency() {
             return Err(Error::Bounds);
         }
-
-        // The function for channel frequency is `f_out = FTW * f_s / 2^32`, where FTW is the
-        // frequency tuning word and f_s is the system clock rate.
-        let tuning_word: u32 = ((frequency / self.system_clock_frequency())
-            * 1u64.wrapping_shl(32) as f32)
-            as u32;
-
-        self.modify_channel(
-            channel,
-            Register::CFTW0,
-            &tuning_word.to_be_bytes(),
-        )?;
-        ftw_to_frequency(tuning_word, self.system_clock_frequency())
+        let ftw = (frequency * self.ftw_per_hz) as u32;
+        self.write_channel(channel, Address::CFTW0, &ftw.to_be_bytes())?;
+        Ok(ftw as f32 / self.ftw_per_hz)
     }
 
     /// Get the frequency of a channel.
@@ -498,13 +459,10 @@ impl<I: Interface> Ad9959<I> {
     /// Returns:
     /// The frequency of the channel in Hz.
     pub fn get_frequency(&mut self, channel: Channel) -> Result<f32, Error> {
-        // Read the frequency tuning word for the channel.
-        let mut tuning_word: [u8; 4] = [0; 4];
-        self.read_channel(channel, Register::CFTW0, &mut tuning_word)?;
-        let tuning_word = u32::from_be_bytes(tuning_word);
-
-        // Convert the tuning word into a frequency.
-        ftw_to_frequency(tuning_word, self.system_clock_frequency())
+        let mut ftw = 0u32.to_be_bytes();
+        self.read_channel(channel, Address::CFTW0, &mut ftw)?;
+        let ftw = u32::from_be_bytes(ftw);
+        Ok(ftw as f32 / self.ftw_per_hz)
     }
 
     /// Finalize DDS configuration
@@ -515,9 +473,12 @@ impl<I: Interface> Ad9959<I> {
     /// # Returns
     /// (i, mode) where `i` is the interface to the DDS and `mode` is the frozen `Mode`.
     pub fn freeze(self) -> (I, Mode) {
-        (self.interface, self.communication_mode)
+        (self.interface, self.mode)
     }
 }
+
+/// System clock frequency above which the high-gain VCO range is selected.
+const VCO_HIGH_THRESHOLD: f32 = 200e6;
 
 /// Validate the internal system clock configuration of the chip.
 ///
@@ -526,148 +487,87 @@ impl<I: Interface> Ad9959<I> {
 /// * `multiplier` - The frequency multiplier of the system clock. Must be 1 or 4-20.
 ///
 /// Returns:
-/// The system clock frequency to be configured.
+/// The resulting system clock frequency.
 pub fn validate_clocking(
     reference_clock_frequency: f32,
-    multiplier: u8,
+    multiplier: u5,
 ) -> Result<f32, Error> {
-    // The REFCLK frequency must be at least 1 MHz with REFCLK multiplier disabled.
-    if reference_clock_frequency < MIN_REFCLK_FREQUENCY {
+    let sysclk = multiplier.value() as f32 * reference_clock_frequency;
+    if match multiplier.value() {
+        1 => !(1e6..=500e6).contains(&reference_clock_frequency),
+        4..=20 => {
+            !(10e6..=125e6).contains(&reference_clock_frequency)
+                || !(100e6..=500e6).contains(&sysclk)
+        }
+        _ => true,
+    } {
         return Err(Error::Bounds);
     }
-    // If the REFCLK multiplier is enabled, the multiplier (FR1[22:18]) must be between 4 to 20.
-    // Alternatively, the clock multiplier can be disabled. The multiplication factor is 1.
-    if multiplier != 1 && !(4..=20).contains(&multiplier) {
-        return Err(Error::Bounds);
-    }
-    // If the REFCLK multiplier is enabled, the REFCLK frequency must be at least 10 MHz.
-    if multiplier != 1
-        && reference_clock_frequency < MIN_MULTIPLIED_REFCLK_FREQUENCY
-    {
-        return Err(Error::Bounds);
-    }
-    let frequency = multiplier as f32 * reference_clock_frequency;
-    // SYSCLK frequency between 255 MHz and 500 MHz (inclusive) is valid with high range VCO
-    if HIGH_GAIN_VCO_RANGE.contains(&frequency)
-        || frequency == HIGH_GAIN_VCO_RANGE.end
-    {
-        return Ok(frequency);
-    }
-
-    // SYSCLK frequency between 100 MHz and 160 MHz (inclusive) is valid with low range VCO
-    if LOW_GAIN_VCO_RANGE.contains(&frequency)
-        || frequency == LOW_GAIN_VCO_RANGE.end
-    {
-        return Ok(frequency);
-    }
-
-    // When the REFCLK multiplier is disabled, SYSCLK frequency can go below 100 MHz
-    if multiplier == 1 && (0.0..=LOW_GAIN_VCO_RANGE.start).contains(&frequency)
-    {
-        return Ok(frequency);
-    }
-
-    Err(Error::Frequency)
+    Ok(sysclk)
 }
 
-/// Convert and validate frequency into frequency tuning word.
+/// Convert a frequency into a frequency tuning word.
 ///
 /// Arguments:
-/// * `dds_frequency` - The DDS frequency to be converted and validated.
-/// * `system_clock_frequency` - The system clock frequency of the AD9959 core.
+/// * `frequency` - The DDS output frequency in Hz. Must not exceed the Nyquist frequency.
+/// * `system_clock_frequency` - The system clock frequency of the AD9959 core in Hz.
 ///
 /// Returns:
 /// The corresponding frequency tuning word.
 pub fn frequency_to_ftw(
-    dds_frequency: f32,
+    frequency: f32,
     system_clock_frequency: f32,
-) -> Result<u32, Error> {
-    // Output frequency should not exceed the Nyquist's frequency.
-    if !(0.0..=(system_clock_frequency / 2.0)).contains(&dds_frequency) {
+) -> Result<Wrapping<i32>, Error> {
+    if !(0.0..=system_clock_frequency / 2.0).contains(&frequency) {
         return Err(Error::Bounds);
     }
-    // The function for channel frequency is `f_out = FTW * f_s / 2^32`, where FTW is the
-    // frequency tuning word and f_s is the system clock rate.
-    Ok(((dds_frequency / system_clock_frequency) * (1u64 << 32) as f32) as u32)
+    // `f_out = FTW * f_s / 2^32`
+    Ok(Wrapping(
+        ((frequency / system_clock_frequency) * (1u64 << 32) as f32) as u32
+            as i32,
+    ))
 }
 
-/// Convert the tuning word into frequency in Hz
+/// Convert a phase in turns into a phase offset word.
 ///
 /// Arguments:
-/// * `tuning_word` - The frequency tuning word to be converted
-///
-/// Returns:
-/// The corresponding frequency in Hz
-pub fn ftw_to_frequency(
-    tuning_word: u32,
-    system_clock_frequency: f32,
-) -> Result<f32, Error> {
-    Ok((tuning_word as f32 / 1u64.wrapping_shl(32) as f32)
-        * system_clock_frequency)
-}
-
-/// Convert phase into phase offset word.
-/// The returned word may have an error of 1 (i.e. 6e-5 turns) for netgative `phase_turns`
-/// Wraps around every 2*pi
-///
-/// Arguments:
-/// * `phase_turns` - The normalized number of phase turns of a DDS channel. Can be negative
+/// * `phase` - The phase in turns. May be negative, wraps modulo one turn.
 ///
 /// Returns:
 /// The corresponding phase offset word.
-pub fn phase_to_pow(phase_turns: f32) -> Result<u16, Error> {
-    Ok(((phase_turns * (1 << 14) as f32) as i16 & 0x3FFFi16) as u16)
+pub fn phase_to_pow(phase: f32) -> Wrapping<u14> {
+    Wrapping(u14::new(
+        ((phase * (1 << 14) as f32) as i32 & 0x3FFF) as u16,
+    ))
 }
 
-/// Convert phase offset word into turns
+/// Convert a normalized amplitude into an amplitude control register value.
 ///
 /// Arguments:
-/// * `pow` - The phase offset word of a DDS channel
+/// * `amplitude` - The normalized amplitude of a DDS channel in [0, 1].
 ///
 /// Returns:
-/// The corresponding normalized number of phase turns
-pub fn pow_to_phase(pow: u16) -> Result<f32, Error> {
-    Ok((pow as f32) / ((1 << 14) as f32))
-}
-
-/// Convert amplitude into amplitude control register values.
-///
-/// Arguments:
-/// * `amplitude` - The normalized amplitude of a DDS channel.
-///
-/// Returns:
-/// The corresponding value in the amplitude control register.
-pub fn amplitude_to_acr(amplitude: f32) -> Result<u32, Error> {
+/// The corresponding amplitude control register. A full-scale amplitude disables the
+/// amplitude multiplier.
+pub fn amplitude_to_acr(amplitude: f32) -> Result<Acr, Error> {
     if !(0.0..=1.0).contains(&amplitude) {
         return Err(Error::Bounds);
     }
-
-    let acr: u32 = *0u32
-        .set_bits(0..=9, ((amplitude * (1 << 10) as f32) as u32) & 0x3FF)
-        .set_bit(12, amplitude != 1.0);
-
-    Ok(acr as u32)
-}
-
-pub fn acr_to_amplitude(acr: u32) -> Result<f32, Error> {
-    if acr > 0x3FF {
-        return Err(Error::Bounds);
-    }
-
-    if (acr & 0x1000) == 0 {
-        Ok(1.0)
-    } else {
-        Ok((acr & 0x3FF) as f32 / (1 << 10) as f32)
-    }
+    let asf = (amplitude * (1 << 10) as f32) as u16;
+    Ok(match u10::try_new(asf) {
+        Ok(asf) => Acr::default().with_multiplier(true).with_asf(asf),
+        Err(_) => Acr::default().with_multiplier(false),
+    })
 }
 
 /// Represents a means of serializing a DDS profile for writing to a stream.
 pub struct ProfileSerializer {
+    mode: Mode,
+    // reorder or pad to work around https://github.com/japaric/heapless/issues/305
+    // TODO: check
     // heapless::Vec<u8, 32>, especially its extend_from_slice() is slow
-    data: [u8; 32],
     index: usize,
-    // make mode u32 to work around https://github.com/japaric/heapless/issues/305
-    mode: u32,
+    data: [u8; 32],
 }
 
 impl ProfileSerializer {
@@ -675,11 +575,11 @@ impl ProfileSerializer {
     ///
     /// # Args
     /// * `mode` - The communication mode of the DDS.
-    pub fn new(mode: Mode) -> Self {
+    pub const fn new(mode: Mode) -> Self {
         Self {
-            mode: mode as _,
-            data: [0; 32],
+            mode,
             index: 0,
+            data: [0; 32],
         }
     }
 
@@ -689,30 +589,31 @@ impl ProfileSerializer {
     /// * `channels` - A set of channels to apply the configuration to.
     /// * `ftw` - If provided, indicates a frequency tuning word for the channels.
     /// * `pow` - If provided, indicates a phase offset word for the channels.
-    /// * `acr` - If provided, indicates the amplitude control register for the channels. The ACR
-    ///   should be stored in the 3 LSB of the word. Note that if amplitude scaling is to be used,
-    ///   the "Amplitude multiplier enable" bit must be set.
+    /// * `acr` - If provided, indicates the amplitude control register for the channels.
     #[inline]
-    pub fn update_channels(
+    pub fn push(
         &mut self,
         channels: Channel,
-        ftw: Option<u32>,
-        pow: Option<u16>,
-        acr: Option<u32>,
+        ftw: Option<Wrapping<i32>>,
+        pow: Option<Wrapping<u14>>, // a-i v2: i14
+        acr: Option<Acr>,
     ) {
-        let csr = [self.mode as u8 | channels.bits()];
-        self.add_write(Register::CSR, &csr);
-
+        self.push_write(
+            Address::CSR,
+            &Csr::default()
+                .with_mode(self.mode)
+                .with_channel(channels)
+                .raw_value()
+                .to_be_bytes(),
+        );
         if let Some(ftw) = ftw {
-            self.add_write(Register::CFTW0, &ftw.to_be_bytes());
+            self.push_write(Address::CFTW0, &ftw.0.to_be_bytes());
         }
-
         if let Some(pow) = pow {
-            self.add_write(Register::CPOW0, &pow.to_be_bytes());
+            self.push_write(Address::CPOW0, &pow.0.value().to_be_bytes());
         }
-
         if let Some(acr) = acr {
-            self.add_write(Register::ACR, &acr.to_be_bytes()[1..]);
+            self.push_write(Address::ACR, &acr.raw_value().to_be_bytes());
         }
     }
 
@@ -722,55 +623,32 @@ impl ProfileSerializer {
     /// * `reference_clock_frequency` - The reference clock frequency provided to the AD9959 core.
     /// * `multiplier` - The frequency multiplier of the system clock. Must be 1 or 4-20.
     ///
+    /// # Returns
+    /// The new system clock frequency.
+    ///
     /// # Limitations
-    /// The correctness of the FR1 register setting code rely on FR1\[0:17\] staying 0.
+    /// A serializer cannot read back registers, so all other FR1 fields are
+    /// written as their defaults (which is also what [Ad9959::new] leaves them at).
     pub fn set_system_clock(
         &mut self,
         reference_clock_frequency: f32,
-        multiplier: u8,
+        multiplier: u5,
     ) -> Result<f32, Error> {
-        let frequency = reference_clock_frequency * multiplier as f32;
-
-        // The enabled channel will be updated after clock reconfig
-        let mut fr1 = [0u8; 3];
-
-        // The ad9959 crate does not modify FR1[0:17]. These bits keep their default value.
-        // These bits by default are 0.
-        // Reading the register then update is not possible to implement in a serializer, where
-        // many QSPI writes are performed in burst. Switching between read and write requires
-        // breaking the QSPI indirect write mode and switch into the QSPI indirect read mode.
-        fr1[0].set_bits(2..=6, multiplier);
-
-        // Frequencies within the VCO forbidden range (160e6, 255e6) are already rejected.
-        let vco_range = HIGH_GAIN_VCO_RANGE.contains(&frequency);
-        fr1[0].set_bit(7, vco_range);
-
-        self.add_write(Register::FR1, &fr1);
-        Ok(frequency)
+        let sysclk = validate_clocking(reference_clock_frequency, multiplier)?;
+        let fr1 = Fr1::default()
+            .with_pll_divier(multiplier)
+            .with_vco_high(sysclk >= VCO_HIGH_THRESHOLD);
+        self.push_write(Address::FR1, &fr1.raw_value().to_be_bytes());
+        Ok(sysclk)
     }
 
     /// Add a register write to the serialization data.
-    fn add_write(&mut self, register: Register, value: &[u8]) {
+    #[inline]
+    fn push_write(&mut self, register: Address, value: &[u8]) {
         let data = &mut self.data[self.index..];
         data[0] = register as u8;
-        data[1..][..value.len()].copy_from_slice(value);
-        self.index += value.len() + 1;
-    }
-
-    #[inline]
-    fn pad(&mut self) {
-        // Pad the buffer to 32-bit (4 byte) alignment by adding dummy writes to CSR and LSRR.
-        // In the case of 1 byte padding, this instead pads with 5 bytes as there is no
-        // valid single-byte write that could be used.
-        if self.index & 1 != 0 {
-            // Pad with 3 bytes
-            self.add_write(Register::LSRR, &[0, 0]);
-        }
-        if self.index & 2 != 0 {
-            // Pad with 2 bytes
-            self.add_write(Register::CSR, &[self.mode as _]);
-        }
-        debug_assert_eq!(self.index & 3, 0);
+        data[1..1 + value.len()].copy_from_slice(value);
+        self.index += 1 + value.len();
     }
 
     /// Get the serialized profile as a slice of 32-bit words.
@@ -783,7 +661,23 @@ impl ProfileSerializer {
     /// A slice of `u32` words representing the serialized profile.
     #[inline]
     pub fn finalize(&mut self) -> &[u32] {
-        self.pad();
+        // Pad the buffer to 32-bit (4 byte) alignment by adding dummy writes to CSR and LSRR.
+        // In the case of 1 byte padding, this instead pads with 5 bytes as there is no
+        // valid single-byte write that could be used.
+        if self.index & 1 != 0 {
+            // Pad with 3 bytes
+            self.push_write(Address::LSRR, &0u16.to_be_bytes());
+        }
+        if self.index & 2 != 0 {
+            // Pad with 2 bytes
+            self.push_write(
+                Address::CSR,
+                &Csr::default()
+                    .with_mode(self.mode)
+                    .raw_value()
+                    .to_be_bytes(),
+            );
+        }
         bytemuck::cast_slice(&self.data[..self.index])
     }
 }

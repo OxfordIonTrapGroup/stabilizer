@@ -1,0 +1,17 @@
+[package]
+name = "ad9912"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version = "0.1.1"
+description = "AD9912 1 GHz DDS SPI driver"
+authors = ["Robert Jördens <rj@quartiq.de>"]
+categories = ["embedded", "no-std"]
+keywords = ["spi"]
+
+[dependencies]
+arbitrary-int.workspace = true
+thiserror.workspace = true
+num-traits = { version = "0.2.19", default-features = false }
+embedded-hal = "1.0"
+bitbybit.workspace = true

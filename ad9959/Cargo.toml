@@ -1,16 +1,14 @@
 [package]
 name = "ad9959"
-version = "0.2.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version = "0.3.0"
 authors = ["Ryan Summers <ryan.summers@vertigo-designs.com>"]
-license = "MIT OR Apache-2.0"
-edition = "2018"
 description = "AD9959 4-channel DDS SPI driver"
-documentation = "https://docs.rs/ad9959/"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 embedded-hal = {version = "0.2.7", features = ["unproven"]}
-bit_field = "0.10.2"
-bytemuck = "1.14.0"
-bitflags = "2.4.2"
+bytemuck = "1.21.0"
+bitbybit.workspace = true
+arbitrary-int.workspace = true

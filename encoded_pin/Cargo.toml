@@ -1,0 +1,16 @@
+[package]
+name = "encoded_pin"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version = "0.1.0"
+description = "Binary encoded OutputPin, e.g. for encoded SPI chip select"
+authors = [
+	"Robert Jördens <rj@quartiq.de>",
+]
+categories = ["embedded", "no-std"]
+keywords = ["spi"]
+
+[dependencies]
+arbitrary-int.workspace = true
+embedded-hal = { version = "1.0" }

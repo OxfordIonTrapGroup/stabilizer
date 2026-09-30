@@ -1,232 +1,280 @@
 //! # Fibre Noise Cancellation
 //!
 //! Pounder samples the error signal input and mixes it down with a DDS at
-//! 2*aom_f (channel::TWO). It passes it to Stabilizer for digital filtering
-//! (normally a PI application) where it is read at a fixed rate. This is used
-//! to feedback back into the phase offset of the DDS channel::ONE at aom_f
-//! output through the Pounder. It currently only exposes CHANNEL 0 of the
-//! Pounder for maximising feedback bandwidth, but can be easily extended to
-//! expose both channels in the future if required and it proves sufficient
+//! 2*aom_f (IN0/IN1). It passes it to Stabilizer for digital filtering
+//! (normally a PI application) where it is read at a fixed rate. The filter
+//! output is integrated into the phase offset of the DDS output (OUT0/OUT1)
+//! at aom_f driving the AOM. Both Pounder channels are available as independent
+//! FNC channels.
 //!
-//! Currently samples at 195.3 kHz, i.e. once in 5.12 us
+//! Currently samples at 200 kHz, i.e. once in 5 µs.
 //!
 //! ## Features
 //! * up to 200 kHz rate, timed sampling
 //! * Run-time filter configuration
-//! * Input/Output data streaming
+//! * Input/phase offset data streaming
 //! * f32 IIR math
 //! * Generic biquad (second order) IIR filter
 //! * Anti-windup
 //! * Derivative kick avoidance
 //!
 //! ## Settings
-//! Refer to the [Settings] structure for documentation of run-time configurable settings for this
+//! Refer to the [Fnc] structure for documentation of run-time configurable settings for this
 //! application.
 //!
 //! ## Telemetry
-//! Refer to [Telemetry] for information about telemetry reported by this application.
+//! Refer to [stabilizer::telemetry::Telemetry] for information about telemetry reported by this
+//! application. Pounder telemetry is included.
 //!
-//! ## Livestreaming
-//! This application streams raw ADC and DAC data over UDP. Refer to
-//! [stabilizer::net::data_stream](../stabilizer/net/data_stream/index.html) for more information.
-#![deny(warnings)]
-#![no_std]
-#![no_main]
+//! ## Stream
+//! This application streams raw ADC samples and DDS phase offset words over UDP, using the
+//! [stream::Format::AdcDacData] format where the DAC codes are replaced by the 14 bit phase offset
+//! words of OUT0/OUT1. Refer to [stream] for more information.
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
 
-use core::mem::MaybeUninit;
-use core::sync::atomic::{fence, Ordering};
+use miniconf::Tree;
 
-use fugit::ExtU64;
-use mutex_trait::prelude::*;
+use idsp::iir::{self, pid::Units};
 
-use idsp::iir;
-
-use ad9959::phase_to_pow;
-
+use platform::{AppSettings, NetSettings};
+use serde::{Deserialize, Serialize};
 use stabilizer::{
-    app_utils::fnc::{Channel, PounderFncSettings},
-    hardware::{
-        self,
-        adc::{Adc0Input, Adc1Input, AdcCode},
-        afe::Gain,
-        hal,
-        pounder::attenuators::AttenuatorInterface,
-        timers::SamplingTimer,
-        DigitalInput0, DigitalInput1, SerialTerminal, SystemTimer, Systick,
-        UsbDevice, AFE0, AFE1,
-    },
-    net::{
-        data_stream::{FrameGenerator, StreamFormat, StreamTarget},
-        miniconf::Tree,
-        telemetry::{Telemetry, TelemetryBuffer},
-        NetworkState, NetworkUsers,
-    },
+    convert::{AdcCode, Gain},
+    fnc::PounderFncSettings,
 };
-
-const SCALE: f32 = i16::MAX as _;
 
 // The number of cascaded IIR biquads per channel. Select 1 or 2!
 const IIR_CASCADE_LENGTH: usize = 1;
 
 // The number of samples in each batch process
 //
-// It is possible to build a new ProfileBuilder for each buffered input, but it
-// reduces the sampling rate. With a common ProfileBuilder, the buffer size is then
-// limited to 1 for a bi-channel application else the QSPI stalls.
-//
-// This does not strictly need a DMA, but the right interrupt binding is needed otherwise
+// Each batch requires a DDS profile update over QSPI. Larger batches reduce
+// the phase update rate. Smaller sample periods stall the QSPI.
 const BATCH_SIZE: usize = 1;
 
 // The number of 100MHz timer ticks between each sample. Currently set to 5 us
 // corresponding to a 200 kHz sampling rate.
 const SAMPLE_TICKS: u32 = 500;
+const SAMPLE_PERIOD: f32 =
+    SAMPLE_TICKS as f32 * stabilizer::design_parameters::TIMER_PERIOD;
 
-#[derive(Clone, Copy, Debug, Tree)]
+// The filter input is in ADC units, the output is a phase increment in turns per sample.
+const UNITS: Units<f32> = Units {
+    t: SAMPLE_PERIOD,
+    x: AdcCode::VOLT_PER_LSB,
+    y: 1.0,
+};
+
+#[derive(Clone, Debug, Tree, Default)]
+#[tree(meta(doc, typename))]
 pub struct Settings {
-    /// Configure the Analog Front End (AFE) gain.
-    ///
-    /// # Path
-    /// `afe/<n>`
-    ///
-    /// * `<n>` specifies which channel to configure. `<n>` := [0, 1]
-    ///
-    /// # Value
-    /// Any of the variants of [Gain] enclosed in double quotes.
-    #[tree]
-    afe: [Gain; 2],
-
-    /// Configure the IIR filter parameters.
-    ///
-    /// # Path
-    /// `iir_ch/<n>/<m>`
-    ///
-    /// * `<n>` specifies which channel to configure. `<n>` := [0, 1]
-    /// * `<m>` specifies which cascade to configure. `<m>` := [0, 1], depending on [IIR_CASCADE_LENGTH]
-    ///
-    /// # Value
-    /// See [iir::IIR#Biquad]
-    #[tree(depth(2))]
-    iir_ch: [[iir::Biquad<f32>; IIR_CASCADE_LENGTH]; 2],
-
-    /// Specified true if DI1 should be used as a "hold" input.
-    ///
-    /// # Path
-    /// `allow_hold`
-    ///
-    /// # Value
-    /// "true" or "false"
-    allow_hold: bool,
-
-    /// Specified true if "hold" should be forced regardless of DI1 state and hold allowance.
-    ///
-    /// # Path
-    /// `force_hold`
-    ///
-    /// # Value
-    /// "true" or "false"
-    force_hold: bool,
-
-    /// Specifies the telemetry output period in seconds.
-    ///
-    /// # Path
-    /// `telemetry_period`
-    ///
-    /// # Value
-    /// Any non-zero value less than 65536.
-    telemetry_period: u16,
-
-    /// Specifies the target for data livestreaming.
-    ///
-    /// # Path
-    /// `stream_target`
-    ///
-    /// # Value
-    /// See [StreamTarget#miniconf]
-    stream_target: StreamTarget,
-
-    /// Specifies the config for pounder DDS clock configuration, DDS channels & attenuations
-    ///
-    /// # Path
-    /// `pounder`
-    ///
-    /// # Value
-    /// See [PounderConfig#miniconf]
-    #[tree(depth(2))]
-    pounder: [PounderFncSettings; 2],
+    fnc: Fnc,
+    net: NetSettings,
 }
 
-impl Default for Settings {
-    fn default() -> Self {
-        let mut i = iir::Biquad::IDENTITY;
-        i.set_min(-SCALE);
-        i.set_max(SCALE);
-
+impl AppSettings for Settings {
+    fn new(net: NetSettings) -> Self {
         Self {
-            // Analog frontend programmable gain amplifier gains (G1, G2, G5, G10)
-            afe: [Gain::G1, Gain::G1],
-            // IIR filter tap gains are an array `[b0, b1, b2, a1, a2]` such that the
-            // new output is computed as `y0 = a1*y1 + a2*y2 + b0*x0 + b1*x1 + b2*x2`.
-            // The array is `iir_state[channel-index][cascade-index][coeff-index]`.
-            // The IIR coefficients can be mapped to other transfer function
-            // representations, for example as described in https://arxiv.org/abs/1508.06319
-            iir_ch: [[i; IIR_CASCADE_LENGTH]; 2],
+            net,
+            fnc: Fnc::default(),
+        }
+    }
 
-            // Permit the DI1 digital input to suppress filter output updates.
-            allow_hold: false,
-            // Force suppress filter output updates.
-            force_hold: false,
-            // The default telemetry period in seconds.
-            telemetry_period: 10,
+    fn net(&self) -> &NetSettings {
+        &self.net
+    }
+}
 
-            stream_target: StreamTarget::default(),
-
-            // Pounder config initialisation
-            pounder: [
-                PounderFncSettings::new(Channel::ZERO),
-                PounderFncSettings::new(Channel::ONE),
-            ],
+impl serial_settings::Settings for Settings {
+    fn reset(&mut self) {
+        *self = Self {
+            fnc: Fnc::default(),
+            net: NetSettings::new(self.net.mac),
         }
     }
 }
 
-#[rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, LTDC, SDMMC])]
+#[derive(Clone, Debug, Tree)]
+#[tree(meta(doc, typename = "BiquadReprTree"))]
+pub struct BiquadRepr {
+    /// Biquad parameters
+    #[tree(rename="typ", typ="&str", with=miniconf::str_leaf, defer=self.repr)]
+    _typ: (),
+    repr: iir::repr::BiquadRepr<f32, f32>,
+}
+
+impl Default for BiquadRepr {
+    fn default() -> Self {
+        let mut i = iir::BiquadClamp::from(iir::Biquad::IDENTITY);
+        i.min = -i16::MAX as _;
+        i.max = i16::MAX as _;
+        Self {
+            _typ: (),
+            repr: iir::repr::BiquadRepr::Raw(i),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, Default)]
+pub enum Run {
+    #[default]
+    /// Run
+    Run,
+    /// Hold
+    Hold,
+    /// Hold controlled by corresponding digital input
+    External,
+}
+
+impl Run {
+    fn run(&self, di: bool) -> bool {
+        match self {
+            Self::Run => true,
+            Self::Hold => false,
+            Self::External => di,
+        }
+    }
+}
+
+/// An FNC channel: Pounder IN/OUT pair and ADC input
+#[derive(Clone, Debug, Tree, Default)]
+#[tree(meta(doc, typename))]
+pub struct Channel {
+    /// Analog Front End (AFE) gain.
+    #[tree(with=miniconf::leaf)]
+    gain: Gain,
+    /// Biquad
+    biquad: [BiquadRepr; IIR_CASCADE_LENGTH],
+    /// Run/Hold behavior
+    ///
+    /// On hold, the phase offset continues to advance at the last rate.
+    #[tree(with=miniconf::leaf)]
+    run: Run,
+    /// Pounder DDS and attenuator settings
+    pounder: PounderFncSettings,
+}
+
+impl Channel {
+    fn build(&self) -> Active {
+        Active {
+            state: Default::default(),
+            run: self.run,
+            biquad: self
+                .biquad
+                .each_ref()
+                .map(|biquad| biquad.repr.build(&UNITS)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Tree)]
+#[tree(meta(doc, typename))]
+pub struct Fnc {
+    /// Channel configuration
+    ch: [Channel; 2],
+    /// Telemetry output period in seconds.
+    #[tree(with=miniconf::leaf)]
+    telemetry_period: f32,
+    /// Target IP and port for UDP streaming.
+    ///
+    /// Can be multicast.
+    #[tree(with=miniconf::leaf)]
+    stream: stream::Target,
+}
+
+impl Default for Fnc {
+    fn default() -> Self {
+        Self {
+            telemetry_period: 10.0,
+            stream: Default::default(),
+            ch: Default::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Active {
+    run: Run,
+    biquad: [iir::BiquadClamp<f32, f32>; IIR_CASCADE_LENGTH],
+    state: [iir::DirectForm1<f32>; IIR_CASCADE_LENGTH],
+}
+
+#[cfg(not(target_os = "none"))]
+fn main() {
+    use miniconf::{json::to_json_value, json_schema::TreeJsonSchema};
+    let s = Settings::default();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&to_json_value(&s).unwrap()).unwrap()
+    );
+    let mut schema = TreeJsonSchema::new(Some(&s)).unwrap();
+    schema
+        .root
+        .insert("title".to_string(), "Stabilizer fnc".into());
+    println!("{}", serde_json::to_string_pretty(&schema.root).unwrap());
+}
+
+#[cfg(target_os = "none")]
+#[cfg_attr(target_os = "none", rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, LTDC, SDMMC]))]
 mod app {
-    use stabilizer::hardware::pounder;
-
     use super::*;
+    use arbitrary_int::u14;
+    use core::num::Wrapping;
+    use core::sync::atomic::{Ordering, fence};
+    use dsp_process::SplitProcess;
+    use fugit::ExtU32 as _;
+    use rtic_monotonics::Monotonic;
 
-    #[monotonic(binds = SysTick, default = true, priority = 2)]
-    type Monotonic = Systick;
+    use stabilizer::{
+        hardware::{
+            self, DigitalInput0, DigitalInput1, Pgia, SerialTerminal,
+            SystemTimer, Systick, UsbDevice,
+            adc::{Adc0Input, Adc1Input},
+            hal,
+            net::{NetworkState, NetworkUsers},
+            pounder::{self, PounderDevices, dds_output::DdsOutput},
+            setup::Mezzanine,
+            timers::SamplingTimer,
+        },
+        telemetry::TelemetryBuffer,
+    };
+    use stream::FrameGenerator;
+
+    /// Pounder (input, output) channels for each FNC channel
+    const CHANNELS: [(pounder::Channel, pounder::Channel); 2] = [
+        (pounder::Channel::In0, pounder::Channel::Out0),
+        (pounder::Channel::In1, pounder::Channel::Out1),
+    ];
 
     #[shared]
     struct Shared {
         usb: UsbDevice,
-        network: NetworkUsers<Settings, Telemetry, 3>,
+        network: NetworkUsers<Fnc>,
         settings: Settings,
+        active: [Active; 2],
         telemetry: TelemetryBuffer,
-        pounder: pounder::PounderDevices,
-        dds: pounder::dds_output::DdsOutput,
+        pounder: PounderDevices,
+        dds_output: DdsOutput,
     }
 
     #[local]
     struct Local {
-        usb_terminal: SerialTerminal,
+        usb_terminal: SerialTerminal<Settings>,
         sampling_timer: SamplingTimer,
         digital_inputs: (DigitalInput0, DigitalInput1),
-        afes: (AFE0, AFE1),
+        afes: [Pgia; 2],
         adcs: (Adc0Input, Adc1Input),
-        iir_state: [[[f32; 4]; IIR_CASCADE_LENGTH]; 2],
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
-        phase_offsets: [u16; 2],
     }
 
     #[init]
-    fn init(c: init::Context) -> (Shared, Local, init::Monotonics) {
-        let clock = SystemTimer::new(|| monotonics::now().ticks() as u32);
+    fn init(c: init::Context) -> (Shared, Local) {
+        let clock = SystemTimer::new(|| Systick::now().ticks());
 
         // Configure the microcontroller
-        let (stabilizer, pounder) = hardware::setup::setup(
+        let (stabilizer, mezzanine, _eem) = hardware::setup::setup::<Settings>(
             c.core,
             c.device,
             clock,
@@ -234,52 +282,42 @@ mod app {
             SAMPLE_TICKS,
         );
 
-        let device_settings = stabilizer.usb_serial.settings();
-        let application_settings = Settings::default();
-
-        let mut pounder =
-            pounder.expect("Fibre noise cancellation requires a Pounder");
-
-        application_settings.pounder.iter().for_each(|p| {
-            p.set_all_dds(&mut pounder)
-                .unwrap_or_else(|_| log::warn!("Failed to update Pounder DDS"));
-        });
+        let Mezzanine::Pounder(pounder) = mezzanine else {
+            panic!("Fibre noise cancellation requires a Pounder");
+        };
 
         let mut network = NetworkUsers::new(
-            stabilizer.net.stack,
-            stabilizer.net.phy,
+            stabilizer.network_devices.stack,
+            stabilizer.network_devices.phy,
             clock,
             env!("CARGO_BIN_NAME"),
-            &device_settings.broker,
-            &device_settings.id,
+            &stabilizer.settings.net,
             stabilizer.metadata,
-            application_settings,
         );
 
-        let generator = network.configure_streaming(StreamFormat::AdcDacData);
+        let generator = network.configure_streaming(stream::Format::AdcDacData);
 
         let shared = Shared {
             usb: stabilizer.usb,
             network,
-            settings: application_settings,
+            active: stabilizer.settings.fnc.ch.each_ref().map(|a| a.build()),
             telemetry: TelemetryBuffer::default(),
-            dds: pounder.dds_output,
+            settings: stabilizer.settings,
             pounder: pounder.pounder,
+            dds_output: pounder.dds_output,
         };
 
         let mut local = Local {
             usb_terminal: stabilizer.usb_serial,
-            sampling_timer: stabilizer.adc_dac_timer,
+            sampling_timer: stabilizer.sampling_timer,
             digital_inputs: stabilizer.digital_inputs,
             afes: stabilizer.afes,
             adcs: stabilizer.adcs,
-            iir_state: [[[0.; 4]; IIR_CASCADE_LENGTH]; 2],
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
-            phase_offsets: [0u16; 2],
         };
 
-        // Enable ADC/DAC events
+        // Enable ADC events
         local.adcs.0.start();
         local.adcs.1.start();
 
@@ -288,150 +326,127 @@ mod app {
         telemetry::spawn().unwrap();
         ethernet_link::spawn().unwrap();
         usb::spawn().unwrap();
-        start::spawn_after(100.millis()).unwrap();
+        start::spawn().unwrap();
 
-        (shared, local, init::Monotonics(stabilizer.systick))
+        (shared, local)
     }
 
     #[task(priority = 1, local=[sampling_timer])]
-    fn start(c: start::Context) {
-        // Start sampling ADCs and DACs.
+    async fn start(c: start::Context) {
+        Systick::delay(100.millis()).await;
+        // Start sampling ADCs.
         c.local.sampling_timer.start();
     }
 
     /// Main DSP processing routine.
     ///
-    /// # Note
-    /// Processing time for the DSP application code is bounded by the following constraints:
+    /// See `dual-iir` for general notes on processing time and timing.
     ///
-    /// DSP application code starts after the ADC has generated a batch of samples and must be
-    /// completed by the time the next batch of ADC samples has been acquired (plus the FIFO buffer
-    /// time). If this constraint is not met, firmware will panic due to an ADC input overrun.
-    ///
-    /// The DSP application code must also fill out the next DAC output buffer in time such that the
-    /// DAC can switch to it when it has completed the current buffer. If this constraint is not met
-    /// it's possible that old DAC codes will be generated on the output and the output samples will
-    /// be delayed by 1 batch.
-    ///
-    /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
-    /// the same time bounds, meeting one also means the other is also met.
-    #[task(binds=DMA1_STR4, local=[digital_inputs, adcs, iir_state, generator, phase_offsets], shared=[settings, telemetry, dds], priority=3)]
-    #[link_section = ".itcm.process"]
+    /// The filter output of each channel is a phase increment (in turns) that is accumulated into
+    /// the phase offset of the respective Pounder output DDS channel.
+    #[task(
+        binds=DMA1_STR4,
+        local=[digital_inputs, adcs, generator, phase: [u16; 2] = [0; 2]],
+        shared=[active, telemetry, dds_output],
+        priority=3)]
+    #[unsafe(link_section = ".itcm.process")]
     fn process(c: process::Context) {
         let process::SharedResources {
-            settings,
+            active,
             telemetry,
-            dds,
+            dds_output,
+            ..
         } = c.shared;
 
         let process::LocalResources {
             digital_inputs,
             adcs: (adc0, adc1),
-            iir_state,
             generator,
-            phase_offsets,
+            phase,
+            ..
         } = c.local;
 
-        (settings, telemetry, dds).lock(|settings, telemetry, dds| {
-            let digital_inputs =
-                [digital_inputs.0.is_high(), digital_inputs.1.is_high()];
-            telemetry.digital_inputs = digital_inputs;
+        (active, telemetry, dds_output).lock(
+            |active, telemetry, dds_output| {
+                let di =
+                    [digital_inputs.0.is_high(), digital_inputs.1.is_high()];
+                telemetry.digital_inputs = di;
 
-            let hold = settings.force_hold
-                || (digital_inputs[1] && settings.allow_hold);
+                (adc0, adc1).lock(|adc0, adc1| {
+                    // Preserve instruction and data ordering w.r.t. DMA flag access before and after.
+                    fence(Ordering::SeqCst);
+                    let adc: [&[u16; BATCH_SIZE]; 2] = [
+                        (**adc0).try_into().unwrap(),
+                        (**adc1).try_into().unwrap(),
+                    ];
+                    let mut pow = [[0u16; BATCH_SIZE]; 2];
 
-            let mut dds_profile = dds.builder();
-            let mut phase_offset_codes = [[0u16; BATCH_SIZE]; 2];
-
-            (adc0, adc1).lock(|adc0, adc1| {
-                let adc_samples = [adc0, adc1];
-
-                // Preserve instruction and data ordering w.r.t. DMA flag access.
-                fence(Ordering::SeqCst);
-
-                for (channel_idx, (phase_offset, dds_channel)) in phase_offsets
-                    .iter_mut()
-                    .zip([pounder::Channel::Out0, pounder::Channel::Out1])
-                    .enumerate()
-                {
-                    for (dma_idx, ai) in
-                        adc_samples[channel_idx].iter().enumerate()
+                    let mut builder = dds_output.builder();
+                    for (((((adc, pow), active), phase), di), (_, out)) in adc
+                        .into_iter()
+                        .zip(pow.iter_mut())
+                        .zip(active.iter_mut())
+                        .zip(phase.iter_mut())
+                        .zip(di)
+                        .zip(CHANNELS)
                     {
-                        let power_in = f32::from(*ai as i16);
+                        for (adc, pow) in adc.iter().zip(pow.iter_mut()) {
+                            let x = f32::from(*adc as i16);
+                            let y = active
+                                .biquad
+                                .iter()
+                                .zip(active.state.iter_mut())
+                                .fold(x, |y, (ch, state)| {
+                                    if active.run.run(di) {
+                                        ch.process(state, y)
+                                    } else {
+                                        iir::Biquad::<f32>::HOLD
+                                            .process(state, y)
+                                    }
+                                });
 
-                        let iir_out = settings.iir_ch[channel_idx]
-                            .iter()
-                            .zip(iir_state[channel_idx].iter_mut())
-                            .fold(power_in, |iir_accumulator, (ch, state)| {
-                                let filter =
-                                    if hold { &iir::Biquad::HOLD } else { ch };
-                                filter.update(state, iir_accumulator)
-                            });
-
-                        *phase_offset = (*phase_offset
-                            + phase_to_pow(iir_out).unwrap_or(0u16))
-                            & 0x3FFFu16;
-
-                        dds_profile
-                            .update_channels(
-                                dds_channel.into(),
-                                None,
-                                Some(*phase_offset),
-                                None,
-                            )
-                            .write();
-
-                        phase_offset_codes[channel_idx][dma_idx] =
-                            *phase_offset;
+                            *phase = phase.wrapping_add(
+                                ad9959::phase_to_pow(y).0.value(),
+                            ) & 0x3FFF;
+                            *pow = *phase;
+                        }
+                        builder.push(
+                            out.into(),
+                            None,
+                            Some(Wrapping(u14::new(*phase))),
+                            None,
+                        );
                     }
-                }
+                    dds_output.write(builder);
 
-                const N: usize = BATCH_SIZE * core::mem::size_of::<u16>();
+                    telemetry.adcs = [AdcCode(adc[0][0]), AdcCode(adc[1][0])];
 
-                generator.add(|buf| {
-                    for (data, buf) in
-                        adc_samples.iter().zip(buf.chunks_exact_mut(N))
-                    {
-                        let data = unsafe {
-                            core::slice::from_raw_parts(
-                                data.as_ptr() as *const MaybeUninit<u8>,
-                                N,
-                            )
-                        };
-                        buf.copy_from_slice(data)
-                    }
-                    for (data, buf) in phase_offset_codes
-                        .iter()
-                        .zip(buf.chunks_exact_mut(N).skip(adc_samples.len()))
-                    {
-                        let data = unsafe {
-                            core::slice::from_raw_parts(
-                                data.as_ptr() as *const MaybeUninit<u8>,
-                                N,
-                            )
-                        };
-                        buf.copy_from_slice(data)
-                    }
+                    const N: usize = BATCH_SIZE * size_of::<u16>();
+                    generator.add(|buf| {
+                        [adc[0], adc[1], &pow[0], &pow[1]]
+                            .into_iter()
+                            .zip(buf.chunks_exact_mut(N))
+                            .map(|(data, buf)| {
+                                buf.copy_from_slice(bytemuck::cast_slice(data))
+                            })
+                            .count()
+                            * N
+                    });
 
-                    // N bytes each for both adc_samples and phase_offsets over two channels
-                    N * 4
+                    fence(Ordering::SeqCst);
                 });
-
-                // Update telemetry measurements.
-                telemetry.adcs =
-                    [AdcCode(adc_samples[0][0]), AdcCode(adc_samples[1][0])];
-
-                fence(Ordering::SeqCst);
-            });
-        });
+            },
+        );
     }
 
-    #[idle(shared=[network, usb])]
+    #[idle(shared=[network, settings, usb])]
     fn idle(mut c: idle::Context) -> ! {
         loop {
-            match c.shared.network.lock(|net| net.update()) {
-                NetworkState::SettingsChanged(_path) => {
-                    settings_update::spawn().unwrap()
+            match (&mut c.shared.network, &mut c.shared.settings)
+                .lock(|net, settings| net.update(&mut settings.fnc))
+            {
+                NetworkState::SettingsChanged => {
+                    settings_update::spawn().unwrap();
                 }
                 NetworkState::Updated => {}
                 NetworkState::NoChange => {
@@ -447,116 +462,129 @@ mod app {
         }
     }
 
-    /// Update the settings of the application.
-    #[task(priority = 1, local=[afes], shared=[network, settings, pounder, dds])]
-    fn settings_update(mut c: settings_update::Context) {
-        let incoming_settings =
-            c.shared.network.lock(|net| *net.miniconf.settings());
-        c.shared
-            .settings
-            .lock(|current| *current = incoming_settings);
+    #[task(priority = 1, local=[afes], shared=[network, settings, active, pounder, dds_output])]
+    async fn settings_update(mut c: settings_update::Context) {
+        c.shared.settings.lock(|settings| {
+            c.local.afes[0].set_gain(settings.fnc.ch[0].gain);
+            c.local.afes[1].set_gain(settings.fnc.ch[1].gain);
 
-        // Update AFE gains.
-        c.local.afes.0.set_gain(incoming_settings.afe[0]);
-        c.local.afes.1.set_gain(incoming_settings.afe[1]);
-
-        // Update DDS outputs and waveforms.
-        // Testing shows that DDS and attenuation updates can be VERY slow. The duration
-        // of each lock below should be minimized to allow interruptions by the process
-        // task so as to avoid a DMA overflow.
-        for pounder_setting in incoming_settings.pounder.iter() {
-            // DDS update.
-            let (ftw_in, acr_in, ftw_out, acr_out) =
-                pounder_setting.get_dds_words().unwrap_or_else(|err| {
-                    log::warn!("Failed to update Pounder DDS: {:#?}", err);
-                    (0, 0, 0, 0)
-                });
-            let (in_ch, out_ch) = pounder_setting.channel.into();
-
-            c.shared.dds.lock(|dds| {
-                let mut dds_builder = dds.builder();
-                dds_builder.update_channels(
-                    in_ch.into(),
-                    Some(ftw_in),
-                    None,
-                    Some(acr_in),
-                );
-                dds_builder
-                    .update_channels(
-                        out_ch.into(),
-                        Some(ftw_out),
-                        None,
-                        Some(acr_out),
-                    )
-                    .write();
+            let b = settings.fnc.ch.each_ref().map(|ch| {
+                (ch.run, ch.biquad.each_ref().map(|b| b.repr.build(&UNITS)))
+            });
+            c.shared.active.lock(|active| {
+                for (a, b) in active.iter_mut().zip(b) {
+                    (a.run, a.biquad) = b;
+                }
             });
 
-            // Attenuation updates.
-            for (ch, attn) in [in_ch, out_ch].iter().zip(
-                [
-                    pounder_setting.attenuation_in,
-                    pounder_setting.attenuation_out,
-                ]
-                .iter(),
-            ) {
-                c.shared.pounder.lock(|pounder| {
-                    pounder.set_attenuation(*ch, *attn).unwrap_or_else(|_| {
-                        log::warn!("Failed to update Pounder attenuation");
-                        31.5
-                    });
-                });
-            }
-        }
+            // DDS and in particular attenuator updates are slow. Keep the locks short to
+            // allow `process` to preempt.
+            for (ch, (inp, out)) in settings.fnc.ch.iter().zip(CHANNELS) {
+                match ch.pounder.dds_words() {
+                    Ok([(ftw_in, acr_in), (ftw_out, acr_out)]) => {
+                        c.shared.dds_output.lock(|dds_output| {
+                            let mut builder = dds_output.builder();
+                            builder.push(
+                                inp.into(),
+                                Some(ftw_in),
+                                None,
+                                Some(acr_in),
+                            );
+                            builder.push(
+                                out.into(),
+                                Some(ftw_out),
+                                None,
+                                Some(acr_out),
+                            );
+                            dds_output.write(builder);
+                        });
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to update Pounder DDS: {:?}", err)
+                    }
+                }
 
-        let target = incoming_settings.stream_target.into();
-        c.shared.network.lock(|net| net.direct_stream(target));
+                for (channel, attenuation) in [
+                    (inp, ch.pounder.attenuation_in),
+                    (out, ch.pounder.attenuation_out),
+                ] {
+                    c.shared.pounder.lock(|pounder| {
+                        if let Err(err) =
+                            pounder.set_attenuation(channel, attenuation)
+                        {
+                            log::warn!(
+                                "Failed to update Pounder attenuation: {:?}",
+                                err
+                            );
+                        }
+                    });
+                }
+            }
+
+            c.shared
+                .network
+                .lock(|net| net.direct_stream(settings.fnc.stream));
+        });
     }
 
     #[task(priority = 1, shared=[network, settings, telemetry, pounder], local=[cpu_temp_sensor])]
-    fn telemetry(mut c: telemetry::Context) {
-        let telemetry: TelemetryBuffer =
-            c.shared.telemetry.lock(|telemetry| *telemetry);
+    async fn telemetry(mut c: telemetry::Context) -> ! {
+        loop {
+            let telemetry =
+                c.shared.telemetry.lock(|telemetry| telemetry.clone());
 
-        let (gains, telemetry_period, pounder_telemetry) =
-            (c.shared.settings, c.shared.pounder).lock(|settings, pounder| {
-                (
-                    settings.afe,
-                    settings.telemetry_period,
-                    pounder.get_telemetry(),
-                )
-            });
+            let (gains, telemetry_period) =
+                c.shared.settings.lock(|settings| {
+                    (
+                        settings.fnc.ch.each_ref().map(|ch| ch.gain),
+                        settings.fnc.telemetry_period,
+                    )
+                });
 
-        c.shared.network.lock(|net| {
-            net.telemetry.publish(&telemetry.finalize(
+            let mut telemetry = telemetry.finalize(
                 gains[0],
                 gains[1],
                 c.local.cpu_temp_sensor.get_temperature().unwrap(),
-                Some(pounder_telemetry),
-            ))
-        });
+            );
+            telemetry.pounder =
+                Some(c.shared.pounder.lock(|pounder| pounder.get_telemetry()));
 
-        // Schedule the telemetry task in the future.
-        telemetry::Monotonic::spawn_after((telemetry_period as u64).secs())
-            .unwrap();
+            c.shared.network.lock(|net| {
+                net.telemetry.publish_telemetry("/telemetry", &telemetry)
+            });
+
+            Systick::delay(((telemetry_period * 1000.0) as u32).millis()).await;
+        }
     }
 
-    #[task(priority = 1, shared=[usb], local=[usb_terminal])]
-    fn usb(mut c: usb::Context) {
-        // Handle the USB serial terminal.
-        c.shared.usb.lock(|usb| {
-            usb.poll(&mut [c.local.usb_terminal.interface_mut().inner_mut()]);
-        });
+    #[task(priority = 1, shared=[usb, settings], local=[usb_terminal])]
+    async fn usb(mut c: usb::Context) -> ! {
+        loop {
+            // Handle the USB serial terminal.
+            c.shared.usb.lock(|usb| {
+                usb.poll(&mut [c
+                    .local
+                    .usb_terminal
+                    .interface_mut()
+                    .inner_mut()]);
+            });
 
-        c.local.usb_terminal.process().unwrap();
+            c.shared.settings.lock(|settings| {
+                if c.local.usb_terminal.poll(settings).unwrap() {
+                    settings_update::spawn().unwrap()
+                }
+            });
 
-        // Schedule to run this task every 10 milliseconds.
-        usb::spawn_after(10u64.millis()).unwrap();
+            Systick::delay(10.millis()).await;
+        }
     }
 
     #[task(priority = 1, shared=[network])]
-    fn ethernet_link(mut c: ethernet_link::Context) {
-        c.shared.network.lock(|net| net.processor.handle_link());
-        ethernet_link::Monotonic::spawn_after(1.secs()).unwrap();
+    async fn ethernet_link(mut c: ethernet_link::Context) -> ! {
+        loop {
+            c.shared.network.lock(|net| net.processor.handle_link());
+            Systick::delay(1.secs()).await;
+        }
     }
 
     #[task(binds = ETH, priority = 1)]
@@ -572,15 +600,5 @@ mod app {
     #[task(binds = SPI3, priority = 4)]
     fn spi3(_: spi3::Context) {
         panic!("ADC1 SPI error");
-    }
-
-    #[task(binds = SPI4, priority = 4)]
-    fn spi4(_: spi4::Context) {
-        panic!("DAC0 SPI error");
-    }
-
-    #[task(binds = SPI5, priority = 4)]
-    fn spi5(_: spi5::Context) {
-        panic!("DAC1 SPI error");
     }
 }

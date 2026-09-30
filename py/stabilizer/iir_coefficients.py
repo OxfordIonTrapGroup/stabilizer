@@ -6,19 +6,17 @@ Authors:
     Robert Jördens, QUARTIQ
 
 Description: Algorithms to generate biquad (second order IIR) coefficients.
+
+All functions return `[b0, b1, b2, a1, a2]` such that
+`y0 = b0*x0 + b1*x1 + b2*x2 + a1*y1 + a2*y2`, the convention used by `idsp`
+for the `Raw` biquad representation (`ba`) of `dual-iir` and `fnc`.
+
+Note that `dual-iir` also supports designing filters on-device via its `Pid`
+and `Filter` biquad representations.
 """
-import argparse
-import asyncio
 import collections
-import logging
 
 from math import pi, inf
-
-import miniconf
-
-import stabilizer
-
-logger = logging.getLogger(__name__)
 
 # Disable pylint warnings about a0, b1 etc
 #pylint: disable=invalid-name
@@ -57,7 +55,7 @@ def add_argument(*args, **kwargs):
 #       may be accessed via their name. E.g. `args.K`.
 #
 #     Returns:
-#       [b0, b1, b2, -a1, -a2] IIR coefficients to be programmed into a
+#       [b0, b1, b2, a1, a2] IIR coefficients to be programmed into a
 #       Stabilizer IIR filter configuration.
 Filter = collections.namedtuple(
     "Filter", ["help", "arguments", "coefficients"])
@@ -141,7 +139,7 @@ def lowpass_coefficients(args):
     b0 = args.K * (f0_bar / (1 + f0_bar))
     b1 = args.K * f0_bar / (1 + f0_bar)
 
-    return [b0, b1, 0, -a1, 0]
+    return [b0, b1, 0, a1, 0]
 
 
 def highpass_coefficients(args):
@@ -152,7 +150,7 @@ def highpass_coefficients(args):
     b0 = args.K / (1 + f0_bar)
     b1 = - args.K / (1 + f0_bar)
 
-    return [b0, b1, 0, -a1, 0]
+    return [b0, b1, 0, a1, 0]
 
 
 def allpass_coefficients(args):
@@ -164,7 +162,7 @@ def allpass_coefficients(args):
     b0 = args.K * (1 - f0_bar) / (1 + f0_bar)
     b1 = - args.K
 
-    return [b0, b1, 0, -a1, 0]
+    return [b0, b1, 0, a1, 0]
 
 
 def notch_coefficients(args):
@@ -179,7 +177,7 @@ def notch_coefficients(args):
     b1 = - (2 * args.K * (1 - f0_bar ** 2)) / denominator
     b2 = args.K * (1 + f0_bar ** 2) / denominator
 
-    return [b0, b1, b2, -a1, -a2]
+    return [b0, b1, b2, a1, a2]
 
 
 def pid_coefficients(args):
@@ -216,116 +214,4 @@ def pid_coefficients(args):
     b = [i/a[0] for i in b]
     a = [i/a[0] for i in a]
     assert a[0] == 1
-    return b + [ai for ai in a[1:]]
-
-
-def _main():
-    parser = argparse.ArgumentParser(
-        description="Configure Stabilizer dual-iir filter parameters."
-                    "Note: This script assumes an AFE input gain of 1.")
-    parser.add_argument('-v', '--verbose', action='count', default=0,
-                        help='Increase logging verbosity')
-    parser.add_argument("--broker", "-b", type=str, default="10.255.6.4",
-                        help="The MQTT broker to use to communicate with "
-                        "Stabilizer. Default: (%(default)s)")
-    parser.add_argument("--prefix", "-p", type=str,
-                        default="dt/sinara/dual-iir/+",
-                        help="The Stabilizer device prefix in MQTT, "
-                        "wildcards allowed as long as the match is unique "
-                        "Default: (%(default)s)")
-    parser.add_argument("--no-discover", "-d", action="store_true",
-                        help="Do not discover Stabilizer device prefix.")
-
-    parser.add_argument("--channel", "-c", type=int, choices=[0, 1],
-                        required=True, help="The filter channel to configure.")
-    parser.add_argument("--sample-period", type=float,
-                        default=stabilizer.SAMPLE_PERIOD,
-                        help="Sample period in seconds. "
-                        "Default: (%(default)s s)")
-
-    parser.add_argument("--x-offset", type=float, default=0,
-                        help="The channel input offset (%(default)s V)")
-    parser.add_argument("--y-min", type=float,
-                        default=-stabilizer.DAC_FULL_SCALE,
-                        help="The channel minimum output (%(default)s V)")
-    parser.add_argument("--y-max", type=float,
-                        default=stabilizer.DAC_FULL_SCALE,
-                        help="The channel maximum output (%(default)s V)")
-    parser.add_argument("--y-offset", type=float, default=0,
-                        help="The channel output offset (%(default)s V)")
-    parser.add_argument("--aom-frequency", "-f", type=float, default=80e3,
-                        help="Aom centre frequency (%(default)s Hz) ")
-    parser.add_argument("--attn-out", type=float, default=0.5,
-                        help="Output attenuation (%(default)s dB) ")
-    parser.add_argument("--attn-in", type=float, default=0.5,
-                        help="Input attenuation (%(default)s dB) ")
-
-    # Next, add subparsers and their arguments.
-    subparsers = parser.add_subparsers(
-        help="Filter-specific design parameters", dest="filter_type",
-        required=True)
-
-    filters = get_filters()
-
-    for (filter_name, filt) in filters.items():
-        subparser = subparsers.add_parser(filter_name, help=filt.help)
-        for arg in filt.arguments:
-            subparser.add_argument(*arg.positionals, **arg.keywords)
-
-    args = parser.parse_args()
-
-    logging.basicConfig(
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-        level=logging.WARN - 10*args.verbose)
-
-    # Calculate the IIR coefficients for the filter.
-    coefficients = filters[args.filter_type].coefficients(args)
-
-    # The feed-forward gain of the IIR filter is the summation
-    # of the "b" components of the filter.
-    forward_gain = sum(coefficients[:3])
-    if forward_gain == 0 and args.x_offset != 0:
-        logger.warning("Filter has no DC gain but x_offset is non-zero")
-
-    if not (0.5 <= args.attn_out <= 31.5):
-        logger.warning("Output attenuation out of range, setting to default 0.5 dB")
-        args.attn_out = 0.5
-    if not (0.5 <= args.attn_in <= 31.5):
-        logger.warning("Input attenuation out of range, setting to default 0.5 dB")
-        args.attn_in = 0.5
-
-    if args.no_discover:
-        prefix = args.prefix
-    else:
-        devices = asyncio.run(miniconf.discover(args.broker, args.prefix))
-        if not devices:
-            raise ValueError("No prefixes discovered.")
-        if len(devices) > 1:
-            raise ValueError(f"Multiple prefixes discovered ({devices})."
-                             "Please specify a more specific --prefix")
-        prefix = devices.pop()
-        logger.info("Automatically using detected device prefix: %s", prefix)
-
-    async def configure():
-        logger.info("Connecting to broker")
-        interface = await miniconf.Miniconf.create(prefix, args.broker)
-
-        # Set the filter coefficients.
-        # Note: In the future, we will need to Handle higher-order cascades.
-        await interface.set(f"/iir_ch/{args.channel}/0", {
-            "ba": coefficients,
-            "u": stabilizer.voltage_to_machine_units(
-                args.y_offset + forward_gain * args.x_offset),
-            "min": stabilizer.voltage_to_machine_units(args.y_min),
-            "max": stabilizer.voltage_to_machine_units(args.y_max),
-        }, retain=True)
-        await interface.set(f"/aom_centre_f", args.aom_frequency, retain=True)
-
-        await interface.set(f"/output_attenuation", args.attn_out, retain=True)
-        await interface.set(f"/input_attenuation", args.attn_in, retain=True)
-
-    asyncio.run(configure())
-
-
-if __name__ == "__main__":
-    _main()
+    return b + [-ai for ai in a[1:]]
