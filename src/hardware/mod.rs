@@ -5,6 +5,7 @@ pub use stm32h7xx_hal as hal;
 
 pub mod adc;
 pub mod afe;
+pub mod aux_dac;
 pub mod cpu_temp_sensor;
 pub mod dac;
 pub mod delay;

@@ -36,6 +36,7 @@
 //! * Runtime IIR filter configuration
 //! * Harmonic feedforward (up to `MAX_HARMONICS`)
 //! * Optional DC offset via Current Sense DAC
+//! * Feedback offset current via auxiliary (MCU-internal) DAC output 0
 //! * Ethernet UDP data streaming (ADC + DAC)
 //! * Telemetry publishing
 //! * Deterministic DMA-driven timing
@@ -50,6 +51,7 @@
 //! - Harmonic amplitudes and phases
 //! - PLL time constants
 //! - Current sense DAC offset
+//! - Feedback offset current
 //!
 //! ## Telemetry
 //! Refer to [`Telemetry`] for information about reported measurements.
@@ -90,6 +92,7 @@ use stabilizer::{
         
         adc::{Adc0Input, Adc1Input, AdcCode},
         afe::Gain,
+        aux_dac::{AuxDac0, AuxDacOutput},
         dac::{Dac0Output, Dac1Output, DacCode},
         hal,
         input_stamper::InputStamper,
@@ -142,6 +145,10 @@ const SAMPLE_PERIOD: f32 =
 
 // Nominal mains frequency (Hz).
 const MAINS_FREQUENCY: f32 = 50.0;
+
+// Feedback offset current per auxiliary DAC output voltage (A/V), fixed by the current sense
+// board design (independent of the shunt chosen for the particular application).
+const FB_OFFSET_CURRENT_PER_VOLT: f32 = 0.0235;
 
 // Maximum number of harmonics used in feedforward control.
 const MAX_HARMONICS: usize = 5;
@@ -260,6 +267,19 @@ pub struct Settings{
     /// Voltage in volts (clamped internally to Current Sense DAC range)
     v_offset: f32,
 
+    /// Feedback offset current, generated from auxiliary DAC output 0.
+    ///
+    /// The auxiliary DAC output voltage is converted to a current at
+    /// [FB_OFFSET_CURRENT_PER_VOLT] by the current sense board, giving a range of
+    /// 0 to ~48 mA for the 0 V to 2.048 V DAC output range.
+    ///
+    /// # Path
+    /// `fb_offset`
+    ///
+    /// # Value
+    /// Current in amperes (clamped to the output range).
+    fb_offset: f32,
+
     /// Mains PLL time constants.
     ///
     /// # Path
@@ -305,7 +325,10 @@ impl Default for Settings{
 
             // No DC offset
             v_offset: 0.0,
-            
+
+            // 11 mA feedback offset current.
+            fb_offset: 0.011,
+
             // Frequency and phase settling time (log2 timestamp timer ticks):
             // 2^24 ticks ≈ 168 ms and 2^23 ticks ≈ 84 ms at 100 MHz.
             //
@@ -378,6 +401,8 @@ mod app {
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
         /// Optional Current Sense DAC driver (present if board detected).
         current_sense_dac: Option<CurrentSenseDac>,
+        /// Auxiliary DAC output setting the feedback offset current.
+        aux_dac: AuxDac0,
         /// Reciprocal PLL tracking the mains reference from TIM5 timestamps.
         pll: RPLL,
         /// Last accepted mains timestamp (TIM5 capture), used for glitch rejection.
@@ -468,6 +493,13 @@ mod app {
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
             current_sense_dac,
+            aux_dac: {
+                // Set the initial output before enabling to avoid glitching through 0 V. Aux DAC 1
+                // is not used by the current sense board, so is left disabled.
+                let mut dac = stabilizer.aux_dacs.0;
+                dac.set_voltage(application_settings.fb_offset / FB_OFFSET_CURRENT_PER_VOLT);
+                dac.enable()
+            },
             pll: RPLL::new(PLL_DT2),
             last_ts: None,
         };
@@ -720,10 +752,10 @@ mod app {
     // Responsibilities:
     // - Pull the latest settings from the network-miniconf
     // - Update local copy of settings
-    // - Apply hardware changes (AFE gains, Current Sense DAC)
+    // - Apply hardware changes (AFE gains, Current Sense DAC, feedback offset aux DAC)
     // - Reconfigure harmonic DDS generators (phases are made relative to fundamental)
     // - Update livestream target
-    #[task(priority = 1, local=[afes, current_sense_dac], shared=[network, settings, harmonic_generators])]
+    #[task(priority = 1, local=[afes, current_sense_dac, aux_dac], shared=[network, settings, harmonic_generators])]
     fn settings_update(mut c: settings_update::Context) {
         // Read configuration from network miniconf and store in shared settings.
         let mut settings = c.shared.network.lock(|net| *net.miniconf.settings());
@@ -748,7 +780,10 @@ mod app {
         if let Some(dac) = c.local.current_sense_dac.as_mut() {
             dac.write_voltage(settings.v_offset);
         }
-        
+
+        // Apply feedback offset current via the auxiliary DAC.
+        c.local.aux_dac.set_voltage(settings.fb_offset / FB_OFFSET_CURRENT_PER_VOLT);
+
         // Update harmonic DDS generators.
         // Phases in the UI are specified in degrees. We convert them to cycles
         // (0.0..1.0) and make each harmonic phase relative to the fundamental

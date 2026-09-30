@@ -16,7 +16,7 @@ use stm32h7xx_hal::{
 use smoltcp_nal::smoltcp;
 
 use super::{
-    adc, afe, cpu_temp_sensor::CpuTempSensor, current_sense_dac::CurrentSenseDac, dac, delay, design_parameters,
+    adc, afe, aux_dac, cpu_temp_sensor::CpuTempSensor, current_sense_dac::CurrentSenseDac, dac, delay, design_parameters,
     eeprom, input_stamper::InputStamper, metadata::ApplicationMetadata,
     platform, pounder, pounder::dds_output::DdsOutput, shared_adc::SharedAdc,
     timers, DigitalInput0, DigitalInput1, EemDigitalInput0, EemDigitalInput1,
@@ -115,6 +115,7 @@ pub struct StabilizerDevices {
     pub afes: (AFE0, AFE1),
     pub adcs: (adc::Adc0Input, adc::Adc1Input),
     pub dacs: (dac::Dac0Output, dac::Dac1Output),
+    pub aux_dacs: (aux_dac::AuxDac0Disabled, aux_dac::AuxDac1Disabled),
     pub timestamper: InputStamper,
     pub adc_dac_timer: timers::SamplingTimer,
     pub timestamp_timer: timers::TimestampTimer,
@@ -787,6 +788,19 @@ pub fn setup(
     fp_led_2.set_low();
     fp_led_3.set_low();
 
+    let aux_dacs = {
+        use hal::dac::DacExt;
+        let (ch0, ch1) = device.DAC.dac(
+            (gpioa.pa4.into_analog(), gpioa.pa5.into_analog()),
+            ccdr.peripheral.DAC12,
+        );
+        // Trim the output buffer offsets, as the factory trimming was done at a different VREF+.
+        (
+            ch0.calibrate_buffer(&mut delay),
+            ch1.calibrate_buffer(&mut delay),
+        )
+    };
+
     let (adc1, adc2, adc3) = {
         let (mut adc1, mut adc2) = hal::adc::adc12(
             device.ADC1,
@@ -1189,6 +1203,7 @@ pub fn setup(
         afes,
         adcs,
         dacs,
+        aux_dacs,
         temperature_sensor: CpuTempSensor::new(
             adc3.create_channel(hal::adc::Temperature::new()),
         ),
