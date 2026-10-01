@@ -12,6 +12,7 @@ use platform::{ApplicationMetadata, AsyncFlash, UnlockFlash};
 
 pub mod adc;
 pub mod afe;
+pub mod aux_dac;
 pub mod cpu_temp_sensor;
 pub mod dac;
 mod eeprom;
