@@ -7,7 +7,7 @@
 //!
 //! ## Features
 //! * Two indpenendent channels
-//! * 390 kHz rate, timed sampling
+//! * up to 800 kHz rate, timed sampling
 //! * Run-time filter configuration
 //! * Input/Output data streaming
 //! * f32 IIR math
@@ -65,12 +65,9 @@ const IIR_CASCADE_LENGTH: usize = 1;
 const BATCH_SIZE_LOG2: u32 = 3;
 const BATCH_SIZE: usize = 1 << BATCH_SIZE_LOG2;
 
-// The logarithm of the number of 100MHz timer ticks between each sample. With a value of 2^8 =
-// 256, there is 2.56uS per sample, corresponding to a sampling frequency of 390.625 KHz.
-//
-// TODO: Check whether the harmonic feedforward (MAX_HARMONICS cossin() evaluations per sample)
-// leaves enough headroom to go back to 7 (781.25 kHz, as in dual-iir).
-const SAMPLE_TICKS_LOG2: u32 = 8;
+// The logarithm of the number of 100MHz timer ticks between each sample. With a value of 2^7 =
+// 128, there is 1.28uS per sample, corresponding to a sampling frequency of 781.25 KHz.
+const SAMPLE_TICKS_LOG2: u32 = 7;
 const SAMPLE_TICKS: u32 = 1 << SAMPLE_TICKS_LOG2;
 const SAMPLE_PERIOD: f32 =
     SAMPLE_TICKS as f32 * stabilizer::design_parameters::TIMER_PERIOD;
@@ -239,7 +236,7 @@ pub struct CurrentSense {
     /// selects the frequency lock settling time and index 1 the phase lock settling time
     /// (usually one less than the former). The frequency settling time must be longer than
     /// one mains period (`pll_tc[0] >= 22` at 50 Hz). Values outside of the supported range
-    /// from 12 to 32 are clamped.
+    /// from 11 to 32 are clamped.
     pll_tc: [u8; 2],
     /// Frontend DC offset voltage, set via the current sense board offset DAC.
     ///
