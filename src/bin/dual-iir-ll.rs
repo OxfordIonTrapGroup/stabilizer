@@ -36,7 +36,7 @@
 //! application.
 //!
 //! ## Telemetry
-//! Refer to [stabilizer::telemetry::Telemetry] for information about telemetry reported by this application.
+//! Refer to [Telemetry] for information about telemetry reported by this application.
 //!
 //! ## Stream
 //! This application streams raw ADC and DAC data over UDP. Refer to
@@ -51,10 +51,12 @@ use dsp_process::SplitProcess;
 use idsp::iir::{self, pid::Units};
 
 use platform::{AppSettings, NetSettings};
+use serde::Serialize;
 use signal_generator::Source;
 use stabilizer::{
     convert::{AdcCode, DacCode},
     dual_iir::{Biquad, Channel, DualIir, IIR_CASCADE_LENGTH, Run},
+    telemetry::Timing,
 };
 
 // The number of samples in each streamed batch
@@ -152,6 +154,25 @@ impl Active {
     }
 }
 
+/// The telemetry reported by this application.
+#[derive(Serialize)]
+pub struct Telemetry {
+    /// Most recent input voltage measurement.
+    pub adcs: [f32; 2],
+    /// Most recent output voltage.
+    pub dacs: [f32; 2],
+    /// Most recent digital input assertion state.
+    pub digital_inputs: [bool; 2],
+    /// The CPU temperature in degrees Celsius.
+    pub cpu_temp: f32,
+    /// Execution time of the sample processing routine. Excludes interrupt entry and exit.
+    pub process: Timing,
+
+    /// Time from the start of the sample processing routine until the last DAC code has
+    /// been written.
+    pub output: Timing,
+}
+
 #[cfg(not(target_os = "none"))]
 fn main() {
     use miniconf::{json::to_json_value, json_schema::TreeJsonSchema};
@@ -172,6 +193,7 @@ fn main() {
 mod app {
     use super::*;
     use core::sync::atomic::{Ordering, fence};
+    use cortex_m::peripheral::DWT;
     use fugit::ExtU32 as _;
     use rtic_monotonics::Monotonic;
 
@@ -185,7 +207,7 @@ mod app {
             net::{NetworkState, NetworkUsers},
             timers::SamplingTimer,
         },
-        telemetry::TelemetryBuffer,
+        telemetry::{ProcessTime, TelemetryBuffer},
     };
     use stream::{FrameGenerator, Pop, SampleRing};
 
@@ -199,6 +221,7 @@ mod app {
         settings: Settings,
         active: [Active; 2],
         telemetry: TelemetryBuffer,
+        timing: [ProcessTime; 2],
     }
 
     #[local]
@@ -242,6 +265,7 @@ mod app {
             network,
             active: stabilizer.settings.dual_iir.ch.each_ref().map(Active::new),
             telemetry: TelemetryBuffer::default(),
+            timing: Default::default(),
             settings: stabilizer.settings,
         };
 
@@ -291,12 +315,17 @@ mod app {
     #[task(
         binds=DMA1_STR4,
         local=[digital_inputs, adcs, dacs, source: [i16; 2] = [0; 2]],
-        shared=[active, telemetry],
+        shared=[active, telemetry, timing],
         priority=3)]
     #[unsafe(link_section = ".itcm.process")]
     fn process(c: process::Context) {
+        let start = DWT::cycle_count();
+
         let process::SharedResources {
-            active, telemetry, ..
+            active,
+            telemetry,
+            timing,
+            ..
         } = c.shared;
 
         let process::LocalResources {
@@ -307,8 +336,8 @@ mod app {
             ..
         } = c.local;
 
-        (active, telemetry).lock(|active, telemetry| {
-            (adc0, adc1).lock(|adc0, adc1| {
+        (active, telemetry, timing).lock(|active, telemetry, timing| {
+            let output = (adc0, adc1).lock(|adc0, adc1| {
                 // Preserve instruction and data ordering w.r.t. DMA flag access before and after.
                 fence(Ordering::SeqCst);
                 let adc = [adc0[0], adc1[0]];
@@ -319,6 +348,7 @@ mod app {
                 dac0.write(y0);
                 let y1 = active[1].process(di[1], adc[1], source[1]);
                 dac1.write(y1);
+                let output = DWT::cycle_count();
                 let dac = [y0, y1];
 
                 telemetry.adcs = [AdcCode(adc[0]), AdcCode(adc[1])];
@@ -331,6 +361,7 @@ mod app {
                 }
 
                 fence(Ordering::SeqCst);
+                output
             });
 
             *source = active
@@ -338,6 +369,9 @@ mod app {
                 .map(|ch| (ch.source.next().unwrap() >> 16) as _);
             telemetry.digital_inputs =
                 [digital_inputs.0.is_high(), digital_inputs.1.is_high()];
+
+            timing[1].update(output.wrapping_sub(start));
+            timing[0].update(DWT::cycle_count().wrapping_sub(start));
         });
     }
 
@@ -429,7 +463,7 @@ mod app {
         });
     }
 
-    #[task(priority = 1, shared=[network, settings, telemetry], local=[cpu_temp_sensor])]
+    #[task(priority = 1, shared=[network, settings, telemetry, timing], local=[cpu_temp_sensor])]
     async fn telemetry(mut c: telemetry::Context) -> ! {
         loop {
             let telemetry =
@@ -443,15 +477,25 @@ mod app {
                     )
                 });
 
+            // Take the timing statistics accumulated since the previous report.
+            let timing = c.shared.timing.lock(core::mem::take);
+
+            let telemetry = telemetry.finalize(
+                gains[0],
+                gains[1],
+                c.local.cpu_temp_sensor.get_temperature().unwrap(),
+            );
+            let telemetry = Telemetry {
+                adcs: telemetry.adcs,
+                dacs: telemetry.dacs,
+                digital_inputs: telemetry.digital_inputs,
+                cpu_temp: telemetry.cpu_temp,
+                process: timing[0].finalize(),
+                output: timing[1].finalize(),
+            };
+
             c.shared.network.lock(|net| {
-                net.telemetry.publish_telemetry(
-                    "/telemetry",
-                    &telemetry.finalize(
-                        gains[0],
-                        gains[1],
-                        c.local.cpu_temp_sensor.get_temperature().unwrap(),
-                    ),
-                )
+                net.telemetry.publish_telemetry("/telemetry", &telemetry)
             });
 
             Systick::delay(((telemetry_period * 1000.0) as u32).millis()).await;

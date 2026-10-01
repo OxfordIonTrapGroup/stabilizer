@@ -1,4 +1,7 @@
-use crate::convert::{AdcCode, DacCode, Gain};
+use crate::{
+    convert::{AdcCode, DacCode, Gain},
+    design_parameters,
+};
 use serde::Serialize;
 
 /// The telemetry buffer is used for storing sample values during execution.
@@ -73,4 +76,47 @@ impl TelemetryBuffer {
             pounder: None,
         }
     }
+}
+
+/// Accumulator for the execution time of a processing routine in CPU cycles.
+///
+/// Take the timestamps from the DWT cycle counter (`cortex_m::peripheral::DWT::cycle_count()`).
+/// It is enabled during hardware setup.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct ProcessTime {
+    max: u32,
+    sum: u64,
+    count: u32,
+}
+
+impl ProcessTime {
+    /// Record one execution that took the given number of CPU cycles.
+    #[inline(always)]
+    pub fn update(&mut self, cycles: u32) {
+        self.max = self.max.max(cycles);
+        self.sum = self.sum.wrapping_add(cycles as u64);
+        self.count = self.count.wrapping_add(1);
+    }
+
+    /// Convert the statistics to seconds for reporting.
+    pub fn finalize(self) -> Timing {
+        const CYCLE: f32 = 1.0 / design_parameters::SYSCLK.to_Hz() as f32;
+        Timing {
+            mean: if self.count == 0 {
+                0.0
+            } else {
+                self.sum as f32 / self.count as f32 * CYCLE
+            },
+            max: self.max as f32 * CYCLE,
+        }
+    }
+}
+
+/// Execution time statistics accumulated since the previous report.
+#[derive(Copy, Clone, Debug, Default, Serialize)]
+pub struct Timing {
+    /// Mean execution time in seconds.
+    pub mean: f32,
+    /// Maximum execution time in seconds.
+    pub max: f32,
 }

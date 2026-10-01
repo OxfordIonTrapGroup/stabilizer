@@ -328,6 +328,11 @@ where
     // After ITCM loading.
     core.SCB.enable_icache();
 
+    // Enable the cycle counter for execution time measurements.
+    core.DCB.enable_trace();
+    cortex_m::peripheral::DWT::unlock();
+    core.DWT.enable_cycle_counter();
+
     // Note: Frequencies are scaled by 2 to account for the M7 dual instruction pipeline.
     let mut delay = platform::AsmDelay::new(ccdr.clocks.c_ck().to_Hz() * 2);
 
