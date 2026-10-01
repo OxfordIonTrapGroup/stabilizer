@@ -282,7 +282,7 @@ mod app {
 
         let pounder = match mezzanine {
             Mezzanine::Pounder(pounder) => Some(pounder),
-            Mezzanine::None => None,
+            Mezzanine::CurrentSense(_) => None,
         };
         if pounder.is_some() {
             stabilizer

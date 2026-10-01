@@ -14,6 +14,7 @@ pub mod adc;
 pub mod afe;
 pub mod aux_dac;
 pub mod cpu_temp_sensor;
+pub mod current_sense_dac;
 pub mod dac;
 mod eeprom;
 pub mod input_stamper;
