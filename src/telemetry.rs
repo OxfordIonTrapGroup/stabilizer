@@ -100,17 +100,12 @@ impl ProcessTime {
 
     /// Convert the statistics to seconds for reporting.
     pub fn finalize(self) -> Timing {
-        const CYCLE: f32 = 1.0 / design_parameters::SYSCLK.to_Hz() as f32;
-        Timing {
-            mean: if self.count == 0 {
-                0.0
-            } else {
-                self.sum as f32 / self.count as f32 * CYCLE
-            },
-            max: self.max as f32 * CYCLE,
-        }
+        Timing::from_cycles(self.sum, self.count, self.max)
     }
 }
+
+/// The duration of one CPU cycle in seconds.
+pub const CPU_CYCLE: f32 = 1.0 / design_parameters::SYSCLK.to_Hz() as f32;
 
 /// Execution time statistics accumulated since the previous report.
 #[derive(Copy, Clone, Debug, Default, Serialize)]
@@ -119,4 +114,18 @@ pub struct Timing {
     pub mean: f32,
     /// Maximum execution time in seconds.
     pub max: f32,
+}
+
+impl Timing {
+    /// Convert the sum and the maximum of `count` measurements in CPU cycles.
+    pub fn from_cycles(sum: u64, count: u32, max: u32) -> Self {
+        Self {
+            mean: if count == 0 {
+                0.0
+            } else {
+                sum as f32 / count as f32 * CPU_CYCLE
+            },
+            max: max as f32 * CPU_CYCLE,
+        }
+    }
 }

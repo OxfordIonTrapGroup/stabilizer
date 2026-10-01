@@ -60,16 +60,15 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use miniconf::Tree;
 
-use dsp_process::SplitProcess;
-use idsp::iir::{self, pid::Units};
+use idsp::iir::pid::Units;
 
 use platform::{AppSettings, NetSettings};
 use serde::Serialize;
 use signal_generator::Source;
 use stabilizer::{
     convert::{AdcCode, DacCode},
-    dual_iir::{Biquad, Channel, DualIir, IIR_CASCADE_LENGTH, Run},
-    telemetry::{ProcessTime, Timing},
+    dual_iir::{Biquad, Channel, DualIir, IIR_CASCADE_LENGTH, Run, Stage},
+    telemetry::{CPU_CYCLE, Timing},
 };
 
 // The number of samples in each streamed batch
@@ -121,11 +120,19 @@ impl serial_settings::Settings for Settings {
 pub struct Active {
     run: Run,
     biquad: [Biquad; IIR_CASCADE_LENGTH],
-    state: [iir::DirectForm1<f32>; IIR_CASCADE_LENGTH],
+    stage: [Stage; IIR_CASCADE_LENGTH],
     /// The signal source. `None` if its output is constant.
     source: Option<Source>,
     /// The signal source contribution to the next output sample in DAC LSB.
     offset: i16,
+}
+
+/// The input and the outputs of the filter stages for one sample.
+///
+/// They are kept from [`Active::process()`] to [`Active::update()`].
+pub struct Sample {
+    x: f32,
+    y: [f32; IIR_CASCADE_LENGTH],
 }
 
 impl Active {
@@ -133,16 +140,26 @@ impl Active {
         let mut active = Self {
             source: None,
             offset: 0,
-            state: Default::default(),
+            stage: Default::default(),
             run: ch.run,
             biquad: ch.biquad.each_ref().map(|biquad| biquad.build(&UNITS)),
         };
+        active.set_filter(active.run, active.biquad.clone());
         active.set_source(
             ch.source
                 .build(SAMPLE_PERIOD, DacCode::FULL_SCALE.recip())
                 .unwrap(),
         );
         active
+    }
+
+    /// Replace the filter. The transfer is bumpless.
+    fn set_filter(&mut self, run: Run, biquad: [Biquad; IIR_CASCADE_LENGTH]) {
+        self.run = run;
+        self.biquad = biquad;
+        for (stage, biquad) in self.stage.iter_mut().zip(&self.biquad) {
+            stage.prepare(biquad);
+        }
     }
 
     /// Replace the signal source.
@@ -159,40 +176,60 @@ impl Active {
 
     /// Filter one ADC sample and add the signal source contribution.
     ///
+    /// This is the latency critical part. It only uses what [`update()`](Self::update)
+    /// precomputed after the previous sample.
+    ///
     /// # Args
     /// * `di` - The digital input state for run/hold control.
     /// * `adc` - The ADC code of the input sample.
     ///
     /// # Returns
-    /// The DAC code for the output sample.
+    /// The DAC code for the output sample and the data for [`update()`](Self::update).
     #[inline(always)]
-    fn process(&mut self, di: &AtomicBool, adc: u16) -> u16 {
+    fn process(&self, di: &AtomicBool, adc: u16) -> (u16, Sample) {
         let run = match self.run {
             Run::Run => true,
             Run::Hold => false,
             Run::External => di.load(Ordering::Relaxed),
         };
         let x = f32::from(adc as i16);
-        let y = self.biquad.iter().zip(self.state.iter_mut()).fold(
-            x,
-            |y, (ch, state)| {
-                if run {
-                    ch.process(state, y)
-                } else {
-                    iir::Biquad::<f32>::HOLD.process(state, y)
-                }
-            },
-        );
+        let mut y = [0.0; IIR_CASCADE_LENGTH];
+        let mut v = x;
+        for ((biquad, stage), y) in
+            self.biquad.iter().zip(&self.stage).zip(&mut y)
+        {
+            v = if run {
+                stage.output(biquad, v)
+            } else {
+                stage.hold()
+            };
+            *y = v;
+        }
 
         // Note(unsafe): The filter limits must ensure that the value is in range.
         // The truncation introduces 1/2 LSB distortion.
-        let y: i16 = unsafe { y.to_int_unchecked() };
-        DacCode::from(y.saturating_add(self.offset)).0
+        let v: i16 = unsafe { v.to_int_unchecked() };
+        (
+            DacCode::from(v.saturating_add(self.offset)).0,
+            Sample { x, y },
+        )
+    }
+
+    /// Update the filter state with the sample and prepare for the next one.
+    #[inline(always)]
+    fn update(&mut self, sample: Sample) {
+        let mut x = sample.x;
+        for ((biquad, stage), y) in
+            self.biquad.iter().zip(&mut self.stage).zip(sample.y)
+        {
+            stage.update(biquad, x, y);
+            x = y;
+        }
     }
 
     /// Advance the signal source for the next sample.
     #[inline(always)]
-    fn update(&mut self) {
+    fn update_source(&mut self) {
         if let Some(source) = &mut self.source {
             self.offset = next(source);
         }
@@ -209,13 +246,32 @@ fn next(source: &mut Source) -> i16 {
     (source.next().unwrap() >> 16) as _
 }
 
+/// Execution time statistics of the sample processing routine in CPU cycles.
+#[derive(Clone, Copy, Default)]
+pub struct Times {
+    /// Maximum time until the last DAC code has been written
+    output_max: u32,
+    /// Maximum duration of the routine
+    process_max: u32,
+    /// Sum of the durations of the routine
+    process_sum: u64,
+}
+
+impl Times {
+    #[inline(always)]
+    fn update(&mut self, output: u32, process: u32) {
+        self.output_max = self.output_max.max(output);
+        self.process_max = self.process_max.max(process);
+        self.process_sum = self.process_sum.wrapping_add(process as _);
+    }
+}
+
 /// The state of the sample processing routine.
 ///
 /// It is shared with the settings update and telemetry tasks.
 pub struct State {
     ch: [Active; 2],
-    /// Execution time of the entire routine and time until the last DAC write.
-    timing: [ProcessTime; 2],
+    times: Times,
 }
 
 /// The telemetry reported by this application.
@@ -231,9 +287,9 @@ pub struct Telemetry {
     pub cpu_temp: f32,
     /// Execution time of the sample processing routine. Excludes interrupt entry and exit.
     pub process: Timing,
-    /// Time from the start of the sample processing routine until the last DAC code has
-    /// been written.
-    pub output: Timing,
+    /// Maximum time in seconds from the start of the sample processing routine until the
+    /// last DAC code has been written.
+    pub output: f32,
 }
 
 #[cfg(not(target_os = "none"))]
@@ -329,7 +385,7 @@ mod app {
             network,
             state: State {
                 ch: stabilizer.settings.dual_iir.ch.each_ref().map(Active::new),
-                timing: Default::default(),
+                times: Default::default(),
             },
             settings: stabilizer.settings,
         };
@@ -386,35 +442,42 @@ mod app {
         let (adc0, adc1) = c.local.adcs;
         let (dac0, dac1) = c.local.dacs;
 
-        let adc = [adc0.read(), adc1.read()];
-
         c.shared.state.lock(|state| {
             let State {
                 ch: [ch0, ch1],
-                timing,
+                times,
             } = state;
 
-            // Update each DAC as soon as its code is available.
-            let dac = [ch0.process(&DI[0], adc[0]), 0];
-            dac0.write(dac[0]);
-            let dac = [dac[0], ch1.process(&DI[1], adc[1])];
-            dac1.write(dac[1]);
+            // The latency critical part: write each DAC code as soon as it is available.
+            // ADC0 is sampled before ADC1, whose interrupt this is.
+            let adc0 = adc0.read();
+            let (dac0_code, sample0) = ch0.process(&DI[0], adc0);
+            dac0.write(dac0_code);
+            let adc1_code = adc1.read();
+            let (dac1_code, sample1) = ch1.process(&DI[1], adc1_code);
+            dac1.write(dac1_code);
             let output = DWT::cycle_count();
 
+            // Prepare the filters for the next sample.
+            ch0.update(sample0);
+            ch1.update(sample1);
+
             // Hand the sample to the stream task and wake it once per batch.
-            let count = RING.push([adc[0], adc[1], dac[0], dac[1]]);
+            let count = RING.push([adc0, adc1_code, dac0_code, dac1_code]);
             if count.is_multiple_of(BATCH_SIZE as u32) {
                 rtic::pend(hal::stm32::Interrupt::LTDC);
             }
 
-            ch0.update();
-            ch1.update();
+            ch0.update_source();
+            ch1.update_source();
 
             // Detect SPI errors and whether this took longer than a sample period.
             adc1.check();
 
-            timing[1].update(output.wrapping_sub(start));
-            timing[0].update(DWT::cycle_count().wrapping_sub(start));
+            times.update(
+                output.wrapping_sub(start),
+                DWT::cycle_count().wrapping_sub(start),
+            );
         });
     }
 
@@ -504,8 +567,8 @@ mod app {
                 (ch.run, ch.biquad.each_ref().map(|b| b.build(&UNITS)))
             });
             c.shared.state.lock(|state| {
-                for (a, b) in state.ch.iter_mut().zip(b) {
-                    (a.run, a.biquad) = b;
+                for (a, (run, biquad)) in state.ch.iter_mut().zip(b) {
+                    a.set_filter(run, biquad);
                 }
             });
             c.shared
@@ -514,14 +577,17 @@ mod app {
         });
     }
 
-    #[task(priority = 1, shared=[network, settings, state], local=[cpu_temp_sensor])]
+    #[task(priority = 1, shared=[network, settings, state], local=[cpu_temp_sensor, count: u32 = 0])]
     async fn telemetry(mut c: telemetry::Context) -> ! {
         loop {
-            // Take the timing statistics accumulated since the previous report.
-            let timing = c
+            // Take the timing statistics accumulated since the previous report and the
+            // number of samples they cover.
+            let (times, head) = c
                 .shared
                 .state
-                .lock(|state| core::mem::take(&mut state.timing));
+                .lock(|state| (core::mem::take(&mut state.times), RING.head()));
+            let count = head.wrapping_sub(*c.local.count);
+            *c.local.count = head;
 
             let [adc0, adc1, dac0, dac1] = RING.latest();
             let telemetry = TelemetryBuffer {
@@ -551,8 +617,12 @@ mod app {
                 dacs: telemetry.dacs,
                 digital_inputs: telemetry.digital_inputs,
                 cpu_temp: telemetry.cpu_temp,
-                process: timing[0].finalize(),
-                output: timing[1].finalize(),
+                process: Timing::from_cycles(
+                    times.process_sum,
+                    count,
+                    times.process_max,
+                ),
+                output: times.output_max as f32 * CPU_CYCLE,
             };
 
             c.shared.network.lock(|net| {
