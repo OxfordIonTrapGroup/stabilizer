@@ -23,6 +23,7 @@ use super::{
     DigitalInput0, DigitalInput1, Eem, Gpio, HardwareVersion, Pgia,
     SerialTerminal, SystemTimer, Systick, UsbDevice, adc, afe, aux_dac,
     cpu_temp_sensor::CpuTempSensor,
+    current_sense_dac::CurrentSenseDac,
     dac, eeprom,
     input_stamper::InputStamper,
     net::{EthernetPhy, NetworkStack},
@@ -126,9 +127,18 @@ pub struct Stabilizer<C: serial_settings::Settings + 'static> {
     pub settings: C,
 }
 
+/// The mezzanine board hardware interfaces.
+///
+/// Pounder and the current sense board both use SPI1, but with different configurations, so
+/// only one of them is set up.
 pub enum Mezzanine {
-    None,
+    /// Pounder was detected (through its PGOOD signal).
     Pounder(Pounder),
+    /// No Pounder was detected.
+    ///
+    /// The presence of the current sense board cannot be detected, so SPI1 is always set up
+    /// for its offset DAC in this case, even if there is no mezzanine at all.
+    CurrentSense(CurrentSenseDac),
 }
 
 /// The available Pounder-specific hardware interfaces.
@@ -210,10 +220,11 @@ fn load_itcm() {
 /// * `sample_ticks` - The number of timer ticks between each sample.
 ///
 /// # Returns
-/// (stabilizer, pounder) where `stabilizer` is a `StabilizerDevices` structure containing all
-/// stabilizer hardware interfaces in a disabled state. `pounder` is an `Option` containing
-/// `Some(devices)` if pounder is detected, where `devices` is a `PounderDevices` structure
-/// containing all of the pounder hardware interfaces in a disabled state.
+/// (stabilizer, mezzanine, eem) where `stabilizer` is a `Stabilizer` structure containing all
+/// stabilizer hardware interfaces in a disabled state. `mezzanine` is [Mezzanine::Pounder]
+/// containing all of the pounder hardware interfaces in a disabled state if pounder is
+/// detected, and [Mezzanine::CurrentSense] with the current sense board offset DAC otherwise.
+/// `eem` contains the interfaces for the detected EEM population variant.
 pub fn setup<C>(
     mut core: hal::stm32::CorePeripherals,
     device: hal::stm32::Peripherals,
@@ -876,7 +887,7 @@ where
     // Measure the Pounder PGOOD output to detect if pounder is present on Stabilizer.
     let pounder_pgood = gpiob.pb13.into_pull_down_input();
     delay.delay_us(2000u32);
-    let pounder = if pounder_pgood.is_high() {
+    let mezzanine = if pounder_pgood.is_high() {
         log::info!("Found Pounder");
 
         let i2c1 = {
@@ -1069,7 +1080,23 @@ where
             timestamper: pounder_stamper,
         })
     } else {
-        Mezzanine::None
+        // The offset DAC chip select is driven manually; deselect it before SCK becomes active.
+        let cs = gpiog
+            .pg10
+            .into_push_pull_output_in_state(gpio::PinState::High);
+        // The DAC is write-only, so there is no MISO.
+        let mosi = gpiod.pd7.into_alternate();
+        let sck = gpiog.pg11.into_alternate();
+
+        let spi = device.SPI1.spi(
+            (sck, hal::spi::NoMiso, mosi),
+            hal::spi::MODE_0,
+            1.MHz(),
+            ccdr.peripheral.SPI1,
+            &ccdr.clocks,
+        );
+
+        Mezzanine::CurrentSense(CurrentSenseDac::new(spi, cs))
     };
 
     #[derive(Copy, Clone, Debug, PartialEq)]
@@ -1290,5 +1317,5 @@ where
 
     log::info!("setup() complete");
 
-    (stabilizer, pounder, eem)
+    (stabilizer, mezzanine, eem)
 }
