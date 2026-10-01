@@ -475,7 +475,7 @@ where
                 dma_streams.2,
                 sampling_timer_channels.ch1,
                 shadow_sampling_timer_channels.ch1,
-                batch_size,
+                sampling,
             )
         };
 
@@ -510,7 +510,7 @@ where
                 dma_streams.5,
                 sampling_timer_channels.ch2,
                 shadow_sampling_timer_channels.ch2,
-                batch_size,
+                sampling,
             )
         };
 

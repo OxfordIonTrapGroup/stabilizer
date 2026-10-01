@@ -272,19 +272,24 @@ macro_rules! dac_output {
 
             /// Write a DAC code to the SPI TX FIFO for immediate transmission.
             ///
+            /// This is a single register access without any checks. It is only meaningful in
+            /// [`Sampling::LowLatency`] mode.
+            ///
             /// The TX FIFO holds up to eight codes and drains at the SPI word transfer rate
             /// (about 3 MHz). The FIFO level is not checked: the caller must not write codes
             /// faster than that on average, which is guaranteed when writing one code per
             /// sample.
-            ///
-            /// # Panics
-            /// Panics if the DAC is not in [`Sampling::LowLatency`] mode.
-            #[inline]
+            #[inline(always)]
             pub fn write(&mut self, code: u16) {
-                let [< $name Data >]::Direct(spi) = &mut self.data else {
-                    panic!(concat!("DAC", stringify!($index), " not in low-latency mode"));
-                };
-                spi.write(code);
+                debug_assert!(matches!(self.data, [< $name Data >]::Direct(_)));
+                // Note(unsafe): The SPI is owned by `self` and not serviced by DMA in
+                // low-latency mode. A half-word access pushes exactly one 16 bit frame into
+                // the TX FIFO.
+                unsafe {
+                    let regs = &*hal::stm32::$spi::ptr();
+                    let txdr = &regs.txdr as *const _ as *const UnsafeCell<u16>;
+                    core::ptr::write_volatile(UnsafeCell::raw_get(txdr), code);
+                }
             }
         }
 

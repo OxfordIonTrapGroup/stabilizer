@@ -60,11 +60,12 @@ pub enum Sampling {
     /// double-buffered RAM by DMA, timed by the sampling timer. The application processes one
     /// batch at a time. Input-to-output latency is several batch periods.
     Batched(usize),
-    /// Each ADC sample is transferred to RAM by DMA individually as soon as its conversion
-    /// completes (i.e. with a batch size of one) and processed immediately. The DAC codes are
-    /// written directly to the DAC SPI TX FIFOs by the CPU, without DMA and not aligned to the
-    /// sampling timer. Input-to-output latency is dominated by the converter and SPI transfer
-    /// times, at the expense of a much higher per-sample CPU overhead.
+    /// The conversions are still started by the sampling timer, but the sample data is not
+    /// moved by DMA: the ADC1 SPI interrupt fires as soon as a pair of samples is available,
+    /// the application reads them directly from the SPI RX FIFOs and writes the DAC codes
+    /// directly into the DAC SPI TX FIFOs, unaligned to the sampling timer. Input-to-output
+    /// latency is dominated by the converter and SPI transfer times, at the expense of one
+    /// interrupt per sample.
     LowLatency,
 }
 

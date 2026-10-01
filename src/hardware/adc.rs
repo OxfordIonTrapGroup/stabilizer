@@ -48,6 +48,18 @@
 //! batch sizes generally provide for lower overhead and more processing time per sample, but come
 //! at the expense of increased input -> output latency.
 //!
+//! ## Low-Latency Mode
+//!
+//! In [`Sampling::LowLatency`] mode, the conversions are still started by the sampling timer
+//! through the trigger and EOT-clear DMA streams described above, so the sampling instants remain
+//! hardware-timed and no CPU time is spent on them. The data DMA stream is not used. Instead,
+//! ADC1's SPI raises its interrupt as soon as its sample is available in the RX FIFO
+//! ([`hal::spi::Event::Rxp`]). ADC1 is always triggered after ADC0, so both samples are available
+//! at that time. The interrupt handler takes each sample directly from the respective RX FIFO
+//! with [`Adc0Input::read`]/[`Adc1Input::read`] and, once it is done with the sample, uses
+//! [`Adc1Input::check`] to detect SPI errors and whether the next sample has already arrived,
+//! i.e. whether it took longer than a sample period.
+//!
 //!
 //! # Note
 //!
@@ -69,7 +81,7 @@ use rtic::Mutex;
 
 use grounded::uninit::{GroundedArrayCell, GroundedCell};
 
-use super::timers;
+use super::{Sampling, timers};
 use crate::design_parameters::SampleBuffer;
 
 use super::hal::{
@@ -102,6 +114,11 @@ static SPI_EOT_CLEAR: GroundedCell<[u32; 1]> = GroundedCell::uninit();
 #[unsafe(link_section = ".axisram.buffers")]
 static ADC_BUF: GroundedArrayCell<[SampleBuffer; 2], 2> =
     GroundedArrayCell::uninit();
+
+// The SPI status register error flags: UDR, OVR, CRCE, TIFRE, MODF.
+const SPI_SR_ERRORS: u32 = 0b11111 << 5;
+// The SPI status register RX packet available flag.
+const SPI_SR_RXP: u32 = 1 << 0;
 
 macro_rules! adc_input {
     ($name:ident, $index:literal, $trigger_stream:ident, $data_stream:ident, $clear_stream:ident,
@@ -173,15 +190,23 @@ macro_rules! adc_input {
                 }
             }
 
-            /// Represents data associated with ADC.
-            pub struct $name {
-                transfer: Transfer<
+            /// The path of the sample data from the ADC SPI RX FIFO to the application.
+            enum [< $name Data >] {
+                /// Batches of samples are collected into double-buffered RAM by DMA.
+                Dma(Transfer<
                     hal::dma::dma::$data_stream<hal::stm32::DMA1>,
                     hal::spi::Spi<hal::stm32::$spi, hal::spi::Disabled, u16>,
                     PeripheralToMemory,
                     &'static mut [u16],
                     hal::dma::DBTransfer,
-                >,
+                >),
+                /// Individual samples are read from the SPI RX FIFO by the CPU.
+                Direct(hal::spi::Spi<hal::stm32::$spi, hal::spi::Disabled, u16>),
+            }
+
+            /// Represents data associated with ADC.
+            pub struct $name {
+                data: [< $name Data >],
                 trigger_transfer: Transfer<
                     hal::dma::dma::$trigger_stream<hal::stm32::DMA1>,
                     [< $spi CR >],
@@ -205,11 +230,13 @@ macro_rules! adc_input {
                 /// * `spi` - The SPI interface used to communicate with the ADC.
                 /// * `trigger_stream` - The DMA stream used to trigger each ADC transfer by
                 ///    writing a word into the SPI TX FIFO.
-                /// * `data_stream` - The DMA stream used to read samples received over SPI into a data buffer.
+                /// * `data_stream` - The DMA stream used to read samples received over SPI into a
+                ///   data buffer. Unused in low-latency mode.
                 /// * `clear_stream` - The DMA stream used to clear the EOT flag in the SPI peripheral.
                 /// * `trigger_channel` - The ADC sampling timer output compare channel for read triggers.
                 /// * `clear_channel` - The shadow sampling timer output compare channel used for
                 ///   clearing the SPI EOT flag.
+                /// * `sampling` - The sample transfer mode.
                 pub fn new(
                     spi: hal::spi::Spi<hal::stm32::$spi, hal::spi::Enabled, u16>,
                     trigger_stream: hal::dma::dma::$trigger_stream<
@@ -219,7 +246,7 @@ macro_rules! adc_input {
                     clear_stream: hal::dma::dma::$clear_stream<hal::stm32::DMA1>,
                     trigger_channel: timers::tim2::$trigger_channel,
                     clear_channel: timers::tim3::$clear_channel,
-                    batch_size: usize,
+                    sampling: Sampling,
                 ) -> Self {
                     // The flag clear DMA transfer always clears the EOT flag in the SPI
                     // peripheral. It has the highest priority to ensure it is completed before the
@@ -297,16 +324,6 @@ macro_rules! adc_input {
                         trigger_config,
                     );
 
-                    // The data stream constantly reads from the SPI RX FIFO into a RAM buffer. The peripheral
-                    // stalls reads of the SPI RX FIFO until data is available, so the DMA transfer completes
-                    // after the requested number of samples have been collected. Note that only ADC1's (sic!)
-                    // data stream is used to trigger a transfer completion interrupt.
-                    let data_config = DmaConfig::default()
-                        .memory_increment(true)
-                        .double_buffer(true)
-                        .transfer_complete_interrupt($index == 1)
-                        .priority(Priority::VeryHigh);
-
                     // A SPI peripheral error interrupt is used to determine if the RX FIFO
                     // overflows. This indicates that samples were dropped due to excessive
                     // processing time in the main application (e.g. a second DMA transfer completes
@@ -315,43 +332,74 @@ macro_rules! adc_input {
                     let mut spi = spi.disable();
                     spi.listen(hal::spi::Event::Error);
 
-                    let adc_bufs = unsafe {
-                        ADC_BUF.initialize_all_with(|| Default::default());
-                        ADC_BUF.get_element_mut_unchecked($index).split_at_mut(1)
+                    let data = match sampling {
+                        Sampling::Batched(batch_size) => {
+                            // The data stream constantly reads from the SPI RX FIFO into a RAM
+                            // buffer. The peripheral stalls reads of the SPI RX FIFO until data is
+                            // available, so the DMA transfer completes after the requested number
+                            // of samples have been collected. Note that only ADC1's (sic!) data
+                            // stream is used to trigger a transfer completion interrupt.
+                            let data_config = DmaConfig::default()
+                                .memory_increment(true)
+                                .double_buffer(true)
+                                .transfer_complete_interrupt($index == 1)
+                                .priority(Priority::VeryHigh);
+
+                            let adc_bufs = unsafe {
+                                ADC_BUF.initialize_all_with(|| Default::default());
+                                ADC_BUF.get_element_mut_unchecked($index).split_at_mut(1)
+                            };
+
+                            // The data transfer is always a transfer of data from the peripheral
+                            // to a RAM buffer.
+                            let data_transfer: Transfer<_, _, PeripheralToMemory, _, _> =
+                                Transfer::init(
+                                    data_stream,
+                                    spi,
+                                    // Note(unsafe): The ADC_BUF[$index] is "owned" by this
+                                    // peripheral. It shall not be used anywhere else in the module.
+                                    &mut adc_bufs.0[0][..batch_size],
+                                    Some(&mut adc_bufs.1[0][..batch_size]),
+                                    data_config,
+                                );
+
+                            [< $name Data >]::Dma(data_transfer)
+                        }
+                        Sampling::LowLatency => [< $name Data >]::Direct(spi),
                     };
 
-                    // The data transfer is always a transfer of data from the peripheral to a RAM
-                    // buffer.
-                    let data_transfer: Transfer<_, _, PeripheralToMemory, _, _> =
-                        Transfer::init(
-                            data_stream,
-                            spi,
-                            // Note(unsafe): The ADC_BUF[$index] is "owned" by this peripheral.
-                            // It shall not be used anywhere else in the module.
-                            &mut adc_bufs.0[0][..batch_size],
-                            Some(&mut adc_bufs.1[0][..batch_size]),
-                            data_config,
-                        );
-
                     Self {
-                        transfer: data_transfer,
+                        data,
                         trigger_transfer,
                         clear_transfer,
                     }
                 }
 
-                /// Enable the ADC DMA transfer sequence.
+                /// Enable the ADC transfer sequence.
                 pub fn start(&mut self) {
-                    self.transfer.start(|spi| {
-                        spi.enable_dma_rx();
+                    match &mut self.data {
+                        [< $name Data >]::Dma(transfer) => {
+                            transfer.start(|spi| {
+                                spi.enable_dma_rx();
 
-                        spi.inner().cr2.modify(|_, w| w.tsize().bits(1));
-                        spi.inner().cr1.modify(|_, w| w.spe().set_bit());
-                    });
+                                spi.inner().cr2.modify(|_, w| w.tsize().bits(1));
+                                spi.inner().cr1.modify(|_, w| w.spe().set_bit());
+                            });
+                        }
+                        [< $name Data >]::Direct(spi) => {
+                            spi.inner().cr2.modify(|_, w| w.tsize().bits(1));
+                            spi.inner().cr1.modify(|_, w| w.spe().set_bit());
+
+                            // Only ADC1 signals sample availability through its interrupt. It
+                            // is triggered after ADC0, so both samples are available then.
+                            if $index == 1 {
+                                spi.listen(hal::spi::Event::Rxp);
+                            }
+                        }
+                    }
 
                     self.clear_transfer.start(|_| {});
                     self.trigger_transfer.start(|_| {});
-
                 }
 
                 /// Wait for the transfer of the currently active buffer to complete,
@@ -360,13 +408,62 @@ macro_rules! adc_input {
                 ///
                 /// NOTE(unsafe): Memory safety and access ordering is not guaranteed
                 /// (see the HAL DMA docs).
+                ///
+                /// # Panics
+                /// Panics if the ADC is not in [`Sampling::Batched`] mode.
                 pub fn with_buffer<F, R>(&mut self, f: F) -> Result<R, DMAError>
                 where
                     F: FnOnce(&mut &'static mut [u16]) -> R,
                 {
-                    unsafe { self.transfer.next_dbm_transfer_with(|buf, _current| {
+                    let [< $name Data >]::Dma(transfer) = &mut self.data else {
+                        panic!(concat!("ADC", stringify!($index), " not in batched mode"));
+                    };
+                    unsafe { transfer.next_dbm_transfer_with(|buf, _current| {
                         f(buf)
                     })}
+                }
+
+                /// Take one sample from the SPI RX FIFO.
+                ///
+                /// This is a single register access without any checks. It is only meaningful
+                /// in [`Sampling::LowLatency`] mode and when a sample is known to be available,
+                /// i.e. once per sample interrupt of ADC1.
+                #[inline(always)]
+                pub fn read(&mut self) -> u16 {
+                    debug_assert!(matches!(self.data, [< $name Data >]::Direct(_)));
+                    // Note(unsafe): The SPI is owned by `self` and not serviced by DMA in
+                    // low-latency mode. A half-word access pops exactly one 16 bit frame from
+                    // the RX FIFO.
+                    unsafe {
+                        let regs = &*hal::stm32::$spi::ptr();
+                        core::ptr::read_volatile(&regs.rxdr as *const _ as *const u16)
+                    }
+                }
+
+                /// Check the health of the sample stream after a sample has been processed.
+                ///
+                /// # Panics
+                /// * If the SPI signals an error (e.g. an RX FIFO overrun).
+                /// * If the next sample is already pending, i.e. if processing the previous
+                ///   one took longer than a sample period. This is the equivalent of the DMA
+                ///   overflow in batched mode.
+                #[inline(always)]
+                pub fn check(&mut self) {
+                    // Note(unsafe): Read-only access to the status register.
+                    let sr = unsafe { &*hal::stm32::$spi::ptr() }.sr.read().bits();
+                    if sr & (SPI_SR_ERRORS | SPI_SR_RXP) != 0 {
+                        Self::fail(sr);
+                    }
+                }
+
+                #[cold]
+                #[inline(never)]
+                fn fail(sr: u32) -> ! {
+                    if sr & SPI_SR_ERRORS != 0 {
+                        panic!(concat!("ADC", stringify!($index), " SPI error"));
+                    } else {
+                        panic!(concat!("ADC", stringify!($index), " sample overrun"));
+                    }
                 }
             }
 

@@ -157,6 +157,19 @@ pub enum Source {
     },
 }
 
+impl Source {
+    /// The value of the source if it is constant.
+    ///
+    /// A source with zero amplitude only ever yields its offset and does not need to be
+    /// iterated.
+    pub fn constant(&self) -> Option<i32> {
+        let (Self::SweptSine { amp, .. }
+        | Self::Periodic { amp, .. }
+        | Self::WhiteNoise { amp, .. }) = self;
+        (amp.amp == 0).then_some(amp.offset)
+    }
+}
+
 impl Iterator for Source {
     type Item = i32;
     #[inline]
