@@ -41,16 +41,32 @@ pub type NetworkManager = smoltcp_nal::shared::NetworkManager<
     SystemTimer,
 >;
 
+/// Receive buffer of the settings client: the largest request (topic, response
+/// topic, correlation data and value) it accepts. The broker drops larger ones,
+/// retained ones included, without telling anyone.
+const SETTINGS_RX_SIZE: usize = 1024;
+
+/// Transmit buffer of the settings client: the largest response or published
+/// setting.
+const SETTINGS_TX_SIZE: usize = 512;
+
+/// Buffer of the settings client. Besides the receive and transmit buffers, it
+/// holds the will message (clearing `alive`) and the session state, which gets
+/// the rest (about 2 KiB): the responses and published settings until the
+/// broker acknowledges them. A message is only sent while `SETTINGS_TX_SIZE` of
+/// the session state is free, and minimq tracks at most ten.
+const SETTINGS_SIZE: usize = SETTINGS_RX_SIZE + SETTINGS_TX_SIZE + 2048;
+
 struct MqttStorage {
     telemetry: [u8; 2048],
-    settings: [u8; 1024],
+    settings: [u8; SETTINGS_SIZE],
 }
 
 impl Default for MqttStorage {
     fn default() -> Self {
         Self {
             telemetry: [0u8; 2048],
-            settings: [0u8; 1024],
+            settings: [0u8; SETTINGS_SIZE],
         }
     }
 }
@@ -133,6 +149,12 @@ where
             prefix.as_str(),
             clock,
             minimq::ConfigBuilder::new(named_broker, &mut store.settings)
+                .rx_buffer(minimq::config::BufferConfig::Exactly(
+                    SETTINGS_RX_SIZE,
+                ))
+                .tx_buffer(minimq::config::BufferConfig::Exactly(
+                    SETTINGS_TX_SIZE,
+                ))
                 .client_id(&get_client_id(&net_settings.id, "settings"))
                 .unwrap(),
         )
