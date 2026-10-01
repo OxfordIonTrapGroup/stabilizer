@@ -21,7 +21,7 @@ use crate::design_parameters;
 
 use super::{
     DigitalInput0, DigitalInput1, Eem, Gpio, HardwareVersion, Pgia,
-    SerialTerminal, SystemTimer, Systick, UsbDevice, adc, afe,
+    SerialTerminal, SystemTimer, Systick, UsbDevice, adc, afe, aux_dac,
     cpu_temp_sensor::CpuTempSensor,
     dac, eeprom,
     input_stamper::InputStamper,
@@ -113,6 +113,7 @@ pub struct Stabilizer<C: serial_settings::Settings + 'static> {
     pub afes: [Pgia; 2],
     pub adcs: (adc::Adc0Input, adc::Adc1Input),
     pub dacs: (dac::Dac0Output, dac::Dac1Output),
+    pub aux_dacs: (aux_dac::AuxDac0Disabled, aux_dac::AuxDac1Disabled),
     pub input_stamper: InputStamper,
     pub sampling_timer: timers::SamplingTimer,
     pub timestamp_timer: timers::TimestampTimer,
@@ -812,6 +813,18 @@ where
         fp_led.set_low();
     }
 
+    let aux_dacs = {
+        let (ch0, ch1) = device.DAC.dac(
+            (gpioa.pa4.into_analog(), gpioa.pa5.into_analog()),
+            ccdr.peripheral.DAC12,
+        );
+        // Trim the output buffer offsets, as the factory trimming was done at a different VREF+.
+        (
+            ch0.calibrate_buffer(&mut delay),
+            ch1.calibrate_buffer(&mut delay),
+        )
+    };
+
     let (adc1, adc2, adc3) = {
         let (mut adc1, mut adc2) = hal::adc::adc12(
             device.ADC1,
@@ -1261,6 +1274,7 @@ where
         afes,
         adcs,
         dacs,
+        aux_dacs,
         temperature_sensor,
         usb_serial,
         input_stamper,
