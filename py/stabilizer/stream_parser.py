@@ -10,6 +10,7 @@ import asyncio
 import logging
 import struct
 import socket
+import sys
 import ipaddress
 from collections import namedtuple
 
@@ -18,6 +19,11 @@ import numpy as np
 from . import DAC_VOLTS_PER_LSB, ADC_VOLTS_PER_LSB
 from .pounder import PHASE_TURNS_PER_POW_LSB
 from .stream import get_local_ip
+
+if sys.platform == "win32":
+    # Handing our own socket to create_datagram_endpoint() was seen to fail intermittently
+    # with the default proactor event loop.
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 logger = logging.getLogger(__name__)
 
