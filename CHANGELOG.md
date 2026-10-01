@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * `dual-iir`: settings tree layout changed
 * `urukul`: bin target renamed to `dds`
 
+### Fixed
+
+* The MQTT settings client answers up to ten requests at a time instead of one
+  (the others got no response), and accepts requests of up to 1024 bytes instead
+  of about 340 (the broker dropped larger ones, including retained settings
+  applied after boot). This needed a fix to `minimq`, which comes from a fork
+  for now.
+
 ## [v0.11.0](https://github.com/quartiq/stabilizer/compare/v0.10.0...v0.11.0) - 2024-12-02
 
 ### Added
