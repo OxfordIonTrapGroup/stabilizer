@@ -181,3 +181,6 @@ dsp-fixedpoint = { git = "https://github.com/quartiq/idsp.git" }
 miniconf = { git = "https://github.com/quartiq/miniconf.git" }
 miniconf_mqtt = { git = "https://github.com/quartiq/miniconf.git" }
 miniconf_derive = { git = "https://github.com/quartiq/miniconf.git" }
+# minimq 0.10.0 with a fix for the number of messages in flight. Later versions
+# are a rewrite for async I/O.
+minimq = { git = "https://github.com/OxfordIonTrapGroup/minimq.git", branch = "v0.10-in-flight-limit" }

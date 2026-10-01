@@ -849,8 +849,7 @@ dependencies = [
 [[package]]
 name = "minimq"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8aca206883c70c23d8a8179533c0dad0f7c9abe6574c0dc0908e913203b6b6e3"
+source = "git+https://github.com/OxfordIonTrapGroup/minimq.git?branch=v0.10-in-flight-limit#b8a402d99a6452e2fd77c14536c73dd9bb4a8c13"
 dependencies = [
  "bit_field",
  "embedded-nal",
