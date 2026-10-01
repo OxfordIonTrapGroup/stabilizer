@@ -18,4 +18,6 @@ pub mod fls;
 
 pub mod fnc;
 
+pub mod harmonics;
+
 pub mod pounder_config;
