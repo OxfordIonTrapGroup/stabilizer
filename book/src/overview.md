@@ -35,6 +35,7 @@ information.
 | Application | Description |
 | :---: | :---- |
 | [`dual-iir`](firmware/dual_iir/index.html) | Two channel biquad IIR filter |
+| [`dual-iir-ll`](firmware/dual_iir_ll/index.html) | Two channel biquad IIR filter, low latency |
 | [`lockin`](firmware/lockin/index.html) | Lockin amplifier support various various reference sources |
 | [`dds`](firmware/dds/index.html) | Urukul-AD9912 control over MQTT |
 | [`fls`](firmware/fls/index.html) | Fiber length stabilizer/Phase-Frequency Metrology and control |

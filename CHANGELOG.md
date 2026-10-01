@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * `l674`: application for locking the 674 nm SolsTiS laser to a cavity (cascaded
   fast/slow PZT controllers, gain ramp, lock detection on the cavity
   transmission with a read-only `lock_detect/adc1_filtered` setting for relocking)
+* `dual-iir-ll`: low-latency Dual IIR application with per-sample processing
+  and the same settings and stream format as `dual-iir`.
 
 ### Changed
 

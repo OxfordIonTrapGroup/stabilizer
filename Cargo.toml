@@ -147,9 +147,6 @@ nightly = []
 pounder_v1_0 = []
 # Reboot instead of halting on panic
 panic-reboot = []
-# `dual-iir` only: process every sample individually and immediately instead of in DMA
-# batches. See the `dual-iir` documentation.
-low_latency = []
 
 [profile.dev]
 codegen-units = 1

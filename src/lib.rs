@@ -3,6 +3,8 @@
 
 pub mod design_parameters;
 
+pub mod dual_iir;
+
 #[cfg(target_os = "none")]
 pub mod hardware;
 

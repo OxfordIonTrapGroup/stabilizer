@@ -39,7 +39,7 @@ jobs:
     strategy:
       matrix:
         toolchain: [stable]
-        features: ['', 'low_latency']
+        features: ['']
         continue-on-error: [false]
         include:
           - toolchain: beta
@@ -63,6 +63,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # https://github.com/rust-lang/cargo/issues/13051
       - run: cargo run --bin dual-iir --target host-tuple
+      - run: cargo run --bin dual-iir-ll --target host-tuple
       - run: cargo run --bin lockin --target host-tuple
       - run: cargo run --bin dds --target host-tuple
       - run: cargo run --bin mpll --target host-tuple
