@@ -100,6 +100,9 @@ pub enum Format {
     Fls2 = 5,
 }
 
+mod ring;
+pub use ring::*;
+
 #[cfg(target_arch = "arm")]
 mod stream;
 #[cfg(target_arch = "arm")]

@@ -191,6 +191,25 @@ impl FrameGenerator {
     }
 }
 
+impl FrameGenerator {
+    /// Skip a number of batches.
+    ///
+    /// The sequence number advances as if the batches had been added. The receiver accounts
+    /// for them as lost.
+    pub fn skip(&mut self, batches: u32) {
+        if batches == 0 {
+            return;
+        }
+        // The batches in a frame are contiguous: finish the current frame.
+        // Note(unwrap): The queue is designed to be at least as large as the frame buffer
+        // count, so this enqueue should always succeed.
+        if let Some(frame) = self.current_frame.take() {
+            self.queue.enqueue(frame).unwrap();
+        }
+        self.sequence_number = self.sequence_number.wrapping_add(batches);
+    }
+}
+
 /// The "consumer" portion of the data stream.
 ///
 /// # Note

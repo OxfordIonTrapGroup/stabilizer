@@ -168,7 +168,7 @@ fn main() {
 }
 
 #[cfg(target_os = "none")]
-#[cfg_attr(target_os = "none", rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, LTDC, SDMMC]))]
+#[cfg_attr(target_os = "none", rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, SDMMC]))]
 mod app {
     use super::*;
     use core::sync::atomic::{Ordering, fence};
@@ -187,7 +187,10 @@ mod app {
         },
         telemetry::TelemetryBuffer,
     };
-    use stream::FrameGenerator;
+    use stream::{FrameGenerator, Pop, SampleRing};
+
+    // The most recent samples, handed from `process` to `streamer`.
+    static RING: SampleRing<512> = SampleRing::new();
 
     #[shared]
     struct Shared {
@@ -279,17 +282,15 @@ mod app {
     /// Main DSP processing routine.
     ///
     /// Runs once per sample. The DAC codes are written to the DACs immediately after they have
-    /// been computed and before the telemetry, signal source and stream bookkeeping.
+    /// been computed and before the telemetry and signal source bookkeeping. Stream frames are
+    /// assembled by the lower priority `streamer` task.
     ///
     /// # Note
     /// Processing must complete within one sample period. If this constraint is not met,
     /// firmware will panic due to an ADC input overrun.
     #[task(
         binds=DMA1_STR4,
-        local=[digital_inputs, adcs, dacs, generator,
-            source: [i16; 2] = [0; 2],
-            stream: [[u16; BATCH_SIZE]; 4] = [[0; BATCH_SIZE]; 4],
-            index: usize = 0],
+        local=[digital_inputs, adcs, dacs, source: [i16; 2] = [0; 2]],
         shared=[active, telemetry],
         priority=3)]
     #[unsafe(link_section = ".itcm.process")]
@@ -302,10 +303,7 @@ mod app {
             digital_inputs,
             adcs: (adc0, adc1),
             dacs: (dac0, dac1),
-            generator,
             source,
-            stream,
-            index,
             ..
         } = c.local;
 
@@ -326,26 +324,10 @@ mod app {
                 telemetry.adcs = [AdcCode(adc[0]), AdcCode(adc[1])];
                 telemetry.dacs = [DacCode(dac[0]), DacCode(dac[1])];
 
-                // Stream the data in batches of BATCH_SIZE samples.
-                for (stream, data) in
-                    stream.iter_mut().zip([adc[0], adc[1], dac[0], dac[1]])
-                {
-                    stream[*index] = data;
-                }
-                *index += 1;
-                if *index == BATCH_SIZE {
-                    *index = 0;
-                    const N: usize = BATCH_SIZE * size_of::<i16>();
-                    generator.add(|buf| {
-                        stream
-                            .iter()
-                            .zip(buf.chunks_exact_mut(N))
-                            .map(|(data, buf)| {
-                                buf.copy_from_slice(bytemuck::cast_slice(data))
-                            })
-                            .count()
-                            * N
-                    });
+                // Hand the sample to the stream task and wake it once per batch.
+                let count = RING.push([adc[0], adc[1], dac[0], dac[1]]);
+                if count.is_multiple_of(BATCH_SIZE as u32) {
+                    rtic::pend(hal::stm32::Interrupt::LTDC);
                 }
 
                 fence(Ordering::SeqCst);
@@ -357,6 +339,32 @@ mod app {
             telemetry.digital_inputs =
                 [digital_inputs.0.is_high(), digital_inputs.1.is_high()];
         });
+    }
+
+    /// Assemble stream frames from the samples handed over by `process`.
+    ///
+    /// Pended by `process` once per batch of samples. This keeps the frame generation
+    /// (allocation, header, copy, queueing) out of the sample processing.
+    ///
+    /// LTDC is a spare vector pended in software; the display peripheral is unused.
+    /// A direct binding avoids async executor overhead. It runs below DSP and above
+    /// network/USB. Wakeups can coalesce because this task drains the sample ring.
+    #[task(binds = LTDC, local = [generator, tail: u32 = 0], priority = 2)]
+    fn streamer(c: streamer::Context) {
+        let streamer::LocalResources {
+            generator, tail, ..
+        } = c.local;
+        loop {
+            match RING.pop::<BATCH_SIZE>(tail) {
+                Pop::Empty => break,
+                Pop::Batch(batch) => generator.add(|buf| {
+                    let data = bytemuck::cast_slice(&batch);
+                    buf[..data.len()].copy_from_slice(data);
+                    data.len()
+                }),
+                Pop::Lost(batches) => generator.skip(batches),
+            }
+        }
     }
 
     #[idle(shared=[network, settings, usb])]
