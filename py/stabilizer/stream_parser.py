@@ -73,7 +73,8 @@ class DacDecoder(AbstractDecoder):
     def to_mu(self, data, start=0, stop=-1):
         """Return the raw data in machine units"""
         # convert DAC offset binary to two's complement
-        data[start:stop] ^= np.int16(0x8000)
+        # (0x8000 as a positive value is out of range for np.int16)
+        data[start:stop] ^= np.int16(-0x8000)
         # pass
 
     def to_si(self, data, start=0, stop=-1):
