@@ -67,6 +67,7 @@ jobs:
       - run: cargo run --bin dds --target host-tuple
       - run: cargo run --bin mpll --target host-tuple
       - run: cargo run --bin fnc --target host-tuple
+      - run: cargo run --bin ff_fb --target host-tuple
       # - run: cargo run --bin fls --target host-tuple
 
   doc:
