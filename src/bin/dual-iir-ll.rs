@@ -1,7 +1,7 @@
 //! # Dual IIR, low latency
 //!
 //! A variant of the [Dual IIR](../dual_iir/index.html) application that minimizes the
-//! input-to-output latency. It has the same settings, telemetry and stream format.
+//! input-to-output latency. It has the same settings and stream format.
 //!
 //! ## Features
 //! * Two indpenendent channels
@@ -29,18 +29,33 @@
 //!   processing interrupt reads them from there. No DMA is involved in moving sample data.
 //! * Each DAC code is written directly into the DAC SPI transmit FIFO right after it has been
 //!   computed, from where it is transmitted immediately. The DAC updates are thus not aligned
-//!   to the sampling timer.
+//!   to the sampling timer. Channel 0 is processed first and has the lower latency.
+//! * Only one multiplication, one addition and the clamp per biquad separate an ADC sample
+//!   from its DAC code. The remaining terms of the biquad are precomputed after the previous
+//!   sample (see [stabilizer::dual_iir::Stage]).
 //! * Everything else is kept away from that path: the signal sources are advanced after the
 //!   DAC codes have been written and only if they are active, stream frames are assembled and
 //!   the digital inputs are sampled by a lower priority task once per `BATCH_SIZE` samples.
 //!
-//! The digital inputs controlling `External` run/hold are therefore applied with a delay of up
-//! to two batches, like in `dual-iir`.
+//! The latency from the sampling instant to the DAC update is then dominated by the ADC
+//! conversion and readout (about 0.6 µs) and the transfer of the code to the DAC (about
+//! 0.3 µs), plus half a sample period for the zero order hold.
 //!
-//! This comes at the expense of one interrupt per sample. The processing of a sample must
-//! complete within one sample period. If it does not, the firmware panics with an "ADC1 sample
-//! overrun". Reduce the sample rate (`SAMPLE_TICKS`) in that case. The telemetry reports the
-//! mean and maximum execution time of the processing to judge the margin.
+//! The digital inputs controlling `External` run/hold are applied with a delay of up to two
+//! batches, like in `dual-iir`.
+//!
+//! ## Sample rate
+//!
+//! The price is one interrupt per sample. The processing of a sample must complete within one
+//! sample period. If it does not, the firmware panics with an "ADC1 sample overrun". Each
+//! active signal source (non-zero amplitude) adds to the processing time.
+//!
+//! The telemetry reports the mean and maximum execution time of the processing routine
+//! (`process`) and the maximum time until the last DAC code has been written (`output`).
+//! Interrupt entry and exit and the stacking of the floating point context (about 0.15 µs in
+//! total) are not included in `process`. Use these to judge the margin before changing the
+//! sample rate (`SAMPLE_TICKS`), and do so with all signal sources active that are going to
+//! be used.
 //!
 //! ## Settings
 //! Refer to the [DualIir] structure for documentation of run-time configurable settings for this
@@ -76,6 +91,11 @@ const BATCH_SIZE: usize = 8;
 
 // The number of 100MHz timer ticks between each sample. With a value of 128, there is 1.28uS per
 // sample, corresponding to a sampling frequency of 781.25 KHz.
+//
+// Any value works, it does not need to be a power of two. The processing is estimated (not yet
+// measured) to take about 0.75 µs per sample including interrupt overhead, plus about 0.2 µs
+// for each active signal source. 100 ticks (1 MHz) are thus expected to work as long as the
+// signal sources are idle. Check the `process` telemetry before lowering this.
 const SAMPLE_TICKS: u32 = 128;
 const SAMPLE_PERIOD: f32 =
     SAMPLE_TICKS as f32 * stabilizer::design_parameters::TIMER_PERIOD;
