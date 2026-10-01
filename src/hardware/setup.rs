@@ -20,7 +20,7 @@ use platform::{AppSettings, ApplicationMetadata, NetSettings};
 use crate::design_parameters;
 
 use super::{
-    DigitalInput0, DigitalInput1, Eem, Gpio, HardwareVersion, Pgia,
+    DigitalInput0, DigitalInput1, Eem, Gpio, HardwareVersion, Pgia, Sampling,
     SerialTerminal, SystemTimer, Systick, UsbDevice, adc, afe, aux_dac,
     cpu_temp_sensor::CpuTempSensor,
     current_sense_dac::CurrentSenseDac,
@@ -216,7 +216,7 @@ fn load_itcm() {
 /// * `core` - The cortex-m peripherals.
 /// * `device` - The microcontroller peripherals to be configured.
 /// * `clock` - A `SystemTimer` implementing `Clock`.
-/// * `batch_size` - The size of each ADC/DAC batch.
+/// * `sampling` - The ADC/DAC sample transfer mode.
 /// * `sample_ticks` - The number of timer ticks between each sample.
 ///
 /// # Returns
@@ -229,7 +229,7 @@ pub fn setup<C>(
     mut core: hal::stm32::CorePeripherals,
     device: hal::stm32::Peripherals,
     clock: SystemTimer,
-    batch_size: usize,
+    sampling: Sampling,
     sample_ticks: u32,
 ) -> (Stabilizer<C>, Mezzanine, Eem)
 where
@@ -341,6 +341,8 @@ where
 
     let dma_streams =
         hal::dma::dma::StreamsTuple::new(device.DMA1, ccdr.peripheral.DMA1);
+
+    let batch_size = sampling.batch_size();
 
     // Verify that batch period does not exceed RTIC Monotonic timer period.
     assert!(
@@ -570,13 +572,13 @@ where
             dac0_spi,
             dma_streams.6,
             sampling_timer_channels.ch3,
-            batch_size,
+            sampling,
         );
         let dac1 = dac::Dac1Output::new(
             dac1_spi,
             dma_streams.7,
             sampling_timer_channels.ch4,
-            batch_size,
+            sampling,
         );
 
         dac_clr_n.set_low();
@@ -1019,17 +1021,21 @@ where
                     ccdr.clocks.timy_ker_ck().to_Hz() as _,
                 );
 
-                // Ensure that we have enough time for an IO-update every batch.
-                let sample_frequency = {
-                    design_parameters::TIMER_FREQUENCY.to_Hz() as f32
-                        / sample_ticks as f32
-                };
+                // Ensure that we have enough time for an IO-update every batch. In
+                // low-latency mode there are no batches and the DDS is not updated at the
+                // sample rate.
+                if let Sampling::Batched(batch_size) = sampling {
+                    let sample_frequency = {
+                        design_parameters::TIMER_FREQUENCY.to_Hz() as f32
+                            / sample_ticks as f32
+                    };
 
-                let sample_period = 1.0 / sample_frequency;
-                assert!(
-                    sample_period * batch_size as f32
-                        > design_parameters::POUNDER_IO_UPDATE_DELAY
-                );
+                    let sample_period = 1.0 / sample_frequency;
+                    assert!(
+                        sample_period * batch_size as f32
+                            > design_parameters::POUNDER_IO_UPDATE_DELAY
+                    );
+                }
 
                 hrtimer
             };

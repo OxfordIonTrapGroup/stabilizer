@@ -450,7 +450,7 @@ mod app {
             c.core,
             c.device,
             clock,
-            fls::BATCH_SIZE,
+            hardware::Sampling::Batched(fls::BATCH_SIZE),
             1 << fls::SAMPLE_TICKS_E,
         );
 

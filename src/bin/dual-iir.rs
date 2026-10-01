@@ -9,11 +9,44 @@
 //! * up to 800 kHz rate, timed sampling
 //! * Run-time filter configuration
 //! * Input/Output data streaming
-//! * Down to 2 µs latency
+//! * Down to 2 µs latency (low-latency mode)
 //! * f32 IIR math
 //! * Generic biquad (second order) IIR filter
 //! * Anti-windup
 //! * Derivative kick avoidance
+//!
+//! ## Sampling modes and latency
+//!
+//! The application supports two sampling modes, selected at compile time.
+//!
+//! ### Batched (default)
+//!
+//! ADC samples are collected into batches of `BATCH_SIZE` samples by DMA and processed one batch
+//! at a time. The DAC codes are also written by DMA, in batches, exactly three batch periods
+//! after the corresponding ADC samples were acquired. This minimizes the per-sample CPU overhead
+//! and leaves the most processing time for the DSP, but the input-to-output latency is about
+//! three batch periods, i.e. about 30 µs with the default batch size of 8 samples at the default
+//! sample rate of 781.25 kHz.
+//!
+//! ### Low-latency (`low_latency` cargo feature)
+//!
+//! Build with `cargo build --release --bin dual-iir --features low_latency`.
+//!
+//! Each sample is processed individually and immediately: the ADC conversions are still started
+//! by the sampling timer and the samples are still transferred to memory by DMA, but one sample
+//! at a time. As soon as a sample has arrived, the processing routine filters it and writes the
+//! resulting DAC code directly into the DAC SPI transmit FIFO, from where it is transmitted
+//! immediately. There is no batching and no DAC output DMA. The input-to-output latency is
+//! dominated by the ADC conversion and readout (about 0.6 µs), the processing (a few hundred
+//! nanoseconds) and the DAC transfer (about 0.3 µs) plus the DAC settling time. Note that the DAC
+//! updates are not aligned to the sampling timer in this mode.
+//!
+//! This comes at the expense of one interrupt per sample and thus a much higher CPU load: the
+//! processing of a sample (including telemetry, streaming and signal generator bookkeeping)
+//! must complete within one sample period. If it does not, the firmware panics due to an ADC
+//! input overrun. Reduce the sample rate (`SAMPLE_TICKS_LOG2`) in that case. Telemetry and
+//! streaming are unaffected; the streamed data is still grouped into batches of `BATCH_SIZE`
+//! samples.
 //!
 //! ## Settings
 //! Refer to the [DualIir] structure for documentation of run-time configurable settings for this
@@ -42,7 +75,8 @@ use stabilizer::pounder_config::PounderConfig;
 // The number of cascaded IIR biquads per channel. Select 1 or 2!
 const IIR_CASCADE_LENGTH: usize = 1;
 
-// The number of samples in each batch process
+// The number of samples in each batch process (batched mode) and in each streamed batch
+// (low-latency mode).
 const BATCH_SIZE: usize = 8;
 
 // The logarithm of the number of 100MHz timer ticks between each sample. With a value of 2^7 =
@@ -204,6 +238,37 @@ pub struct Active {
     source: Source,
 }
 
+impl Active {
+    /// Filter one ADC sample and add the signal source contribution.
+    ///
+    /// # Args
+    /// * `di` - The digital input state for run/hold control.
+    /// * `adc` - The ADC code of the input sample.
+    /// * `source` - The signal source contribution in DAC LSB.
+    ///
+    /// # Returns
+    /// The DAC code for the output sample.
+    #[inline(always)]
+    fn process(&mut self, di: bool, adc: u16, source: i16) -> u16 {
+        let x = f32::from(adc as i16);
+        let y = self.biquad.iter().zip(self.state.iter_mut()).fold(
+            x,
+            |y, (ch, state)| {
+                if self.run.run(di) {
+                    ch.process(state, y)
+                } else {
+                    iir::Biquad::<f32>::HOLD.process(state, y)
+                }
+            },
+        );
+
+        // Note(unsafe): The filter limits must ensure that the value is in range.
+        // The truncation introduces 1/2 LSB distortion.
+        let y: i16 = unsafe { y.to_int_unchecked() };
+        DacCode::from(y.saturating_add(source)).0
+    }
+}
+
 #[cfg(not(target_os = "none"))]
 fn main() {
     use miniconf::{json::to_json_value, json_schema::TreeJsonSchema};
@@ -229,7 +294,7 @@ mod app {
 
     use stabilizer::{
         hardware::{
-            self, DigitalInput0, DigitalInput1, Pgia, SerialTerminal,
+            self, DigitalInput0, DigitalInput1, Pgia, Sampling, SerialTerminal,
             SystemTimer, Systick, UsbDevice,
             adc::{Adc0Input, Adc1Input},
             dac::{Dac0Output, Dac1Output},
@@ -242,6 +307,16 @@ mod app {
         telemetry::TelemetryBuffer,
     };
     use stream::FrameGenerator;
+
+    // The ADC/DAC sample transfer mode, see the crate documentation.
+    const SAMPLING: Sampling = if cfg!(feature = "low_latency") {
+        Sampling::LowLatency
+    } else {
+        Sampling::Batched(BATCH_SIZE)
+    };
+
+    // The number of samples handled per `process` invocation.
+    const PROCESS_SIZE: usize = SAMPLING.batch_size();
 
     #[shared]
     struct Shared {
@@ -276,7 +351,7 @@ mod app {
                 c.core,
                 c.device,
                 clock,
-                BATCH_SIZE,
+                SAMPLING,
                 SAMPLE_TICKS,
             );
 
@@ -370,9 +445,18 @@ mod app {
     ///
     /// Because the ADC and DAC operate at the same rate, these two constraints actually implement
     /// the same time bounds, meeting one also means the other is also met.
+    ///
+    /// In low-latency mode, a batch is a single sample and there is no DAC output buffer: the DAC
+    /// codes are written to the DACs immediately after they have been computed and before the
+    /// telemetry, signal source and stream bookkeeping.
     #[task(
         binds=DMA1_STR4,
-        local=[digital_inputs, adcs, dacs, generator, source: [[i16; BATCH_SIZE]; 2] = [[0; BATCH_SIZE]; 2]],
+        local=[digital_inputs, adcs, dacs, generator,
+            source: [[i16; PROCESS_SIZE]; 2] = [[0; PROCESS_SIZE]; 2],
+            #[cfg(feature = "low_latency")]
+            stream: [[u16; BATCH_SIZE]; 4] = [[0; BATCH_SIZE]; 4],
+            #[cfg(feature = "low_latency")]
+            index: usize = 0],
         shared=[active, telemetry],
         priority=3)]
     #[unsafe(link_section = ".itcm.process")]
@@ -387,10 +471,15 @@ mod app {
             dacs: (dac0, dac1),
             generator,
             source,
+            #[cfg(feature = "low_latency")]
+            stream,
+            #[cfg(feature = "low_latency")]
+            index,
             ..
         } = c.local;
 
         (active, telemetry).lock(|active, telemetry| {
+            #[cfg(not(feature = "low_latency"))]
             (adc0, adc1, dac0, dac1).lock(|adc0, adc1, dac0, dac1| {
                 // Preserve instruction and data ordering w.r.t. DMA flag access before and after.
                 fence(Ordering::SeqCst);
@@ -411,23 +500,7 @@ mod app {
                     for ((adc, dac), source) in
                         adc.iter().zip(dac.iter_mut()).zip(source)
                     {
-                        let x = f32::from(*adc as i16);
-                        let y = active
-                            .biquad
-                            .iter()
-                            .zip(active.state.iter_mut())
-                            .fold(x, |y, (ch, state)| {
-                                if active.run.run(di) {
-                                    ch.process(state, y)
-                                } else {
-                                    iir::Biquad::<f32>::HOLD.process(state, y)
-                                }
-                            });
-
-                        // Note(unsafe): The filter limits must ensure that the value is in range.
-                        // The truncation introduces 1/2 LSB distortion.
-                        let y: i16 = unsafe { y.to_int_unchecked() };
-                        *dac = DacCode::from(y.saturating_add(*source)).0;
+                        *dac = active.process(di, *adc, *source);
                     }
                 }
                 telemetry.adcs = [AdcCode(adc[0][0]), AdcCode(adc[1][0])];
@@ -447,6 +520,49 @@ mod app {
 
                 fence(Ordering::SeqCst);
             });
+
+            #[cfg(feature = "low_latency")]
+            (adc0, adc1).lock(|adc0, adc1| {
+                // Preserve instruction and data ordering w.r.t. DMA flag access before and after.
+                fence(Ordering::SeqCst);
+                let adc = [adc0[0], adc1[0]];
+                let di = telemetry.digital_inputs;
+
+                // Update each DAC as soon as its code is available.
+                let y0 = active[0].process(di[0], adc[0], source[0][0]);
+                dac0.write(y0);
+                let y1 = active[1].process(di[1], adc[1], source[1][0]);
+                dac1.write(y1);
+                let dac = [y0, y1];
+
+                telemetry.adcs = [AdcCode(adc[0]), AdcCode(adc[1])];
+                telemetry.dacs = [DacCode(dac[0]), DacCode(dac[1])];
+
+                // Stream the data in batches of BATCH_SIZE samples.
+                for (stream, data) in
+                    stream.iter_mut().zip([adc[0], adc[1], dac[0], dac[1]])
+                {
+                    stream[*index] = data;
+                }
+                *index += 1;
+                if *index == BATCH_SIZE {
+                    *index = 0;
+                    const N: usize = BATCH_SIZE * size_of::<i16>();
+                    generator.add(|buf| {
+                        stream
+                            .iter()
+                            .zip(buf.chunks_exact_mut(N))
+                            .map(|(data, buf)| {
+                                buf.copy_from_slice(bytemuck::cast_slice(data))
+                            })
+                            .count()
+                            * N
+                    });
+                }
+
+                fence(Ordering::SeqCst);
+            });
+
             *source = active.each_mut().map(|ch| {
                 core::array::from_fn(|_| (ch.source.next().unwrap() >> 16) as _)
             });

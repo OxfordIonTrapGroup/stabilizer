@@ -39,3 +39,13 @@ python3 hitl/loopback.py $PREFIX
 
 # Test the stream capabilities
 python3 hitl/streaming.py $PREFIX
+
+# Repeat the tests for the low-latency (per-sample, non-DMA) sampling mode of dual-iir.
+cargo build --release --bin dual-iir --features low_latency
+probe-rs download --chip STM32H743ZITx --log-file /dev/null --probe $PROBE target/thumbv7em-none-eabihf/release/dual-iir
+probe-rs reset --chip STM32H743ZITx --log-file /dev/null --probe $PROBE --connect-under-reset
+sleep 30
+ping -c 5 -w 20 stabilizer-hitl
+python3 -m miniconf $PREFIX '?'
+python3 hitl/loopback.py $PREFIX
+python3 hitl/streaming.py $PREFIX

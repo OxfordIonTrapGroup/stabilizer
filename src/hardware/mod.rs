@@ -53,6 +53,31 @@ pub enum Eem {
     None,
 }
 
+/// ADC/DAC sample transfer mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Sampling {
+    /// Batches of the given number of samples are moved between the converters and
+    /// double-buffered RAM by DMA, timed by the sampling timer. The application processes one
+    /// batch at a time. Input-to-output latency is several batch periods.
+    Batched(usize),
+    /// Each ADC sample is transferred to RAM by DMA individually as soon as its conversion
+    /// completes (i.e. with a batch size of one) and processed immediately. The DAC codes are
+    /// written directly to the DAC SPI TX FIFOs by the CPU, without DMA and not aligned to the
+    /// sampling timer. Input-to-output latency is dominated by the converter and SPI transfer
+    /// times, at the expense of a much higher per-sample CPU overhead.
+    LowLatency,
+}
+
+impl Sampling {
+    /// The number of samples the application processes at once.
+    pub const fn batch_size(&self) -> usize {
+        match self {
+            Self::Batched(batch_size) => *batch_size,
+            Self::LowLatency => 1,
+        }
+    }
+}
+
 // Type alias for digital input 0 (DI0).
 pub type DigitalInput0 = hal::gpio::gpiog::PG9<hal::gpio::Input>;
 

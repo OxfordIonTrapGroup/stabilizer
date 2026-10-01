@@ -39,7 +39,7 @@ jobs:
     strategy:
       matrix:
         toolchain: [stable]
-        features: ['']
+        features: ['', 'low_latency']
         continue-on-error: [false]
         include:
           - toolchain: beta

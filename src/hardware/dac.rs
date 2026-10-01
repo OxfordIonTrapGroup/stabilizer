@@ -32,6 +32,14 @@
 //! multiple inputs to a single output, the output code can be repeated a number of times in the
 //! output buffer corresponding with the number of input samples that were used to generate it.
 //!
+//! ## Low-Latency Mode
+//!
+//! In [`Sampling::LowLatency`] mode, neither the timer compare channel nor DMA are used. The
+//! SPI is started in an endless transaction and the application writes each DAC code directly
+//! into the SPI TX FIFO using [`Dac0Output::write`]/[`Dac1Output::write`]. The code is
+//! transmitted immediately. The DAC update instants are thus determined by the application's
+//! processing and not aligned to the sampling timer.
+//!
 //!
 //! # Note
 //!
@@ -50,9 +58,11 @@
 //! While double-buffered mode is used for DMA to avoid lost DAC-update events, there is no check
 //! for re-use of a previously provided DAC output buffer. It is assumed that the DMA request is
 //! served promptly after the transfer completes.
+use core::cell::UnsafeCell;
+
 use rtic::Mutex;
 
-use super::timers;
+use super::{Sampling, timers};
 use crate::{
     convert::DacCode,
     design_parameters::{MAX_SAMPLE_BUFFER_SIZE, SampleBuffer},
@@ -79,6 +89,7 @@ static mut DAC_BUF: [[SampleBuffer; 2]; 2] =
 macro_rules! dac_output {
     ($name:ident, $index:literal, $data_stream:ident,
      $spi:ident, $trigger_channel:ident, $dma_req:ident) => {
+        paste::paste! {
         /// $spi is used as a type for indicating a DMA transfer into the SPI TX FIFO
         struct $spi {
             spi: hal::spi::Spi<hal::stm32::$spi, hal::spi::Disabled, u16>,
@@ -93,14 +104,30 @@ macro_rules! dac_output {
                 Self { spi, _channel }
             }
 
+            /// Enable the SPI and start it in infinite transaction mode. Every word written
+            /// to the TX FIFO is then transmitted as an individual hardware-CS-framed transfer.
+            fn start(&mut self) {
+                self.spi.inner().cr1.modify(|_, w| w.spe().set_bit());
+                self.spi.inner().cr1.modify(|_, w| w.cstart().started());
+            }
+
             /// Start the SPI and begin operating in a DMA-driven transfer mode.
             pub fn start_dma(&mut self) {
                 // Allow the SPI FIFOs to operate using only DMA data channels.
                 self.spi.enable_dma_tx();
+                self.start();
+            }
 
-                // Enable SPI and start it in infinite transaction mode.
-                self.spi.inner().cr1.modify(|_, w| w.spe().set_bit());
-                self.spi.inner().cr1.modify(|_, w| w.cstart().started());
+            /// Write a code into the SPI TX FIFO.
+            #[inline]
+            fn write(&mut self, code: u16) {
+                // Note(unsafe): A half-word access pushes exactly one 16 bit frame into the
+                // TX FIFO.
+                unsafe {
+                    let txdr = &self.spi.inner().txdr as *const _
+                        as *const UnsafeCell<u16>;
+                    core::ptr::write_volatile(UnsafeCell::raw_get(txdr), code);
+                }
             }
         }
 
@@ -120,16 +147,25 @@ macro_rules! dac_output {
             }
         }
 
-        /// Represents data associated with DAC.
-        pub struct $name {
+        /// The path of the DAC codes from the application to the DAC SPI TX FIFO.
+        enum [< $name Data >] {
+            /// Batches of codes are written from double-buffered RAM by DMA, timed by the
+            /// sampling timer.
             // Note: SPI TX functionality may not be used from this structure to ensure safety with DMA.
-            transfer: Transfer<
+            Dma(Transfer<
                 hal::dma::dma::$data_stream<hal::stm32::DMA1>,
                 $spi,
                 MemoryToPeripheral,
                 &'static mut [u16],
                 hal::dma::DBTransfer,
-            >,
+            >),
+            /// Individual codes are written to the SPI TX FIFO by the CPU.
+            Direct($spi),
+        }
+
+        /// Represents data associated with DAC.
+        pub struct $name {
+            data: [< $name Data >],
         }
 
         impl $name {
@@ -137,57 +173,80 @@ macro_rules! dac_output {
             ///
             /// # Args
             /// * `spi` - The SPI interface used to communicate with the ADC.
-            /// * `stream` - The DMA stream used to write DAC codes over SPI.
-            /// * `trigger_channel` - The sampling timer output compare channel for update triggers.
+            /// * `stream` - The DMA stream used to write DAC codes over SPI. Unused in
+            ///   low-latency mode.
+            /// * `trigger_channel` - The sampling timer output compare channel for update
+            ///   triggers. Unused in low-latency mode.
+            /// * `sampling` - The sample transfer mode.
             pub fn new(
                 spi: hal::spi::Spi<hal::stm32::$spi, hal::spi::Enabled, u16>,
                 stream: hal::dma::dma::$data_stream<hal::stm32::DMA1>,
                 trigger_channel: timers::tim2::$trigger_channel,
-                batch_size: usize,
+                sampling: Sampling,
             ) -> Self {
-                // Generate DMA events when an output compare of the timer hitting zero (timer roll over)
-                // occurs.
-                trigger_channel.listen_dma();
-                trigger_channel.to_output_compare(4 + $index);
-
-                // The stream constantly writes to the TX FIFO to write new update codes.
-                let trigger_config = DmaConfig::default()
-                    .memory_increment(true)
-                    .double_buffer(true)
-                    .peripheral_increment(false);
-
                 // Listen for any potential SPI error signals, which may indicate that we are not generating
                 // update codes.
                 let mut spi = spi.disable();
                 spi.listen(hal::spi::Event::Error);
 
-                // AXISRAM is uninitialized. As such, we manually initialize it for a 0V DAC output
-                // here before starting the transfer .
-                // Note(unsafe): We currently own all DAC_BUF[index] buffers and are not using them
-                // elsewhere, so it is safe to access them here.
-                for buf in unsafe { DAC_BUF[$index].iter_mut() } {
-                    for byte in buf.iter_mut() {
-                        *byte = DacCode::try_from(0.0f32).unwrap().0;
+                let data = match sampling {
+                    Sampling::Batched(batch_size) => {
+                        // Generate DMA events when an output compare of the timer hitting zero
+                        // (timer roll over) occurs.
+                        trigger_channel.listen_dma();
+                        trigger_channel.to_output_compare(4 + $index);
+
+                        // The stream constantly writes to the TX FIFO to write new update codes.
+                        let trigger_config = DmaConfig::default()
+                            .memory_increment(true)
+                            .double_buffer(true)
+                            .peripheral_increment(false);
+
+                        // AXISRAM is uninitialized. As such, we manually initialize it for a 0V
+                        // DAC output here before starting the transfer .
+                        // Note(unsafe): We currently own all DAC_BUF[index] buffers and are not
+                        // using them elsewhere, so it is safe to access them here.
+                        for buf in unsafe { DAC_BUF[$index].iter_mut() } {
+                            for byte in buf.iter_mut() {
+                                *byte = DacCode::try_from(0.0f32).unwrap().0;
+                            }
+                        }
+
+                        // Construct the trigger stream to write from memory to the peripheral.
+                        let transfer: Transfer<_, _, MemoryToPeripheral, _, _> =
+                            Transfer::init(
+                                stream,
+                                $spi::new(trigger_channel, spi),
+                                // Note(unsafe): This buffer is only used once and provided for the DMA transfer.
+                                unsafe { &mut DAC_BUF[$index][0][..batch_size] },
+                                // Note(unsafe): This buffer is only used once and provided for the DMA transfer.
+                                unsafe { Some(&mut DAC_BUF[$index][1][..batch_size]) },
+                                trigger_config,
+                            );
+
+                        [< $name Data >]::Dma(transfer)
                     }
-                }
+                    Sampling::LowLatency => {
+                        [< $name Data >]::Direct($spi::new(trigger_channel, spi))
+                    }
+                };
 
-                // Construct the trigger stream to write from memory to the peripheral.
-                let transfer: Transfer<_, _, MemoryToPeripheral, _, _> =
-                    Transfer::init(
-                        stream,
-                        $spi::new(trigger_channel, spi),
-                        // Note(unsafe): This buffer is only used once and provided for the DMA transfer.
-                        unsafe { &mut DAC_BUF[$index][0][..batch_size] },
-                        // Note(unsafe): This buffer is only used once and provided for the DMA transfer.
-                        unsafe { Some(&mut DAC_BUF[$index][1][..batch_size]) },
-                        trigger_config,
-                    );
-
-                Self { transfer }
+                Self { data }
             }
 
+            /// Enable the DAC output.
             pub fn start(&mut self) {
-                self.transfer.start(|spi| spi.start_dma());
+                match &mut self.data {
+                    [< $name Data >]::Dma(transfer) => {
+                        transfer.start(|spi| spi.start_dma());
+                    }
+                    [< $name Data >]::Direct(spi) => {
+                        spi.start();
+                        // Emit a 0V code immediately, analogous to the initialized DMA
+                        // buffers in batched mode.
+                        spi.write(DacCode::try_from(0.0f32).unwrap().0);
+                    }
+                }
             }
 
             /// Wait for the transfer of the currently active buffer to complete,
@@ -196,13 +255,36 @@ macro_rules! dac_output {
             ///
             /// NOTE(unsafe): Memory safety and access ordering is not guaranteed
             /// (see the HAL DMA docs).
+            ///
+            /// # Panics
+            /// Panics if the DAC is not in [`Sampling::Batched`] mode.
             pub fn with_buffer<F, R>(&mut self, f: F) -> Result<R, DMAError>
             where
                 F: FnOnce(&mut &'static mut [u16]) -> R,
             {
+                let [< $name Data >]::Dma(transfer) = &mut self.data else {
+                    panic!(concat!("DAC", stringify!($index), " not in batched mode"));
+                };
                 unsafe {
-                    self.transfer.next_dbm_transfer_with(|buf, _current| f(buf))
+                    transfer.next_dbm_transfer_with(|buf, _current| f(buf))
                 }
+            }
+
+            /// Write a DAC code to the SPI TX FIFO for immediate transmission.
+            ///
+            /// The TX FIFO holds up to eight codes and drains at the SPI word transfer rate
+            /// (about 3 MHz). The FIFO level is not checked: the caller must not write codes
+            /// faster than that on average, which is guaranteed when writing one code per
+            /// sample.
+            ///
+            /// # Panics
+            /// Panics if the DAC is not in [`Sampling::LowLatency`] mode.
+            #[inline]
+            pub fn write(&mut self, code: u16) {
+                let [< $name Data >]::Direct(spi) = &mut self.data else {
+                    panic!(concat!("DAC", stringify!($index), " not in low-latency mode"));
+                };
+                spi.write(code);
             }
         }
 
@@ -213,6 +295,7 @@ macro_rules! dac_output {
             fn lock<R>(&mut self, f: impl FnOnce(&mut Self::T) -> R) -> R {
                 self.with_buffer(f).unwrap()
             }
+        }
         }
     };
 }

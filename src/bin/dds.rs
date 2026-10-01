@@ -143,7 +143,7 @@ mod app {
             c.core,
             c.device,
             clock,
-            8,
+            hardware::Sampling::Batched(8),
             1 << 7,
         );
 

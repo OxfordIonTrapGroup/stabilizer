@@ -166,7 +166,7 @@ mod app {
             c.core,
             c.device,
             clock,
-            BATCH_SIZE,
+            hardware::Sampling::Batched(BATCH_SIZE),
             SAMPLE_TICKS,
         );
 
