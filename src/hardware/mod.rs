@@ -13,6 +13,7 @@ use platform::{ApplicationMetadata, AsyncFlash, UnlockFlash};
 pub mod adc;
 pub mod afe;
 pub mod aux_dac;
+pub mod basepri_critical_section;
 pub mod cpu_temp_sensor;
 pub mod current_sense_dac;
 pub mod dac;

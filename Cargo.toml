@@ -130,10 +130,9 @@ stm32h7xx-hal = { version = "0.16.0", features = [
 	"xspi",
 	"usb_hs",
 ], git = "https://github.com/stm32-rs/stm32h7xx-hal.git" }
-cortex-m = { version = "0.7.7", features = [
-	"inline-asm",
-	"critical-section-single-core",
-] }
+cortex-m = { version = "0.7.7", features = ["inline-asm"] }
+# See `hardware::basepri_critical_section` for the implementation.
+critical-section = { version = "1.2", features = ["restore-state-u8"] }
 cortex-m-rt = { version = "0.7", features = ["device"] }
 rtic = { version = "2.1", features = ["thumbv7-backend"] }
 rtt-target = "0.3"
@@ -184,3 +183,8 @@ miniconf_derive = { git = "https://github.com/quartiq/miniconf.git" }
 # minimq 0.10.0 with a fix for the number of messages in flight. Later versions
 # are a rewrite for async I/O.
 minimq = { git = "https://github.com/OxfordIonTrapGroup/minimq.git", branch = "v0.10-in-flight-limit" }
+
+# stm32h7xx-hal with synopsys-usb-otg 0.5 (critical-section instead of cortex_m::interrupt::free),
+# and without forcing the cortex-m/critical-section-single-core implementation.
+[patch."https://github.com/stm32-rs/stm32h7xx-hal.git"]
+stm32h7xx-hal = { git = "https://github.com/OxfordIonTrapGroup/stm32h7xx-hal.git", branch = "critical-section-impl-agnostic" }

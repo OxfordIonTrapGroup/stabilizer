@@ -324,6 +324,18 @@ where
     load_itcm();
 
     Systick::start(core.SYST, ccdr.clocks.sysclk().to_Hz());
+    // SysTick defaults to the highest priority, where it would preempt the DSP task. Its handler
+    // (the RTIC timer queue) takes critical sections, so it must not run above their ceiling.
+    // Running at the ceiling (rather than at the async task priority) also ensures that SysTick
+    // counter wraps are not missed while a long-running task is busy.
+    unsafe {
+        core.SCB.set_priority(
+            cortex_m::peripheral::scb::SystemHandler::SysTick,
+            super::basepri_critical_section::logical2hw(
+                super::basepri_critical_section::CRITICAL_SECTION_PRIORITY,
+            ),
+        );
+    }
 
     // After ITCM loading.
     core.SCB.enable_icache();
