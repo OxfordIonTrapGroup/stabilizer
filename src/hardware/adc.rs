@@ -58,7 +58,8 @@
 //! at that time. The interrupt handler takes each sample directly from the respective RX FIFO
 //! with [`Adc0Input::read`]/[`Adc1Input::read`] and, once it is done with the sample, uses
 //! [`Adc1Input::check`] to detect SPI errors and whether the next sample has already arrived,
-//! i.e. whether it took longer than a sample period.
+//! i.e. whether this one was processed late. Late samples wait in the RX FIFOs. Only if those
+//! overflow, samples are lost, which is an SPI error.
 //!
 //!
 //! # Note
@@ -442,28 +443,29 @@ macro_rules! adc_input {
 
                 /// Check the health of the sample stream after a sample has been processed.
                 ///
+                /// # Returns
+                /// Whether the next sample is already pending, i.e. whether this one was
+                /// processed late: processing took longer than a sample period or started
+                /// late (e.g. due to a critical section elsewhere). The pending sample stays
+                /// in the RX FIFO and is processed next.
+                ///
                 /// # Panics
-                /// * If the SPI signals an error (e.g. an RX FIFO overrun).
-                /// * If the next sample is already pending, i.e. if processing the previous
-                ///   one took longer than a sample period. This is the equivalent of the DMA
-                ///   overflow in batched mode.
+                /// If the SPI signals an error (e.g. an RX FIFO overrun, when samples have
+                /// been lost). This is the equivalent of the DMA overflow in batched mode.
                 #[inline(always)]
-                pub fn check(&mut self) {
+                pub fn check(&mut self) -> bool {
                     // Note(unsafe): Read-only access to the status register.
                     let sr = unsafe { &*hal::stm32::$spi::ptr() }.sr.read().bits();
-                    if sr & (SPI_SR_ERRORS | SPI_SR_RXP) != 0 {
-                        Self::fail(sr);
+                    if sr & SPI_SR_ERRORS != 0 {
+                        Self::fail();
                     }
+                    sr & SPI_SR_RXP != 0
                 }
 
                 #[cold]
                 #[inline(never)]
-                fn fail(sr: u32) -> ! {
-                    if sr & SPI_SR_ERRORS != 0 {
-                        panic!(concat!("ADC", stringify!($index), " SPI error"));
-                    } else {
-                        panic!(concat!("ADC", stringify!($index), " sample overrun"));
-                    }
+                fn fail() -> ! {
+                    panic!(concat!("ADC", stringify!($index), " SPI error"));
                 }
             }
 

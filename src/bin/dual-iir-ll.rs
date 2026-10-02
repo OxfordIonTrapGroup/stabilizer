@@ -46,9 +46,16 @@
 //!
 //! ## Sample rate
 //!
-//! The price is one interrupt per sample. The processing of a sample must complete within one
-//! sample period. If it does not, the firmware panics with an "ADC1 sample overrun". Each
-//! active signal source (non-zero amplitude) adds to the processing time.
+//! The price is one interrupt per sample. The processing of a sample should complete before
+//! the next one arrives. Each active signal source (non-zero amplitude) adds to the processing
+//! time.
+//!
+//! A sample that arrives while the previous one is still being processed waits in the ADC SPI
+//! receive FIFOs and is processed right afterwards, with a correspondingly higher latency.
+//! This also happens when the processing interrupt is held off, e.g. by the critical sections
+//! of the USB device driver. No samples are lost and the telemetry reports the number of such
+//! late samples (`late`). Only if the FIFOs overflow, the firmware panics with an ADC SPI
+//! error.
 //!
 //! The telemetry reports the mean and maximum execution time of the processing routine
 //! (`process`) and the maximum time until the last DAC code has been written (`output`).
@@ -275,14 +282,17 @@ pub struct Times {
     process_max: u32,
     /// Sum of the durations of the routine
     process_sum: u64,
+    /// Number of samples that were already pending when the previous one was done
+    late: u32,
 }
 
 impl Times {
     #[inline(always)]
-    fn update(&mut self, output: u32, process: u32) {
+    fn update(&mut self, output: u32, process: u32, late: bool) {
         self.output_max = self.output_max.max(output);
         self.process_max = self.process_max.max(process);
         self.process_sum = self.process_sum.wrapping_add(process as _);
+        self.late = self.late.wrapping_add(late as _);
     }
 }
 
@@ -310,6 +320,9 @@ pub struct Telemetry {
     /// Maximum time in seconds from the start of the sample processing routine until the
     /// last DAC code has been written.
     pub output: f32,
+    /// Number of samples since the previous report that arrived before the processing of the
+    /// preceding sample was complete. They are processed with increased latency, not lost.
+    pub late: u32,
 }
 
 #[cfg(not(target_os = "none"))]
@@ -452,8 +465,9 @@ mod app {
     /// is left to lower priority tasks.
     ///
     /// # Note
-    /// Processing must complete within one sample period. If this constraint is not met,
-    /// firmware will panic due to an ADC sample overrun.
+    /// Processing should complete within one sample period. Samples that arrive earlier wait
+    /// in the ADC SPI receive FIFOs and are counted as late. If those FIFOs overflow, firmware
+    /// will panic due to an ADC SPI error.
     #[task(binds = SPI3, local = [adcs, dacs], shared = [state], priority = 3)]
     #[unsafe(link_section = ".itcm.process")]
     fn process(mut c: process::Context) {
@@ -491,12 +505,15 @@ mod app {
             ch0.update_source();
             ch1.update_source();
 
-            // Detect SPI errors and whether this took longer than a sample period.
-            adc1.check();
+            // Detect SPI errors and whether the next sample is already pending.
+            // TODO: Track down what holds this off (e.g. the interrupt-free section of the
+            // USB device poll) and what occasionally makes it exceed a sample period.
+            let late = adc1.check();
 
             times.update(
                 output.wrapping_sub(start),
                 DWT::cycle_count().wrapping_sub(start),
+                late,
             );
         });
     }
@@ -643,6 +660,7 @@ mod app {
                     times.process_max,
                 ),
                 output: times.output_max as f32 * CPU_CYCLE,
+                late: times.late,
             };
 
             c.shared.network.lock(|net| {
