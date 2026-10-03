@@ -20,4 +20,6 @@ pub mod fnc;
 
 pub mod harmonics;
 
+pub mod l674;
+
 pub mod pounder_config;

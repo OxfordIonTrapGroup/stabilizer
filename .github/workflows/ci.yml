@@ -68,6 +68,7 @@ jobs:
       - run: cargo run --bin mpll --target host-tuple
       - run: cargo run --bin fnc --target host-tuple
       - run: cargo run --bin current_sense --target host-tuple
+      - run: cargo run --bin l674 --target host-tuple
       # - run: cargo run --bin fls --target host-tuple
 
   doc:

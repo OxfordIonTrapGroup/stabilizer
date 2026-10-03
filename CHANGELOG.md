@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * Defaulting to `s` optimization for debug and release
 * `fls`: application for fiber length stabilization and phase/frequency measurement/control
 * `mpll`: dispersive PLL
+* `l674`: application for locking the 674 nm SolsTiS laser to a cavity (cascaded
+  fast/slow PZT controllers, gain ramp, lock detection on the cavity
+  transmission with a read-only `lock_detect/adc1_filtered` setting for relocking)
 
 ### Changed
 
