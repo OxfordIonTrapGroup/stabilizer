@@ -10,6 +10,10 @@
 //! sampling frequency. Instead, the raw codes are stored and the telemetry is generated as
 //! required immediately before transmission. This ensures that any slower computation required
 //! for unit conversion can be off-loaded to lower priority tasks.
+//!
+//! The application metadata (`meta`: firmware version, build profile, hardware revision, panic
+//! information) is published retained each time the client connects, such that a client
+//! application can find out at any time which software a device runs.
 use crate::ApplicationMetadata;
 use heapless::String;
 use minimq::{
@@ -110,7 +114,7 @@ impl<C: Clock, S: TcpClientStack<Error = smoltcp_nal::NetworkError> + Dns>
             return;
         }
 
-        // Publish application metadata
+        // Publish application metadata (retained)
         if !self.meta_published
             && self.mqtt.client().can_publish(minimq::QoS::AtMostOnce)
         {
@@ -121,18 +125,21 @@ impl<C: Clock, S: TcpClientStack<Error = smoltcp_nal::NetworkError> + Dns>
 
             if mqtt
                 .client()
-                .publish(Publication::new(&topic, |buf: &mut [u8]| {
-                    serde_json_core::to_slice(&metadata, buf)
-                }))
+                .publish(
+                    Publication::new(&topic, |buf: &mut [u8]| {
+                        serde_json_core::to_slice(&metadata, buf)
+                    })
+                    .retain(),
+                )
                 .is_err()
             {
                 // Note(unwrap): We can guarantee that this message will be sent because we checked
                 // for ability to publish above.
                 mqtt.client()
-                    .publish(Publication::new(
-                        &topic,
-                        DEFAULT_METADATA.as_bytes(),
-                    ))
+                    .publish(
+                        Publication::new(&topic, DEFAULT_METADATA.as_bytes())
+                            .retain(),
+                    )
                     .unwrap();
             }
 

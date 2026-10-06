@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * `py`: `StabilizerStream` renamed to `Stream`
 * `dual-iir`: settings tree layout changed
 * `urukul`: bin target renamed to `dds`
+* The `meta` topic (the build metadata: firmware version, hardware revision, panic
+  information) is retained, so that clients can find out at any time what a
+  device runs (or, if it is not connected, ran last), not only when it connects.
 
 ### Fixed
 
