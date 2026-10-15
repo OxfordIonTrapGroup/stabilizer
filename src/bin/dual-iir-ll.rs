@@ -46,6 +46,15 @@
 //!
 //! ## Sample rate
 //!
+//! The default sample period is 128 timer ticks (1.28 µs, 781.25 kHz), recommended for CPU
+//! headroom. In Rev 1.3 measurements, the two-channel build also ran at 112 and 100 ticks
+//! without late samples, with idle-source stream losses of about 5% and 40%, respectively.
+//! A simplified single-channel build ran at 84 ticks; 80 ticks produced ADC SPI errors and
+//! 64 silently halved the sampling rate. The exact ADC readout limit remains unresolved.
+//! The compile-time floor of 100 ticks is a conservative margin from these readout failures.
+//! Non-power-of-two periods are allowed. The `process` and `late` telemetry cannot detect
+//! skipped ADC triggers.
+//!
 //! The price is one interrupt per sample. The processing of a sample should complete before
 //! the next one arrives. Each active signal source (non-zero amplitude) adds to the processing
 //! time.
@@ -96,14 +105,15 @@ use stabilizer::{
 // The number of samples in each streamed batch
 const BATCH_SIZE: usize = 8;
 
-// The number of 100MHz timer ticks between each sample. With a value of 128, there is 1.28uS per
-// sample, corresponding to a sampling frequency of 781.25 KHz.
-//
-// Any value works, it does not need to be a power of two. The processing is estimated (not yet
-// measured) to take about 0.75 µs per sample including interrupt overhead, plus about 0.2 µs
-// for each active signal source. 100 ticks (1 MHz) are thus expected to work as long as the
-// signal sources are idle. Check the `process` telemetry before lowering this.
+// Timer ticks at 100 MHz: 128 ticks give 781.25 kHz with more CPU headroom than 100 ticks.
+// The 100-tick floor is a conservative margin from readout failures observed around 80 ticks;
+// the usable rate also depends on CPU load. `process` and `late` miss skipped ADC triggers.
+// The shadow sampling timer has a 16-bit period. Non-power-of-two periods are supported.
 const SAMPLE_TICKS: u32 = 128;
+const _: () = assert!(
+    SAMPLE_TICKS >= 100 && SAMPLE_TICKS <= u16::MAX as u32,
+    "dual-iir-ll requires 100..=65535 timer ticks per sample"
+);
 const SAMPLE_PERIOD: f32 =
     SAMPLE_TICKS as f32 * stabilizer::design_parameters::TIMER_PERIOD;
 
