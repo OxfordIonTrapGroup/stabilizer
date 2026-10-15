@@ -50,8 +50,9 @@
 //!
 //! ## Interfaces
 //!
-//! See [DualIir] for settings and [Telemetry] for telemetry. The UDP [stream] contains raw ADC
-//! and DAC codes in batches of eight samples, as in `dual-iir`.
+//! See [DualIir] for settings and [Telemetry](stabilizer::dual_iir::Telemetry) for telemetry.
+//! The UDP [stream] contains raw ADC and DAC codes in batches of eight samples, as in
+//! `dual-iir`.
 //!
 //! Both variants use the MQTT prefix `dt/sinara/dual-iir/<id>/` and share retained settings.
 //! The retained `meta` message identifies the binary in `application`: `dual-iir-ll` here,
@@ -59,19 +60,14 @@
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use miniconf::Tree;
 
 use idsp::iir::pid::Units;
 
 use platform::{AppSettings, NetSettings};
-use serde::Serialize;
-use signal_generator::Source;
 use stabilizer::{
     convert::{AdcCode, DacCode},
-    dual_iir::{Biquad, Channel, DualIir, IIR_CASCADE_LENGTH, Run, Stage},
-    telemetry::{CPU_CYCLE, PounderTelemetry, Timing},
+    dual_iir::{Active, DualIir, Times},
 };
 
 // The number of samples in each streamed batch
@@ -124,190 +120,12 @@ impl serial_settings::Settings for Settings {
     }
 }
 
-/// The run-time state of one channel.
-#[derive(Clone, Debug)]
-pub struct Active {
-    run: Run,
-    biquad: [Biquad; IIR_CASCADE_LENGTH],
-    stage: [Stage; IIR_CASCADE_LENGTH],
-    /// The signal source. `None` if its output is constant.
-    source: Option<Source>,
-    /// The signal source contribution to the next output sample in DAC LSB.
-    offset: i16,
-}
-
-/// The input and the outputs of the filter stages for one sample.
-///
-/// They are kept from [`Active::process()`] to [`Active::update()`].
-pub struct Sample {
-    x: f32,
-    y: [f32; IIR_CASCADE_LENGTH],
-}
-
-impl Active {
-    fn new(ch: &Channel) -> Self {
-        let mut active = Self {
-            source: None,
-            offset: 0,
-            stage: Default::default(),
-            run: ch.run,
-            biquad: ch.biquad.each_ref().map(|biquad| biquad.build(&UNITS)),
-        };
-        active.set_filter(active.run, active.biquad.clone());
-        active.set_source(
-            ch.source
-                .build(SAMPLE_PERIOD, DacCode::FULL_SCALE.recip())
-                .unwrap(),
-        );
-        active
-    }
-
-    /// Replace the filter. The transfer is bumpless.
-    fn set_filter(&mut self, run: Run, biquad: [Biquad; IIR_CASCADE_LENGTH]) {
-        self.run = run;
-        self.biquad = biquad;
-        for (stage, biquad) in self.stage.iter_mut().zip(&self.biquad) {
-            stage.prepare(biquad);
-        }
-    }
-
-    /// Replace the signal source.
-    ///
-    /// Sources with constant output are not iterated.
-    fn set_source(&mut self, source: Source) {
-        if let Some(offset) = source.constant() {
-            self.offset = (offset >> 16) as _;
-            self.source = None;
-        } else {
-            self.source = Some(source);
-        }
-    }
-
-    /// Filter one ADC sample and add the signal source contribution.
-    ///
-    /// This is the latency critical part. It only uses what [`update()`](Self::update)
-    /// precomputed after the previous sample.
-    ///
-    /// # Args
-    /// * `di` - The digital input state for run/hold control.
-    /// * `adc` - The ADC code of the input sample.
-    ///
-    /// # Returns
-    /// The DAC code for the output sample and the data for [`update()`](Self::update).
-    #[inline(always)]
-    fn process(&self, di: &AtomicBool, adc: u16) -> (u16, Sample) {
-        let run = match self.run {
-            Run::Run => true,
-            Run::Hold => false,
-            Run::External => di.load(Ordering::Relaxed),
-        };
-        let x = f32::from(adc as i16);
-        let mut y = [0.0; IIR_CASCADE_LENGTH];
-        let mut v = x;
-        for ((biquad, stage), y) in
-            self.biquad.iter().zip(&self.stage).zip(&mut y)
-        {
-            v = if run {
-                stage.output(biquad, v)
-            } else {
-                stage.hold()
-            };
-            *y = v;
-        }
-
-        // Note(unsafe): The filter limits must ensure that the value is in range.
-        // The truncation introduces 1/2 LSB distortion.
-        let v: i16 = unsafe { v.to_int_unchecked() };
-        (
-            DacCode::from(v.saturating_add(self.offset)).0,
-            Sample { x, y },
-        )
-    }
-
-    /// Update the filter state with the sample and prepare for the next one.
-    #[inline(always)]
-    fn update(&mut self, sample: Sample) {
-        let mut x = sample.x;
-        for ((biquad, stage), y) in
-            self.biquad.iter().zip(&mut self.stage).zip(sample.y)
-        {
-            stage.update(biquad, x, y);
-            x = y;
-        }
-    }
-
-    /// Advance the signal source for the next sample.
-    #[inline(always)]
-    fn update_source(&mut self) {
-        if let Some(source) = &mut self.source {
-            self.offset = next(source);
-        }
-    }
-}
-
-/// The next signal source sample in DAC LSB.
-///
-/// This is kept out of line and next to the sample processing routine in ITCM: there is a
-/// single copy of the generator code for both channels and it only runs for active sources.
-#[inline(never)]
-#[cfg_attr(target_os = "none", unsafe(link_section = ".itcm.process.source"))]
-fn next(source: &mut Source) -> i16 {
-    (source.next().unwrap() >> 16) as _
-}
-
-/// Execution time statistics of the sample processing routine in CPU cycles.
-#[derive(Clone, Copy, Default)]
-pub struct Times {
-    /// Maximum time until the last DAC code has been written
-    output_max: u32,
-    /// Maximum duration of the routine
-    process_max: u32,
-    /// Sum of the durations of the routine
-    process_sum: u64,
-    /// Number of samples that were already pending when the previous one was done
-    late: u32,
-}
-
-impl Times {
-    #[inline(always)]
-    fn update(&mut self, output: u32, process: u32, late: bool) {
-        self.output_max = self.output_max.max(output);
-        self.process_max = self.process_max.max(process);
-        self.process_sum = self.process_sum.wrapping_add(process as _);
-        self.late = self.late.wrapping_add(late as _);
-    }
-}
-
 /// The state of the sample processing routine.
 ///
 /// It is shared with the settings update and telemetry tasks.
 pub struct State {
     ch: [Active; 2],
     times: Times,
-}
-
-/// The telemetry reported by this application.
-#[derive(Serialize)]
-pub struct Telemetry {
-    /// Most recent input voltage measurement.
-    pub adcs: [f32; 2],
-    /// Most recent output voltage.
-    pub dacs: [f32; 2],
-    /// Most recent digital input assertion state.
-    pub digital_inputs: [bool; 2],
-    /// The CPU temperature in degrees Celsius.
-    pub cpu_temp: f32,
-    /// Execution time of the sample processing routine. Excludes interrupt entry and exit.
-    pub process: Timing,
-    /// Maximum time in seconds from the start of the sample processing routine until the
-    /// last DAC code has been written.
-    pub output: f32,
-    /// Number of samples since the previous report that arrived before the processing of the
-    /// preceding sample was complete. They are processed with increased latency, not lost.
-    pub late: u32,
-    /// Pounder measurements, if applicable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pounder: Option<PounderTelemetry>,
 }
 
 #[cfg(not(target_os = "none"))]
@@ -329,11 +147,13 @@ fn main() {
 #[cfg_attr(target_os = "none", rtic::app(device = stabilizer::hardware::hal::stm32, peripherals = true, dispatchers=[DCMI, JPEG, SDMMC]))]
 mod app {
     use super::*;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use cortex_m::peripheral::DWT;
     use fugit::ExtU32 as _;
     use rtic_monotonics::Monotonic;
 
     use stabilizer::{
+        dual_iir::Telemetry,
         hardware::{
             self, DigitalInput0, DigitalInput1, Pgia, SerialTerminal,
             SystemTimer, Systick, UsbDevice,
@@ -422,7 +242,12 @@ mod app {
             usb: stabilizer.usb,
             network,
             state: State {
-                ch: stabilizer.settings.dual_iir.ch.each_ref().map(Active::new),
+                ch: stabilizer
+                    .settings
+                    .dual_iir
+                    .ch
+                    .each_ref()
+                    .map(|ch| Active::new(ch, &UNITS)),
                 times: Default::default(),
             },
             settings: stabilizer.settings,
@@ -492,10 +317,12 @@ mod app {
             // The latency critical part: write each DAC code as soon as it is available.
             // ADC0 is sampled before ADC1, whose interrupt this is.
             let adc0 = adc0.read();
-            let (dac0_code, sample0) = ch0.process(&DI[0], adc0);
+            let (dac0_code, sample0) =
+                ch0.process(&DI[0], f32::from(adc0 as i16));
             dac0.write(dac0_code);
             let adc1_code = adc1.read();
-            let (dac1_code, sample1) = ch1.process(&DI[1], adc1_code);
+            let (dac1_code, sample1) =
+                ch1.process(&DI[1], f32::from(adc1_code as i16));
             dac1.write(dac1_code);
             let output = DWT::cycle_count();
 
@@ -588,15 +415,11 @@ mod app {
 
             if settings.dual_iir.trigger {
                 settings.dual_iir.trigger = false;
-                let s = settings.dual_iir.ch.each_ref().map(|ch| {
-                    let s = ch
-                        .source
-                        .build(SAMPLE_PERIOD, DacCode::FULL_SCALE.recip());
-                    if let Err(err) = &s {
-                        log::error!("Failed to update source: {:?}", err);
-                    }
-                    s
-                });
+                let s = settings
+                    .dual_iir
+                    .ch
+                    .each_ref()
+                    .map(|ch| ch.build_source(&UNITS));
                 c.shared.state.lock(|state| {
                     for (ch, s) in state.ch.iter_mut().zip(s) {
                         if let Ok(s) = s {
@@ -605,9 +428,11 @@ mod app {
                     }
                 });
             }
-            let b = settings.dual_iir.ch.each_ref().map(|ch| {
-                (ch.run, ch.biquad.each_ref().map(|b| b.build(&UNITS)))
-            });
+            let b = settings
+                .dual_iir
+                .ch
+                .each_ref()
+                .map(|ch| ch.build_filter(&UNITS));
             c.shared.state.lock(|state| {
                 for (a, (run, biquad)) in state.ch.iter_mut().zip(b) {
                     a.set_filter(run, biquad);
@@ -656,27 +481,18 @@ mod app {
                     )
                 });
 
-            let telemetry = telemetry.finalize(
-                gains[0],
-                gains[1],
-                c.local.cpu_temp_sensor.get_temperature().unwrap(),
-            );
-            let telemetry = Telemetry {
-                adcs: telemetry.adcs,
-                dacs: telemetry.dacs,
-                digital_inputs: telemetry.digital_inputs,
-                cpu_temp: telemetry.cpu_temp,
-                process: Timing::from_cycles(
-                    times.process_sum,
-                    count,
-                    times.process_max,
+            let mut telemetry = Telemetry::new(
+                telemetry.finalize(
+                    gains[0],
+                    gains[1],
+                    c.local.cpu_temp_sensor.get_temperature().unwrap(),
                 ),
-                output: times.output_max as f32 * CPU_CYCLE,
-                late: times.late,
-                pounder: c.shared.pounder.lock(|pounder| {
-                    pounder.as_mut().map(|p| p.pounder.get_telemetry())
-                }),
-            };
+                times,
+                count,
+            );
+            telemetry.pounder = c.shared.pounder.lock(|pounder| {
+                pounder.as_mut().map(|p| p.pounder.get_telemetry())
+            });
 
             c.shared.network.lock(|net| {
                 net.telemetry.publish_telemetry("/telemetry", &telemetry)

@@ -1,11 +1,22 @@
-//! Settings shared by the `dual-iir` and `dual-iir-ll` applications.
+//! Settings and processing shared by the `dual-iir`, `dual-iir-ll` and `current_sense`
+//! applications.
+//!
+//! The low-latency applications (`dual-iir-ll`, `current_sense`) process each sample
+//! individually with [`Active`] and report [`Telemetry`].
+
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use idsp::iir::{self, pid::Units};
 use miniconf::Tree;
 use num_traits::clamp;
 use serde::{Deserialize, Serialize};
+use signal_generator::Source;
 
-use crate::{convert::Gain, pounder_config::PounderConfig};
+use crate::{
+    convert::{DacCode, Gain},
+    pounder_config::PounderConfig,
+    telemetry::{self, CPU_CYCLE, PounderTelemetry, Timing},
+};
 
 /// The number of cascaded IIR biquads per channel. Select 1 or 2!
 pub const IIR_CASCADE_LENGTH: usize = 1;
@@ -41,7 +52,9 @@ impl BiquadRepr {
     }
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default,
+)]
 pub enum Run {
     #[default]
     /// Run
@@ -78,6 +91,33 @@ pub struct Channel {
     pub run: Run,
     /// Signal generator configuration to add to the DAC0/DAC1 outputs
     pub source: signal_generator::Config,
+}
+
+impl Channel {
+    /// Build the filters for the given sample period and input/output units.
+    pub fn build_filter(
+        &self,
+        units: &Units<f32>,
+    ) -> (Run, [Biquad; IIR_CASCADE_LENGTH]) {
+        (
+            self.run,
+            self.biquad.each_ref().map(|biquad| biquad.build(units)),
+        )
+    }
+
+    /// Build the signal source for the sample period `units.t`.
+    ///
+    /// Errors are logged.
+    pub fn build_source(
+        &self,
+        units: &Units<f32>,
+    ) -> Result<Source, signal_generator::Error> {
+        self.source
+            .build(units.t, DacCode::FULL_SCALE.recip())
+            .inspect_err(|err| {
+                log::error!("Failed to update source: {:?}", err)
+            })
+    }
 }
 
 #[derive(Clone, Debug, Tree)]
@@ -176,6 +216,219 @@ impl Stage {
         // Two short independent sums instead of one long accumulation chain.
         self.partial =
             (ba[1] * x1 + ba[2] * x2) + ((ba[3] * y1 + ba[4] * y2) + biquad.u);
+    }
+}
+
+/// The run-time state of one channel of the low-latency applications.
+#[derive(Clone, Debug)]
+pub struct Active {
+    run: Run,
+    biquad: [Biquad; IIR_CASCADE_LENGTH],
+    stage: [Stage; IIR_CASCADE_LENGTH],
+    /// The signal source. `None` if its output is constant.
+    source: Option<Source>,
+    /// The signal source contribution to the next output sample in DAC LSB.
+    offset: i16,
+}
+
+/// The input and the outputs of the filter stages for one sample.
+///
+/// They are kept from [`Active::process()`] to [`Active::update()`].
+pub struct Sample {
+    x: f32,
+    y: [f32; IIR_CASCADE_LENGTH],
+}
+
+impl Active {
+    /// Build the state of a channel for the given sample period and input/output units.
+    ///
+    /// # Panics
+    /// If the signal source cannot be built.
+    pub fn new(ch: &Channel, units: &Units<f32>) -> Self {
+        let (run, biquad) = ch.build_filter(units);
+        let mut active = Self {
+            source: None,
+            offset: 0,
+            stage: Default::default(),
+            run,
+            biquad,
+        };
+        active.set_filter(active.run, active.biquad.clone());
+        active.set_source(ch.build_source(units).unwrap());
+        active
+    }
+
+    /// Replace the filter. The transfer is bumpless.
+    pub fn set_filter(
+        &mut self,
+        run: Run,
+        biquad: [Biquad; IIR_CASCADE_LENGTH],
+    ) {
+        self.run = run;
+        self.biquad = biquad;
+        for (stage, biquad) in self.stage.iter_mut().zip(&self.biquad) {
+            stage.prepare(biquad);
+        }
+    }
+
+    /// Replace the signal source.
+    ///
+    /// Sources with constant output are not iterated.
+    pub fn set_source(&mut self, source: Source) {
+        if let Some(offset) = source.constant() {
+            self.offset = (offset >> 16) as _;
+            self.source = None;
+        } else {
+            self.source = Some(source);
+        }
+    }
+
+    /// Filter one input sample and add the signal source contribution.
+    ///
+    /// This is the latency critical part. It only uses what [`update()`](Self::update)
+    /// precomputed after the previous sample.
+    ///
+    /// # Args
+    /// * `di` - The digital input state for run/hold control.
+    /// * `x` - The input sample in ADC LSB, i.e. `f32::from(adc as i16)` for the ADC code
+    ///   `adc`, plus any offset to apply.
+    ///
+    /// # Returns
+    /// The DAC code for the output sample and the data for [`update()`](Self::update).
+    #[inline(always)]
+    pub fn process(&self, di: &AtomicBool, x: f32) -> (u16, Sample) {
+        let run = match self.run {
+            Run::Run => true,
+            Run::Hold => false,
+            Run::External => di.load(Ordering::Relaxed),
+        };
+        let mut y = [0.0; IIR_CASCADE_LENGTH];
+        let mut v = x;
+        for ((biquad, stage), y) in
+            self.biquad.iter().zip(&self.stage).zip(&mut y)
+        {
+            v = if run {
+                stage.output(biquad, v)
+            } else {
+                stage.hold()
+            };
+            *y = v;
+        }
+
+        // Note(unsafe): The filter limits must ensure that the value is in range.
+        // The truncation introduces 1/2 LSB distortion.
+        let v: i16 = unsafe { v.to_int_unchecked() };
+        (
+            DacCode::from(v.saturating_add(self.offset)).0,
+            Sample { x, y },
+        )
+    }
+
+    /// Update the filter state with the sample and prepare for the next one.
+    #[inline(always)]
+    pub fn update(&mut self, sample: Sample) {
+        let mut x = sample.x;
+        for ((biquad, stage), y) in
+            self.biquad.iter().zip(&mut self.stage).zip(sample.y)
+        {
+            stage.update(biquad, x, y);
+            x = y;
+        }
+    }
+
+    /// Advance the signal source for the next sample.
+    #[inline(always)]
+    pub fn update_source(&mut self) {
+        if let Some(source) = &mut self.source {
+            self.offset = next(source);
+        }
+    }
+}
+
+/// The next signal source sample in DAC LSB.
+///
+/// This is kept out of line and next to the sample processing routine in ITCM: there is a
+/// single copy of the generator code for both channels and it only runs for active sources.
+#[inline(never)]
+#[cfg_attr(target_os = "none", unsafe(link_section = ".itcm.process.source"))]
+fn next(source: &mut Source) -> i16 {
+    (source.next().unwrap() >> 16) as _
+}
+
+/// Execution time statistics of the sample processing routine in CPU cycles.
+#[derive(Clone, Copy, Default)]
+pub struct Times {
+    /// Maximum time until the last DAC code has been written
+    output_max: u32,
+    /// Maximum duration of the routine
+    process_max: u32,
+    /// Sum of the durations of the routine
+    process_sum: u64,
+    /// Number of samples that were already pending when the previous one was done
+    late: u32,
+}
+
+impl Times {
+    /// Record one execution of the routine.
+    ///
+    /// # Args
+    /// * `output` - Cycles until the last DAC code has been written.
+    /// * `process` - Cycles until the end of the routine.
+    /// * `late` - Whether the next sample was already pending at the end.
+    #[inline(always)]
+    pub fn update(&mut self, output: u32, process: u32, late: bool) {
+        self.output_max = self.output_max.max(output);
+        self.process_max = self.process_max.max(process);
+        self.process_sum = self.process_sum.wrapping_add(process as _);
+        self.late = self.late.wrapping_add(late as _);
+    }
+}
+
+/// The telemetry reported by the low-latency applications.
+#[derive(Serialize)]
+pub struct Telemetry {
+    /// Most recent input voltage measurement.
+    pub adcs: [f32; 2],
+    /// Most recent output voltage.
+    pub dacs: [f32; 2],
+    /// Most recent digital input assertion state.
+    pub digital_inputs: [bool; 2],
+    /// The CPU temperature in degrees Celsius.
+    pub cpu_temp: f32,
+    /// Execution time of the sample processing routine. Excludes interrupt entry and exit.
+    pub process: Timing,
+    /// Maximum time in seconds from the start of the sample processing routine until the
+    /// last DAC code has been written.
+    pub output: f32,
+    /// Number of samples since the previous report that arrived before the processing of the
+    /// preceding sample was complete. They are processed with increased latency, not lost.
+    pub late: u32,
+    /// Pounder measurements, if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pounder: Option<PounderTelemetry>,
+}
+
+impl Telemetry {
+    /// Add the execution time statistics for `count` samples to the common telemetry.
+    pub fn new(
+        telemetry: telemetry::Telemetry,
+        times: Times,
+        count: u32,
+    ) -> Self {
+        Self {
+            adcs: telemetry.adcs,
+            dacs: telemetry.dacs,
+            digital_inputs: telemetry.digital_inputs,
+            cpu_temp: telemetry.cpu_temp,
+            process: Timing::from_cycles(
+                times.process_sum,
+                count,
+                times.process_max,
+            ),
+            output: times.output_max as f32 * CPU_CYCLE,
+            late: times.late,
+            pounder: telemetry.pounder,
+        }
     }
 }
 

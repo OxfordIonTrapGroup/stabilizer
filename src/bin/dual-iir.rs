@@ -97,14 +97,12 @@ pub struct Active {
 
 impl Active {
     fn new(ch: &Channel) -> Self {
+        let (run, biquad) = ch.build_filter(&UNITS);
         Self {
-            source: ch
-                .source
-                .build(SAMPLE_PERIOD, DacCode::FULL_SCALE.recip())
-                .unwrap(),
+            source: ch.build_source(&UNITS).unwrap(),
             state: Default::default(),
-            run: ch.run,
-            biquad: ch.biquad.each_ref().map(|biquad| biquad.build(&UNITS)),
+            run,
+            biquad,
         }
     }
 }
@@ -415,15 +413,11 @@ mod app {
 
             if settings.dual_iir.trigger {
                 settings.dual_iir.trigger = false;
-                let s = settings.dual_iir.ch.each_ref().map(|ch| {
-                    let s = ch
-                        .source
-                        .build(SAMPLE_PERIOD, DacCode::FULL_SCALE.recip());
-                    if let Err(err) = &s {
-                        log::error!("Failed to update source: {:?}", err);
-                    }
-                    s
-                });
+                let s = settings
+                    .dual_iir
+                    .ch
+                    .each_ref()
+                    .map(|ch| ch.build_source(&UNITS));
                 c.shared.active.lock(|ch| {
                     for (ch, s) in ch.iter_mut().zip(s) {
                         if let Ok(s) = s {
@@ -432,9 +426,11 @@ mod app {
                     }
                 });
             }
-            let b = settings.dual_iir.ch.each_ref().map(|ch| {
-                (ch.run, ch.biquad.each_ref().map(|b| b.build(&UNITS)))
-            });
+            let b = settings
+                .dual_iir
+                .ch
+                .each_ref()
+                .map(|ch| ch.build_filter(&UNITS));
             c.shared.active.lock(|active| {
                 for (a, b) in active.iter_mut().zip(b) {
                     (a.run, a.biquad) = b;
