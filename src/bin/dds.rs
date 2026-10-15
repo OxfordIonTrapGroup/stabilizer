@@ -143,6 +143,7 @@ mod app {
             c.core,
             c.device,
             clock,
+            env!("CARGO_BIN_NAME"),
             hardware::Sampling::Batched(8),
             1 << 7,
         );

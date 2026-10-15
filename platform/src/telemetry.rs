@@ -11,9 +11,9 @@
 //! required immediately before transmission. This ensures that any slower computation required
 //! for unit conversion can be off-loaded to lower priority tasks.
 //!
-//! The application metadata (`meta`: firmware version, build profile, hardware revision, panic
-//! information) is published retained each time the client connects, such that a client
-//! application can find out at any time which software a device runs.
+//! The application metadata (`meta`: binary name in `application`, firmware version, build
+//! profile, hardware revision, panic information) is published retained each time the client
+//! connects, so clients can inspect the last running firmware even while a device is offline.
 use crate::ApplicationMetadata;
 use heapless::String;
 use minimq::{
@@ -24,8 +24,12 @@ use minimq::{
 use serde::Serialize;
 use smoltcp_nal::NetworkError;
 
-/// Default metadata message if formatting errors occur.
-const DEFAULT_METADATA: &str = "{\"message\":\"Truncated: See USB terminal\"}";
+/// Keep the binary identity even when the full metadata (e.g. a long panic) does not fit.
+#[derive(Serialize)]
+struct TruncatedMetadata {
+    application: &'static str,
+    message: &'static str,
+}
 
 /// The telemetry client for reporting telemetry data over MQTT.
 pub struct TelemetryClient<C: Clock, S: TcpClientStack> {
@@ -137,8 +141,16 @@ impl<C: Clock, S: TcpClientStack<Error = smoltcp_nal::NetworkError> + Dns>
                 // for ability to publish above.
                 mqtt.client()
                     .publish(
-                        Publication::new(&topic, DEFAULT_METADATA.as_bytes())
-                            .retain(),
+                        Publication::new(&topic, |buf: &mut [u8]| {
+                            serde_json_core::to_slice(
+                                &TruncatedMetadata {
+                                    application: metadata.application,
+                                    message: "Truncated: See USB terminal",
+                                },
+                                buf,
+                            )
+                        })
+                        .retain(),
                     )
                     .unwrap();
             }

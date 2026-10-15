@@ -52,6 +52,10 @@
 //!
 //! See [DualIir] for settings and [Telemetry] for telemetry. The UDP [stream] contains raw ADC
 //! and DAC codes in batches of eight samples, as in `dual-iir`.
+//!
+//! Both variants use the MQTT prefix `dt/sinara/dual-iir/<id>/` and share retained settings.
+//! The retained `meta` message identifies the binary in `application`: `dual-iir-ll` here,
+//! or `dual-iir` for the batched variant. USB `platform service` reports the same identity.
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
@@ -384,6 +388,7 @@ mod app {
                 c.core,
                 c.device,
                 clock,
+                env!("CARGO_BIN_NAME"),
                 hardware::Sampling::LowLatency,
                 SAMPLE_TICKS,
             );
@@ -406,7 +411,7 @@ mod app {
             stabilizer.network_devices.stack,
             stabilizer.network_devices.phy,
             clock,
-            env!("CARGO_BIN_NAME"),
+            "dual-iir",
             &stabilizer.settings.net,
             stabilizer.metadata,
         );

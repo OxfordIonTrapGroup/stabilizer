@@ -110,7 +110,7 @@ where
     /// * `stack` - The network stack that will be used to share with all network users.
     /// * `phy` - The ethernet PHY connecting the network.
     /// * `clock` - A `SystemTimer` implementing `Clock`.
-    /// * `app` - The name of the application.
+    /// * `app` - The MQTT application prefix, which may differ from the binary name.
     /// * `net_settings` - The network-specific settings to use for the application.
     /// * `metadata` - The application metadata
     ///
@@ -124,7 +124,7 @@ where
         net_settings: &NetSettings,
         metadata: &'static ApplicationMetadata,
     ) -> Self {
-        info!("Application: {}", app);
+        info!("Application: {}", metadata.application);
 
         let stack_manager =
             cortex_m::singleton!(: NetworkManager = NetworkManager::new(stack))

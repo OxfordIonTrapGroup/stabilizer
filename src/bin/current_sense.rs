@@ -437,6 +437,7 @@ mod app {
                 c.core,
                 c.device,
                 clock,
+                env!("CARGO_BIN_NAME"),
                 hardware::Sampling::Batched(BATCH_SIZE),
                 SAMPLE_TICKS,
             );

@@ -3,6 +3,8 @@ use serde::Serialize;
 
 #[derive(Serialize)]
 pub struct ApplicationMetadata {
+    /// Firmware binary name, which may differ from the MQTT application prefix.
+    pub application: &'static str,
     pub firmware_version: &'static str,
     pub rust_version: &'static str,
     pub profile: &'static str,
@@ -14,6 +16,10 @@ pub struct ApplicationMetadata {
 
 impl fmt::Display for ApplicationMetadata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!(
+            "{:<20}: {}\n",
+            "Application", self.application
+        ))?;
         f.write_fmt(format_args!(
             "{:<20}: {} [{}]",
             "Version", self.firmware_version, self.profile,

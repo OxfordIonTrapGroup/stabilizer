@@ -216,6 +216,7 @@ fn load_itcm() {
 /// * `core` - The cortex-m peripherals.
 /// * `device` - The microcontroller peripherals to be configured.
 /// * `clock` - A `SystemTimer` implementing `Clock`.
+/// * `application` - The firmware binary name, from `env!("CARGO_BIN_NAME")`.
 /// * `sampling` - The ADC/DAC sample transfer mode.
 /// * `sample_ticks` - The number of timer ticks between each sample.
 ///
@@ -229,6 +230,7 @@ pub fn setup<C>(
     mut core: hal::stm32::CorePeripherals,
     device: hal::stm32::Peripherals,
     clock: SystemTimer,
+    application: &'static str,
     sampling: Sampling,
     sample_ticks: u32,
 ) -> (Stabilizer<C>, Mezzanine, Eem)
@@ -657,7 +659,7 @@ where
                 gpiog.pg3.into_pull_down_input().is_high(),
             ][..],
         );
-        crate::hardware::metadata(hardware_version.into())
+        crate::hardware::metadata(hardware_version.into(), application)
     };
 
     let mac_addr = smoltcp::wire::EthernetAddress(eeprom::read_eui48(
