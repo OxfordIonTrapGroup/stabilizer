@@ -33,6 +33,14 @@
 //! default rate, measured loop delays were 3.34 µs (channel 0) and 3.56 µs (channel 1), against
 //! about 23 µs for batched `dual-iir`. These include the analog filters and zero-order hold.
 //!
+//! As the DAC updates follow the processing, their timing relative to the sampling instants
+//! varies with the interrupt entry. From the spread of the loopback step response on a Rev 1.2
+//! board at the default rate, the time from sampling to DAC update varied by about 15 ns RMS
+//! on channel 0 and 18 ns on channel 1. The DMA-started conversions and DAC updates of the
+//! batched `dual-iir` vary as well, if less: by about 12 and 7 ns RMS. Here, the DAC writes
+//! came about 28 ns early for the first sample of each batch, and at most about 75 ns late
+//! (in a million samples).
+//!
 //! Processing should finish within one sample period. An active signal source adds CPU load
 //! (about 70 cycles per sample for a swept sine). Before the Ethernet MAC inserted the
 //! transmit checksums (October 2026), both sources active caused about 20–48% stream loss on
