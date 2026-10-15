@@ -82,7 +82,7 @@ pub enum Format {
     ///
     /// # Example
     /// With a batch size of 2, the serialization would take the following form:
-    /// ```
+    /// ```text
     /// <ADC0[0]> <ADC0[1]> <ADC1[0]> <ADC1[1]> <DAC0[0]> <DAC0[1]> <DAC1[0]> <DAC1[1]>
     /// ```
     AdcDacData = 1,

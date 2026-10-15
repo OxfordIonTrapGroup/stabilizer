@@ -1,6 +1,10 @@
-//! Lock-free sample ring decoupling a sample rate producer from stream frame generation.
+//! Sample ring for interrupt-to-task handoff.
 
-use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use core::sync::atomic::{
+    AtomicU32,
+    Ordering::{Relaxed, SeqCst},
+    compiler_fence,
+};
 
 /// One set of ADC0, ADC1, DAC0, DAC1 samples.
 pub type Sample = [u16; 4];
@@ -10,22 +14,21 @@ pub type Sample = [u16; 4];
 pub enum Pop<const B: usize> {
     /// Less than one batch is pending.
     Empty,
-    /// One batch in [`crate::Format::AdcDacData`] layout: `B` samples each of ADC0, ADC1,
-    /// DAC0 and DAC1.
+    /// A batch in [`crate::Format::AdcDacData`] layout.
     Batch([[u16; B]; 4]),
-    /// The producer overwrote samples before they could be consumed. This many batches were
-    /// lost and skipped.
+    /// Batches skipped after an overrun.
     Lost(u32),
 }
 
-/// A lock-free single-producer, single-consumer ring of the `N` most recent samples.
+/// An overwriting ring of the `N` most recent samples (`N` a power of two).
 ///
-/// The producer (e.g. a high priority sample processing interrupt) never blocks and never
-/// fails: [`push()`](Self::push) is a few plain loads and stores and always overwrites the
-/// oldest sample. The consumer (a lower priority task that the producer preempts) takes
-/// complete batches with [`pop()`](Self::pop) and detects whether the producer lapped it.
+/// A single producer and all readers must run on the same core. The producer may
+/// preempt readers, but readers must never preempt the producer. One consumer calls
+/// [`pop()`](Self::pop); other readers may use [`latest()`](Self::latest).
 ///
-/// `N` must be a power of two.
+/// Each push completes before any reader can resume, so producer stores need no
+/// barriers. Atomic words prevent torn accesses; consumer compiler fences keep
+/// sample loads between the availability and overrun checks in `pop()`.
 pub struct SampleRing<const N: usize> {
     /// The total number of samples pushed (wrapping).
     head: AtomicU32,
@@ -58,11 +61,7 @@ impl<const N: usize> SampleRing<N> {
         self.head.load(Relaxed)
     }
 
-    /// Push a sample, overwriting the oldest one.
-    ///
-    /// Must only be called from a single context (the producer).
-    ///
-    /// Returns the total number of samples pushed including this one (wrapping).
+    /// Push a sample, overwriting the oldest, and return the wrapping total.
     #[inline(always)]
     pub fn push(&self, sample: Sample) -> u32 {
         let head = self.head.load(Relaxed);
@@ -74,9 +73,10 @@ impl<const N: usize> SampleRing<N> {
         head
     }
 
-    /// Get the sample with the given running index (wrapping).
+    /// Read the slot at a wrapping sample index without checking for overwrites.
     ///
-    /// The caller needs to check that the sample is within the last `N` samples pushed.
+    /// The caller must ensure the slot remains valid throughout the read. Its two
+    /// words are loaded separately.
     #[inline]
     pub fn get(&self, index: u32) -> Sample {
         let slot = &self.data[index as usize & Self::MASK];
@@ -84,20 +84,22 @@ impl<const N: usize> SampleRing<N> {
         [a as u16, (a >> 16) as u16, b as u16, (b >> 16) as u16]
     }
 
-    /// The most recently pushed sample.
+    /// Read the latest sample, or zeros before the first push.
+    ///
+    /// The producer must advance by fewer than `N` samples during this call to
+    /// avoid overwriting the slot. This read does not detect overruns.
     #[inline]
     pub fn latest(&self) -> Sample {
-        self.get(self.head().wrapping_sub(1))
+        let head = self.head();
+        compiler_fence(SeqCst);
+        self.get(head.wrapping_sub(1))
     }
 
     /// Take the oldest pending batch of `B` samples.
     ///
-    /// Must only be called from a single context (the consumer) that the producer may
-    /// preempt but not vice versa.
-    ///
-    /// # Args
-    /// * `tail` - The consumer position: the running index of the next sample to consume.
-    ///   Start with the `head()` at the time the consumer starts (or zero).
+    /// `tail` is the wrapping index of the next sample to consume. Initialize it
+    /// to zero or the current [`head()`](Self::head). The producer must stay less
+    /// than 2^32 samples ahead of `tail`, including while this call is preempted.
     pub fn pop<const B: usize>(&self, tail: &mut u32) -> Pop<B> {
         const {
             assert!(B.is_power_of_two() && B <= N);
@@ -105,6 +107,8 @@ impl<const N: usize> SampleRing<N> {
         if (self.head().wrapping_sub(*tail) as usize) < B {
             return Pop::Empty;
         }
+        // Keep sample loads after the availability check and before validation.
+        compiler_fence(SeqCst);
         let mut batch = [[0; B]; 4];
         for i in 0..B {
             let sample = self.get(tail.wrapping_add(i as u32));
@@ -112,8 +116,7 @@ impl<const N: usize> SampleRing<N> {
                 batch[i] = sample;
             }
         }
-        // The producer preempts the consumer: check that it did not overwrite the batch
-        // before or while it was copied.
+        compiler_fence(SeqCst);
         let pending = self.head().wrapping_sub(*tail);
         if pending as usize > N {
             let lost = pending / B as u32;
@@ -136,9 +139,10 @@ mod test {
 
     fn fill<const N: usize>(ring: &SampleRing<N>, start: u32, n: u32) {
         for i in 0..n {
-            assert_eq!(ring.push(sample(start.wrapping_add(i))), {
+            assert_eq!(
+                ring.push(sample(start.wrapping_add(i))),
                 start.wrapping_add(i).wrapping_add(1)
-            });
+            );
         }
     }
 
