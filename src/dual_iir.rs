@@ -364,7 +364,7 @@ pub struct Times {
     process_max: u32,
     /// Sum of the durations of the routine
     process_sum: u64,
-    /// Number of samples that were already pending when the previous one was done
+    /// Number of batches at whose end the next sample was already pending
     late: u32,
 }
 
@@ -374,7 +374,8 @@ impl Times {
     /// # Args
     /// * `output` - Cycles until the last DAC code has been written.
     /// * `process` - Cycles until the end of the routine.
-    /// * `late` - Whether the next sample was already pending at the end.
+    /// * `late` - Whether the next sample was already pending at the end (only checked at the
+    ///   end of each batch).
     #[inline(always)]
     pub fn update(&mut self, output: u32, process: u32, late: bool) {
         self.output_max = self.output_max.max(output);
@@ -400,8 +401,9 @@ pub struct Telemetry {
     /// Maximum time in seconds from the start of the sample processing routine until the
     /// last DAC code has been written.
     pub output: f32,
-    /// Number of samples since the previous report that arrived before the processing of the
-    /// preceding sample was complete. They are processed with increased latency, not lost.
+    /// Number of batches (of the stream, eight samples) since the previous report at whose end
+    /// the next sample had already arrived: processing had fallen behind. Such samples are
+    /// processed with increased latency, not lost. Only checked once per batch.
     pub late: u32,
     /// Pounder measurements, if applicable.
     #[serde(skip_serializing_if = "Option::is_none")]

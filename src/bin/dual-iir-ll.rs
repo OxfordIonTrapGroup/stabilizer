@@ -38,8 +38,9 @@
 //! while the control loop kept up. Check stream loss and network responsiveness under the
 //! intended load when changing the period or sources.
 //!
-//! Samples arriving before processing completes wait in the ADC receive FIFOs and contribute
-//! to `late`; FIFO overflow panics with an ADC SPI error. Settings updates briefly mask the
+//! Samples arriving before processing completes wait in the ADC receive FIFOs; `late` counts
+//! the batches at whose end such a sample was pending. FIFO overflow panics with an ADC SPI
+//! error. Settings updates briefly mask the
 //! processing interrupt and can also cause late samples. Library critical sections allow it
 //! to preempt USB and SysTick (see [`stabilizer::hardware::basepri_critical_section`]).
 //!
@@ -298,8 +299,8 @@ mod app {
     ///
     /// # Note
     /// Processing should complete within one sample period. Samples that arrive earlier wait
-    /// in the ADC SPI receive FIFOs and are counted as late. If those FIFOs overflow, firmware
-    /// will panic due to an ADC SPI error.
+    /// in the ADC SPI receive FIFOs; at the end of each batch, a pending sample is counted as
+    /// late. If those FIFOs overflow, firmware will panic due to an ADC SPI error.
     #[task(binds = SPI3, local = [adcs, dacs], shared = [state], priority = 3)]
     #[unsafe(link_section = ".itcm.process")]
     fn process(mut c: process::Context) {
@@ -332,15 +333,17 @@ mod app {
 
             // Hand the sample to the stream task and wake it once per batch.
             let count = RING.push([adc0, adc1_code, dac0_code, dac1_code]);
-            if count.is_multiple_of(BATCH_SIZE as u32) {
+            let batch_end = count.is_multiple_of(BATCH_SIZE as u32);
+            if batch_end {
                 rtic::pend(hal::stm32::Interrupt::LTDC);
             }
 
             ch0.update_source();
             ch1.update_source();
 
-            // Detect SPI errors and backlog, e.g. after a settings update.
-            let late = adc1.check();
+            // Detect SPI errors and backlog (e.g. after a settings update) once per batch.
+            // An SPI error keeps the interrupt pending, so it is detected within a batch.
+            let late = batch_end && adc1.check();
 
             times.update(
                 output.wrapping_sub(start),

@@ -56,10 +56,11 @@
 //! ADC1's SPI raises its interrupt as soon as its sample is available in the RX FIFO
 //! ([`hal::spi::Event::Rxp`]). ADC1 is always triggered after ADC0, so both samples are available
 //! at that time. The interrupt handler takes each sample directly from the respective RX FIFO
-//! with [`Adc0Input::read`]/[`Adc1Input::read`] and, once it is done with the sample, uses
+//! with [`Adc0Input::read`]/[`Adc1Input::read`]. Once it is done with a sample, it uses
 //! [`Adc1Input::check`] to detect SPI errors and whether the next sample has already arrived,
-//! i.e. whether this one was processed late. Late samples wait in the RX FIFOs. Only if those
-//! overflow, samples are lost, which is an SPI error.
+//! i.e. whether this one was processed late. That need not be done for every sample: an SPI
+//! error keeps the interrupt pending, so the next check detects it. Late samples wait in the RX
+//! FIFOs. Only if those overflow, samples are lost, which is an SPI error.
 //!
 //!
 //! # Note
