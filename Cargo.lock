@@ -1611,7 +1611,7 @@ dependencies = [
 [[package]]
 name = "stm32h7xx-hal"
 version = "0.16.0"
-source = "git+https://github.com/OxfordIonTrapGroup/stm32h7xx-hal.git?branch=critical-section-impl-agnostic#1b6648a56a166749e1edf41cec7006b030b9916e"
+source = "git+https://github.com/OxfordIonTrapGroup/stm32h7xx-hal.git?branch=crit-sec-checksum-offload#45dc34bbd7a63394325e919b154ea4badc20fa3a"
 dependencies = [
  "bare-metal 1.0.0",
  "cast",

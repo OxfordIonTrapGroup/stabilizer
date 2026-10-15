@@ -187,6 +187,7 @@ miniconf_derive = { git = "https://github.com/quartiq/miniconf.git" }
 minimq = { git = "https://github.com/OxfordIonTrapGroup/minimq.git", branch = "v0.10-in-flight-limit" }
 
 # stm32h7xx-hal with synopsys-usb-otg 0.5 (critical-section instead of cortex_m::interrupt::free),
-# and without forcing the cortex-m/critical-section-single-core implementation.
+# without forcing the cortex-m/critical-section-single-core implementation, and with Ethernet
+# transmit checksum offload.
 [patch."https://github.com/stm32-rs/stm32h7xx-hal.git"]
-stm32h7xx-hal = { git = "https://github.com/OxfordIonTrapGroup/stm32h7xx-hal.git", branch = "critical-section-impl-agnostic" }
+stm32h7xx-hal = { git = "https://github.com/OxfordIonTrapGroup/stm32h7xx-hal.git", branch = "crit-sec-checksum-offload" }

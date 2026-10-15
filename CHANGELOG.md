@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * The default MQTT broker is the Oxford lab broker `10.255.6.4` instead of the
   host name `mqtt`, as on the pre-v0.11 fork. A broker stored in flash still
   takes precedence.
+* The Ethernet MAC inserts the IPv4, TCP, UDP and ICMP checksums of transmitted
+  packets, instead of `smoltcp` computing them in software (`stm32h7xx-hal` from
+  the fork's `crit-sec-checksum-offload` branch). This took about 26 000 CPU
+  cycles per stream frame, now 3 400, a large part of the CPU time at the full
+  stream rate of the low-latency applications.
 
 ### Fixed
 

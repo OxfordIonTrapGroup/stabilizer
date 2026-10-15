@@ -33,9 +33,11 @@
 //! default rate, measured loop delays were 3.34 µs (channel 0) and 3.56 µs (channel 1), against
 //! about 23 µs for batched `dual-iir`. These include the analog filters and zero-order hold.
 //!
-//! Processing should finish within one sample period. An active signal source adds CPU load;
-//! both sources active caused about 20–28% stream loss on the test board at the default rate,
-//! while the control loop kept up. Check stream loss and network responsiveness under the
+//! Processing should finish within one sample period. An active signal source adds CPU load
+//! (about 70 cycles per sample for a swept sine). Before the Ethernet MAC inserted the
+//! transmit checksums (October 2026), both sources active caused about 20–48% stream loss on
+//! the test boards at the default rate, while the control loop kept up; with it, two swept
+//! sines streamed without loss. Check stream loss and network responsiveness under the
 //! intended load when changing the period or sources.
 //!
 //! Samples arriving before processing completes wait in the ADC receive FIFOs; `late` counts
