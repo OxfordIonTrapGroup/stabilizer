@@ -1,50 +1,22 @@
 //! # Dual IIR, low latency
 //!
-//! A variant of the [Dual IIR](../dual_iir/index.html) application that minimizes the
-//! input-to-output latency. It has the same settings and stream format.
+//! A variant of [Dual IIR](../dual_iir/index.html) with the same settings and stream
+//! format, processing each sample individually to reduce input-to-output latency.
 //!
-//! ## Features
-//! * Two indpenendent channels
-//! * Timed sampling
-//! * Run-time filter configuration
-//! * Input/Output data streaming
-//! * Each sample is processed individually and immediately
-//! * f32 IIR math
-//! * Generic biquad (second order) IIR filter
-//! * Anti-windup
-//! * Derivative kick avoidance
+//! ## Sample processing
 //!
-//! ## Latency
+//! The sampling timer starts the ADC conversions. Once ADC1's result is available, its SPI
+//! interrupt reads both ADC receive FIFOs and writes each DAC code directly to its SPI transmit
+//! FIFO as soon as it is computed. Channel 0 is processed first and has the lower latency.
+//! The DAC updates follow the processing, independently of the sampling timer.
 //!
-//! `dual-iir` collects ADC samples into batches by DMA, processes one batch at a time and
-//! lets DMA write the resulting DAC codes three batch periods after the corresponding ADC
-//! samples were acquired. This minimizes the CPU overhead per sample, but the input-to-output
-//! latency is about three batch periods (about 30 µs).
+//! Each biquad needs only a multiplication, an addition and a clamp between input and output.
+//! [`stabilizer::dual_iir::Stage`] precomputes the remaining terms after the previous sample.
+//! Signal sources advance after the DAC writes; constant sources are not iterated. A lower
+//! priority task assembles stream frames and samples the digital inputs every eight samples.
+//! `External` run/hold therefore responds at batch granularity.
 //!
-//! Here, each sample is processed individually and immediately:
-//!
-//! * The ADC conversions are started by the sampling timer as in `dual-iir`. No CPU time is
-//!   spent on this and the sampling instants are free of jitter.
-//! * As soon as the conversion results are available in the ADC SPI receive FIFOs, the
-//!   processing interrupt reads them from there. No DMA is involved in moving sample data.
-//! * Each DAC code is written directly into the DAC SPI transmit FIFO right after it has been
-//!   computed, from where it is transmitted immediately. The DAC updates are thus not aligned
-//!   to the sampling timer. Channel 0 is processed first and has the lower latency.
-//! * Only one multiplication, one addition and the clamp per biquad separate an ADC sample
-//!   from its DAC code. The remaining terms of the biquad are precomputed after the previous
-//!   sample (see [stabilizer::dual_iir::Stage]).
-//! * Everything else is kept away from that path: the signal sources are advanced after the
-//!   DAC codes have been written and only if they are active, stream frames are assembled and
-//!   the digital inputs are sampled by a lower priority task once per `BATCH_SIZE` samples.
-//!
-//! The latency from the sampling instant to the DAC update is then dominated by the ADC
-//! conversion and readout (about 0.6 µs) and the transfer of the code to the DAC (about
-//! 0.3 µs), plus half a sample period for the zero order hold.
-//!
-//! The digital inputs controlling `External` run/hold are applied with a delay of up to two
-//! batches, like in `dual-iir`.
-//!
-//! ## Sample rate
+//! ## Timing and limits
 //!
 //! The default sample period is 128 timer ticks (1.28 µs, 781.25 kHz), recommended for CPU
 //! headroom. In Rev 1.3 measurements, the two-channel build also ran at 112 and 100 ticks
@@ -55,35 +27,31 @@
 //! Non-power-of-two periods are allowed. The `process` and `late` telemetry cannot detect
 //! skipped ADC triggers.
 //!
-//! The price is one interrupt per sample. The processing of a sample should complete before
-//! the next one arrives. Each active signal source (non-zero amplitude) adds to the processing
-//! time.
+//! `dual-iir` introduces two batch periods of buffering delay (20.48 µs at the default rate).
+//! Here, the sampling-to-DAC update time consists of ADC conversion/readout, interrupt entry,
+//! computation and DAC SPI transmission. With DAC-to-ADC loopbacks on a Rev 1.3 board at the
+//! default rate, measured loop delays were 3.34 µs (channel 0) and 3.56 µs (channel 1), against
+//! about 23 µs for batched `dual-iir`. These include the analog filters and zero-order hold.
 //!
-//! A sample that arrives while the previous one is still being processed waits in the ADC SPI
-//! receive FIFOs and is processed right afterwards, with a correspondingly higher latency.
-//! This also happens when the processing interrupt is held off, e.g. by the critical sections
-//! of the USB device driver. No samples are lost and the telemetry reports the number of such
-//! late samples (`late`). Only if the FIFOs overflow, the firmware panics with an ADC SPI
-//! error.
+//! Processing should finish within one sample period. An active signal source adds CPU load;
+//! both sources active caused about 20–28% stream loss on the test board at the default rate,
+//! while the control loop kept up. Check stream loss and network responsiveness under the
+//! intended load when changing the period or sources.
 //!
-//! The telemetry reports the mean and maximum execution time of the processing routine
-//! (`process`) and the maximum time until the last DAC code has been written (`output`).
-//! Interrupt entry and exit and the stacking of the floating point context (about 0.15 µs in
-//! total) are not included in `process`. Use these to judge the margin before changing the
-//! sample rate (`SAMPLE_TICKS`), and do so with all signal sources active that are going to
-//! be used.
+//! Samples arriving before processing completes wait in the ADC receive FIFOs and contribute
+//! to `late`; FIFO overflow panics with an ADC SPI error. Settings updates briefly mask the
+//! processing interrupt and can also cause late samples. Library critical sections allow it
+//! to preempt USB and SysTick (see [`stabilizer::hardware::basepri_critical_section`]).
 //!
-//! ## Settings
-//! Refer to the [DualIir] structure for documentation of run-time configurable settings for this
-//! application.
+//! `process` reports mean and maximum handler execution time; `output` reports the maximum
+//! time from handler start to the last DAC write. Both exclude interrupt entry, exit and
+//! floating-point context stacking. Use them to assess CPU headroom alongside the stream
+//! and network checks above.
 //!
-//! ## Telemetry
-//! Refer to [Telemetry] for information about telemetry reported by this application.
+//! ## Interfaces
 //!
-//! ## Stream
-//! This application streams raw ADC and DAC data over UDP. Refer to
-//! [stream] for more information. The data is grouped into batches of `BATCH_SIZE` samples like
-//! in `dual-iir`.
+//! See [DualIir] for settings and [Telemetry] for telemetry. The UDP [stream] contains raw ADC
+//! and DAC codes in batches of eight samples, as in `dual-iir`.
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
@@ -539,9 +507,7 @@ mod app {
             ch0.update_source();
             ch1.update_source();
 
-            // Detect SPI errors and whether the next sample is already pending.
-            // TODO: Track down what holds this off (e.g. the interrupt-free section of the
-            // USB device poll) and what occasionally makes it exceed a sample period.
+            // Detect SPI errors and backlog, e.g. after a settings update.
             let late = adc1.check();
 
             times.update(

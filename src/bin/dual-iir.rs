@@ -5,11 +5,11 @@
 //! channel outputs.
 //!
 //! ## Features
-//! * Two indpenendent channels
+//! * Two independent channels
 //! * up to 800 kHz rate, timed sampling
 //! * Run-time filter configuration
 //! * Input/Output data streaming
-//! * About 30 µs latency (three batches), see `dual-iir-ll` for a low-latency variant
+//! * Two batches of buffering delay (20.48 µs); see `dual-iir-ll` for a low-latency variant
 //! * f32 IIR math
 //! * Generic biquad (second order) IIR filter
 //! * Anti-windup
