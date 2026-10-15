@@ -30,11 +30,13 @@
 //! The rising edges of the mains reference on DI0 are timestamped in hardware. The timestamp
 //! timer is started together with the sampling timer, so the time of each sample is known in
 //! its ticks. A reciprocal PLL ([idsp::RPLL]) tracks the mains phase from the timestamps. It is
-//! updated every 10.24 µs ([stabilizer::mains]) by a lower priority task that runs once per
-//! batch of eight samples. That task also expands the feedforward waveform around an upcoming
-//! sample to second order in the sample index ([stabilizer::harmonics::Expansion]), and the
-//! sample processing evaluates this expansion for each sample. The harmonics are thus coherent
-//! with the reference, and the phase applies to the sampling instant of each sample.
+//! updated on a grid of 10.24 µs ([stabilizer::mains]) by a lower priority task, which catches
+//! up on it every 64 samples (81.92 µs). That task then expands the feedforward waveform around
+//! an upcoming sample to second order in the sample index
+//! ([stabilizer::harmonics::Expansion]), and the sample processing evaluates this expansion for
+//! each sample. The harmonics are thus coherent with the reference, and the phase applies to the
+//! sampling instant of each sample. The expansion is accurate to better than 1e-4 of the
+//! amplitude of the 5th harmonic.
 //!
 //! The feedforward is only available on channel 0, matching the single-channel current sense
 //! hardware; channel 1 is a regular `dual-iir` channel. Conversely, as DI0 is taken by the mains
@@ -104,6 +106,12 @@ const FEEDBACK_OFFSET_CURRENT_PER_VOLT: f32 = 0.0235;
 
 // Number of harmonics (fundamental included) in the feedforward waveform.
 const MAX_HARMONICS: usize = 5;
+
+// The number of samples between updates of the mains PLL and the feedforward expansion (eight
+// batches, 81.92 µs). Updating every batch costs about 9 % of the CPU time, which the stream
+// and the network then lack. Over this span, the expansion stays accurate to about 4e-5 of the
+// amplitude of the 5th harmonic (see `HarmonicWaveform::expand()`).
+const FEEDFORWARD_UPDATE: u32 = 8 * BATCH_SIZE as u32;
 
 #[derive(Clone, Debug, Tree, Default)]
 #[tree(meta(doc, typename))]
@@ -560,7 +568,8 @@ mod app {
     ///
     /// Pended by `process` once per batch of samples. This keeps the PLL, the evaluation of the
     /// harmonics, the frame generation (allocation, header, copy, queueing) and the GPIO
-    /// accesses out of the sample processing.
+    /// accesses out of the sample processing. The PLL and the harmonics are only updated every
+    /// `FEEDFORWARD_UPDATE` samples.
     ///
     /// LTDC is a spare vector pended in software; the display peripheral is unused.
     /// A direct binding avoids async executor overhead. It runs below DSP and above
@@ -568,7 +577,9 @@ mod app {
     /// this task drains the sample ring.
     #[task(
         binds = LTDC,
-        local = [digital_inputs, timestamper, mains, generator, tail: u32 = 0],
+        local = [
+            digital_inputs, timestamper, mains, generator,
+            tail: u32 = 0, next_update: u32 = 0],
         shared = [state, feedforward],
         priority = 2)]
     fn batch(mut c: batch::Context) {
@@ -578,32 +589,39 @@ mod app {
             mains,
             generator,
             tail,
+            next_update,
             ..
         } = c.local;
 
-        // Read the number of samples before the timestamp: by then, all mains edges up to the
-        // latest processed sample have been captured. Timestamps from capture overflows are
-        // ignored.
         let head = RING.head();
-        fence(Ordering::SeqCst);
-        if let Ok(Some(timestamp)) = timestamper.latest_timestamp() {
-            mains.push(timestamp);
-        }
+        if head.wrapping_sub(*next_update) as i32 >= 0 {
+            *next_update = head.wrapping_add(FEEDFORWARD_UPDATE);
 
-        // Advance the PLL, and expand the feedforward waveform around the middle of the
-        // samples it is used for until the next update: from the next sample to about one
-        // batch later.
-        let centre = head.wrapping_add(BATCH_SIZE as u32);
-        let feedforward = c.shared.feedforward.lock(|feedforward| {
-            let estimate = mains
-                .advance(&feedforward.pll, sample_time(head.wrapping_sub(1)));
-            feedforward.waveform.expand(
-                centre,
-                estimate.phase_at(sample_time(centre)),
-                estimate.step(SAMPLE_TICKS as i32),
-            )
-        });
-        c.shared.state.lock(|state| state.feedforward = feedforward);
+            // Read the number of samples before the timestamp: by then, all mains edges up to
+            // the latest processed sample have been captured. Timestamps from capture
+            // overflows are ignored.
+            fence(Ordering::SeqCst);
+            if let Ok(Some(timestamp)) = timestamper.latest_timestamp() {
+                mains.push(timestamp);
+            }
+
+            // Advance the PLL, and expand the feedforward waveform around the middle of the
+            // samples it is used for until the next update: from the next sample to about
+            // `FEEDFORWARD_UPDATE` samples later.
+            let centre = head.wrapping_add(FEEDFORWARD_UPDATE / 2);
+            let feedforward = c.shared.feedforward.lock(|feedforward| {
+                let estimate = mains.advance(
+                    &feedforward.pll,
+                    sample_time(head.wrapping_sub(1)),
+                );
+                feedforward.waveform.expand(
+                    centre,
+                    estimate.phase_at(sample_time(centre)),
+                    estimate.step(SAMPLE_TICKS as i32),
+                )
+            });
+            c.shared.state.lock(|state| state.feedforward = feedforward);
+        }
 
         DI[0].store(digital_inputs.0.is_high(), Ordering::Relaxed);
         DI[1].store(digital_inputs.1.is_high(), Ordering::Relaxed);

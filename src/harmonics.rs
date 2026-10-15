@@ -63,13 +63,18 @@ impl<const N: usize> HarmonicWaveform<N> {
     /// `x^3 / 6`, where `x = k * j * step` (in radians) is the harmonic phase advance from the
     /// centre to the sample `j` samples away. This is intended for fundamentals that are slow
     /// compared to the sample rate: for instance, the 5th harmonic of 50 Hz sampled at
-    /// 781.25 kHz gives `x = 16 mrad` at 8 samples from the centre and an error of `7e-7`,
-    /// far below the accuracy of the lookup itself, so the result is as good as from calling
-    /// [Self::sample] for each sample.
+    /// 781.25 kHz gives `x = 64 mrad` at 32 samples from the centre and an error of `4e-5`
+    /// (-87 dB). Up to 16 samples from the centre, the error stays below the accuracy of the
+    /// lookup itself (`9e-6`).
+    ///
+    /// Harmonics with zero amplitude are skipped.
     pub fn expand(&self, centre: u32, theta: i32, step: i32) -> Expansion {
         // Value and first two derivatives w.r.t. the fundamental phase at the centre.
         let (mut y, mut dy, mut ddy) = (0.0, 0.0, 0.0);
         for (harmonic, order) in self.harmonics.iter().zip(1..) {
+            if harmonic.amplitude == 0.0 {
+                continue;
+            }
             let (cos, sin) =
                 cossin(theta.wrapping_mul(order).wrapping_add(harmonic.phase));
             let k = order as f32;
@@ -206,19 +211,29 @@ mod tests {
     fn expansion_matches_samples() {
         // 50 Hz fundamental sampled at 781.25 kHz.
         const STEP: i32 = (50.0 * 1.28e-6 * (1u64 << 32) as f64) as i32;
-        let waveform = HarmonicWaveform::new([
-            Harmonic::new(1.0, 0.1),
-            Harmonic::new(0.8, 0.7),
-            Harmonic::new(0.6, -0.3),
-            Harmonic::new(0.4, 0.45),
-            Harmonic::new(1.0, 0.123),
-        ]);
-        // The expansion error is negligible here, even at twice the 8 samples from the centre
-        // that `current_sense` typically uses it for; what remains is the error of the lookup
-        // (9e-6 of each amplitude), which enters at different phases for the two methods.
-        const TOLERANCE: f32 = 2.0 * 9e-6 * (1.0 + 0.8 + 0.6 + 0.4 + 1.0);
-        let max = max_expansion_error(&waveform, STEP, 16);
-        assert!(max < TOLERANCE, "{max}");
+        const AMPLITUDES: [f32; 5] = [1.0, 0.8, 0.6, 0.4, 1.0];
+        const PHASES: [f32; 5] = [0.1, 0.7, -0.3, 0.45, 0.123];
+        let waveform = HarmonicWaveform::<5>::new(core::array::from_fn(|i| {
+            Harmonic::new(AMPLITUDES[i], PHASES[i])
+        }));
+        // Up to the 32 or so samples from the centre that `current_sense` uses it for, the
+        // expansion is off by at most the truncation error (see `expand()`), plus the error of
+        // the lookup (9e-6 of each amplitude), which enters at different phases for the two
+        // methods.
+        const REACH: i32 = 32;
+        let x = REACH as f32 * STEP as f32 * core::f32::consts::TAU
+            / (1u64 << 32) as f32;
+        let truncation: f32 = AMPLITUDES
+            .iter()
+            .zip(1..)
+            .map(|(amplitude, order)| {
+                let x = order as f32 * x;
+                amplitude * x * x * x / 6.0
+            })
+            .sum();
+        let lookup = 2.0 * 9e-6 * AMPLITUDES.iter().sum::<f32>();
+        let max = max_expansion_error(&waveform, STEP, REACH);
+        assert!(max < truncation + lookup, "{max} {truncation} {lookup}");
     }
 
     #[test]
