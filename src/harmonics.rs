@@ -52,32 +52,26 @@ impl<const N: usize> HarmonicWaveform<N> {
             .sum()
     }
 
-    /// Evaluate the waveform at `M` consecutive samples, where the fundamental phase
-    /// (`1 << 32` per turn) is `theta` for the first sample and advances by `step` per sample.
+    /// Expand the waveform around the sample `centre`, where the fundamental phase
+    /// (`1 << 32` per turn) is `theta` and advances by `step` per sample.
     ///
-    /// To save time, the harmonics are only looked up once, at the centre of the batch; the
-    /// samples are then obtained from the second-order expansion of the waveform around the
-    /// centre (which comes for free, as the lookup yields both sine and cosine).
+    /// The harmonics are only looked up once, at the centre; the samples around it are then
+    /// obtained from the second-order expansion of the waveform (which comes for free, as the
+    /// lookup yields both sine and cosine).
     ///
     /// For a harmonic of order `k`, the truncation error relative to its amplitude is at most
-    /// `x^3 / 6`, where `x = k * (M - 1) / 2 * step` (in radians) is the harmonic phase
-    /// advance over half the batch. This is intended for fundamentals that are slow compared
-    /// to the batch rate: for instance, the 5th harmonic of 50 Hz in a batch of 8 samples at
-    /// 781.25 kHz gives `x = 7 mrad` and an error of `6e-8`, far below the accuracy of the
-    /// lookup itself, so the result is as good as from calling [Self::sample] for each sample.
-    pub fn sample_batch<const M: usize>(
-        &self,
-        theta: i32,
-        step: i32,
-    ) -> [f32; M] {
-        // Fundamental phase at the centre of the batch, i.e. (M - 1) / 2 samples in.
-        let centre = theta.wrapping_add(step.wrapping_mul(M as i32 - 1) >> 1);
-
-        // Value and first two derivatives w.r.t. the fundamental phase at the batch centre.
+    /// `x^3 / 6`, where `x = k * j * step` (in radians) is the harmonic phase advance from the
+    /// centre to the sample `j` samples away. This is intended for fundamentals that are slow
+    /// compared to the sample rate: for instance, the 5th harmonic of 50 Hz sampled at
+    /// 781.25 kHz gives `x = 16 mrad` at 8 samples from the centre and an error of `7e-7`,
+    /// far below the accuracy of the lookup itself, so the result is as good as from calling
+    /// [Self::sample] for each sample.
+    pub fn expand(&self, centre: u32, theta: i32, step: i32) -> Expansion {
+        // Value and first two derivatives w.r.t. the fundamental phase at the centre.
         let (mut y, mut dy, mut ddy) = (0.0, 0.0, 0.0);
         for (harmonic, order) in self.harmonics.iter().zip(1..) {
             let (cos, sin) =
-                cossin(centre.wrapping_mul(order).wrapping_add(harmonic.phase));
+                cossin(theta.wrapping_mul(order).wrapping_add(harmonic.phase));
             let k = order as f32;
             let sin = harmonic.amplitude * sin as f32;
             let cos = harmonic.amplitude * cos as f32;
@@ -90,15 +84,35 @@ impl<const N: usize> HarmonicWaveform<N> {
         const RADIAN_PER_LSB: f32 =
             core::f32::consts::TAU / (1u64 << 32) as f32;
         let step = step as f32 * RADIAN_PER_LSB;
-        let c0 = y * COSSIN_SCALE;
-        let c1 = dy * (COSSIN_SCALE * step);
-        let c2 = ddy * (0.5 * COSSIN_SCALE * step * step);
+        Expansion {
+            centre,
+            coefficients: [
+                y * COSSIN_SCALE,
+                dy * (COSSIN_SCALE * step),
+                ddy * (0.5 * COSSIN_SCALE * step * step),
+            ],
+        }
+    }
+}
 
-        let offset = (M - 1) as f32 / 2.0;
-        core::array::from_fn(|i| {
-            let j = i as f32 - offset;
-            c0 + j * (c1 + j * c2)
-        })
+/// A waveform approximated by its second-order expansion around a sample.
+///
+/// See [HarmonicWaveform::expand].
+#[derive(Copy, Clone, Debug, Default)]
+pub struct Expansion {
+    /// The index of the sample at the centre of the expansion (wrapping).
+    centre: u32,
+    /// The value at the centre, and the first and second order coefficients per sample.
+    coefficients: [f32; 3],
+}
+
+impl Expansion {
+    /// The waveform at the sample with the given index (wrapping).
+    #[inline(always)]
+    pub fn sample(&self, index: u32) -> f32 {
+        let j = index.wrapping_sub(self.centre) as i32 as f32;
+        let [c0, c1, c2] = self.coefficients;
+        c0 + j * (c1 + j * c2)
     }
 }
 
@@ -164,22 +178,24 @@ mod tests {
         }
     }
 
-    /// Largest deviation of `sample_batch()` from `sample()` for batches of 8 samples all
-    /// around the fundamental period.
-    fn max_batch_error<const N: usize>(
+    /// Largest deviation of the expansion from `sample()` over the samples up to `reach`
+    /// samples from the centre, for expansions all around the fundamental period.
+    fn max_expansion_error<const N: usize>(
         waveform: &HarmonicWaveform<N>,
         step: i32,
+        reach: i32,
     ) -> f32 {
         let mut max = 0.0f32;
         // Odd, so that all kinds of phases (including the wrap-around) are covered.
-        const BATCH_SPACING: i32 = 0x0123_4567;
-        for batch in 0..1000 {
-            let theta =
-                i32::MIN.wrapping_add(BATCH_SPACING.wrapping_mul(batch));
-            let samples: [f32; 8] = waveform.sample_batch(theta, step);
-            for (i, actual) in samples.into_iter().enumerate() {
-                let expected =
-                    waveform.sample(theta.wrapping_add(step * i as i32));
+        const SPACING: i32 = 0x0123_4567;
+        for i in 0..1000 {
+            let theta = i32::MIN.wrapping_add(SPACING.wrapping_mul(i));
+            // Also covers the wrap-around of the sample index.
+            let centre = (i as u32).wrapping_sub(500);
+            let expansion = waveform.expand(centre, theta, step);
+            for j in -reach..=reach {
+                let actual = expansion.sample(centre.wrapping_add(j as u32));
+                let expected = waveform.sample(theta.wrapping_add(step * j));
                 max = max.max(actual - expected).max(expected - actual);
             }
         }
@@ -187,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_matches_samples() {
+    fn expansion_matches_samples() {
         // 50 Hz fundamental sampled at 781.25 kHz.
         const STEP: i32 = (50.0 * 1.28e-6 * (1u64 << 32) as f64) as i32;
         let waveform = HarmonicWaveform::new([
@@ -197,34 +213,35 @@ mod tests {
             Harmonic::new(0.4, 0.45),
             Harmonic::new(1.0, 0.123),
         ]);
-        // The expansion error is negligible here; what remains is the error of the lookup (9e-6
-        // of each amplitude), which enters at different phases for the two methods.
+        // The expansion error is negligible here, even at twice the 8 samples from the centre
+        // that `current_sense` typically uses it for; what remains is the error of the lookup
+        // (9e-6 of each amplitude), which enters at different phases for the two methods.
         const TOLERANCE: f32 = 2.0 * 9e-6 * (1.0 + 0.8 + 0.6 + 0.4 + 1.0);
-        let max = max_batch_error(&waveform, STEP);
+        let max = max_expansion_error(&waveform, STEP, 16);
         assert!(max < TOLERANCE, "{max}");
     }
 
     #[test]
-    fn batch_expansion_order() {
-        // A fundamental so fast that the phase advances by x = 0.1 rad over half a batch
-        // (3.5 samples), where the missing third-order term amounts to x^3 / 6 = 1.7e-4. A
-        // first-order expansion would be off by x^2 / 2 = 5e-3.
+    fn expansion_order() {
+        // A fundamental so fast that the phase advances by x = 0.1 rad over 4 samples, where
+        // the missing third-order term amounts to x^3 / 6 = 1.7e-4. A first-order expansion
+        // would be off by x^2 / 2 = 5e-3.
         const STEP: i32 =
-            (0.1 / 3.5 / core::f64::consts::TAU * (1u64 << 32) as f64) as i32;
+            (0.1 / 4.0 / core::f64::consts::TAU * (1u64 << 32) as f64) as i32;
         let waveform = HarmonicWaveform::new([Harmonic::new(1.0, 0.2)]);
-        let max = max_batch_error(&waveform, STEP);
+        let max = max_expansion_error(&waveform, STEP, 4);
         assert!(max > 1e-4 && max < 2e-4, "{max}");
     }
 
     #[test]
-    fn batch_of_one() {
+    fn expansion_centre() {
         let waveform = HarmonicWaveform::new([
             Harmonic::new(1.0, 0.1),
             Harmonic::new(0.5, 0.6),
         ]);
         for theta in (-8..8).map(|i| i * (1 << 28)) {
-            let [sample] = waveform.sample_batch(theta, 12345);
-            assert_close(sample, waveform.sample(theta));
+            let expansion = waveform.expand(u32::MAX, theta, 12345);
+            assert_close(expansion.sample(u32::MAX), waveform.sample(theta));
         }
     }
 }

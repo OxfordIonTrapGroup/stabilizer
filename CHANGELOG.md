@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   transmission with a read-only `lock_detect/adc1_filtered` setting for relocking)
 * `dual-iir-ll`: low-latency Dual IIR application with per-sample processing
   and the same settings and stream format as `dual-iir`.
+* `current_sense`: `dual-iir` for the current sense mezzanine with a
+  mains-synchronised harmonic feedforward on channel 0, processing each sample
+  individually as `dual-iir-ll` does. Earlier builds of the fork processed
+  batches of eight samples, with about 20 µs more loop delay. The feedforward
+  phases now refer to the sampling instant of each sample, so phases calibrated
+  with those builds need checking.
 
 ### Changed
 
