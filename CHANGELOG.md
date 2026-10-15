@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 * The `meta` topic (the build metadata: firmware version, hardware revision, panic
   information) is retained, so that clients can find out at any time what a
   device runs (or, if it is not connected, ran last), not only when it connects.
+* The default MQTT broker is the Oxford lab broker `10.255.6.4` instead of the
+  host name `mqtt`, as on the pre-v0.11 fork. A broker stored in flash still
+  takes precedence.
 
 ### Fixed
 

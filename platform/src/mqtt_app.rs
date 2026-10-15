@@ -8,6 +8,8 @@ use smoltcp_nal::smoltcp::wire::EthernetAddress;
 #[tree(meta(doc, typename))]
 pub struct NetSettings {
     /// The broker domain name (or IP address) to use for MQTT connections.
+    ///
+    /// Defaults to the Oxford lab broker.
     pub broker: String<255>,
 
     /// The MQTT ID to use upon connection with a broker.
@@ -25,7 +27,8 @@ pub struct NetSettings {
 impl Default for NetSettings {
     fn default() -> Self {
         Self {
-            broker: String::try_from("mqtt").unwrap(),
+            // The Oxford lab broker (upstream uses the host name `mqtt`).
+            broker: String::try_from("10.255.6.4").unwrap(),
             ip: String::try_from("0.0.0.0").unwrap(),
             id: String::try_from("<mac>").unwrap(),
             mac: EthernetAddress::default(),

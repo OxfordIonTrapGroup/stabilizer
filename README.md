@@ -76,13 +76,14 @@ cargo objcopy --release --bin current_sense -- -O binary current_sense.bin
 dfu-util -a 0 -s 0x08000000:leave -R -D current_sense.bin
 ```
 
-The MQTT broker (and, if needed, a static IP or a different MQTT ID) is set over the USB serial
-port and stored in flash, as the firmware default is the host name `mqtt`; the lab broker is
-`10.255.6.4`:
+The firmware connects to the lab broker `10.255.6.4` by default (upstream's default is the host
+name `mqtt`). A different broker (and, if needed, a static IP or a different MQTT ID) is set over
+the USB serial port and stored in flash, where it takes precedence over the default; `clear`
+removes it again:
 
 ```sh
 python -m serial /dev/tty.usbmodem...   # then in the menu:
-set /net/broker "10.255.6.4"
+set /net/broker "mqtt"
 store
 platform reboot
 ```
