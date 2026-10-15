@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
   of about 340 (the broker dropped larger ones, including retained settings
   applied after boot). This needed a fix to `minimq`, which comes from a fork
   for now.
+* The firmware version and dirty flag in `meta` are those of the build. Before,
+  the build script only reran when `memory.x` changed, so they could be those of
+  an earlier build (e.g. the previous commit).
 
 ## [v0.11.0](https://github.com/quartiq/stabilizer/compare/v0.10.0...v0.11.0) - 2024-12-02
 

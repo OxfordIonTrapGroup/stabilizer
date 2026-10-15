@@ -1552,6 +1552,7 @@ dependencies = [
  "embedded-storage",
  "embedded-storage-async",
  "fugit",
+ "git2",
  "grounded",
  "heapless 0.8.0",
  "idsp",

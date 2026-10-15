@@ -121,6 +121,8 @@ features = ["shared-stack"]
 
 [build-dependencies]
 built = { version = "0.8", features = ["git2"], default-features = false }
+# As used by `built`, to find the git files to watch (see `build.rs`).
+git2 = { version = "0.20", default-features = false }
 
 [target.'cfg(target_os = "none")'.dependencies]
 stm32h7xx-hal = { version = "0.16.0", features = [
