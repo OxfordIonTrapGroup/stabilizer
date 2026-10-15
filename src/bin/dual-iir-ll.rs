@@ -99,7 +99,7 @@ use signal_generator::Source;
 use stabilizer::{
     convert::{AdcCode, DacCode},
     dual_iir::{Biquad, Channel, DualIir, IIR_CASCADE_LENGTH, Run, Stage},
-    telemetry::{CPU_CYCLE, Timing},
+    telemetry::{CPU_CYCLE, PounderTelemetry, Timing},
 };
 
 // The number of samples in each streamed batch
@@ -333,6 +333,9 @@ pub struct Telemetry {
     /// Number of samples since the previous report that arrived before the processing of the
     /// preceding sample was complete. They are processed with increased latency, not lost.
     pub late: u32,
+    /// Pounder measurements, if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pounder: Option<PounderTelemetry>,
 }
 
 #[cfg(not(target_os = "none"))]
@@ -366,8 +369,10 @@ mod app {
             dac::{Dac0Output, Dac1Output},
             hal,
             net::{NetworkState, NetworkUsers},
+            setup::{Mezzanine, Pounder},
             timers::SamplingTimer,
         },
+        pounder_config::ClockConfig,
         telemetry::TelemetryBuffer,
     };
     use stream::{FrameGenerator, Pop, SampleRing};
@@ -385,6 +390,7 @@ mod app {
         network: NetworkUsers<DualIir>,
         settings: Settings,
         state: State,
+        pounder: Option<Pounder>,
     }
 
     #[local]
@@ -397,6 +403,7 @@ mod app {
         dacs: (Dac0Output, Dac1Output),
         generator: FrameGenerator,
         cpu_temp_sensor: stabilizer::hardware::cpu_temp_sensor::CpuTempSensor,
+        dds_clock: Option<ClockConfig>,
     }
 
     #[init]
@@ -404,13 +411,28 @@ mod app {
         let clock = SystemTimer::new(|| Systick::now().ticks());
 
         // Configure the microcontroller
-        let (stabilizer, _mezzanine, _eem) = hardware::setup::setup::<Settings>(
-            c.core,
-            c.device,
-            clock,
-            hardware::Sampling::LowLatency,
-            SAMPLE_TICKS,
-        );
+        let (mut stabilizer, mezzanine, _eem) =
+            hardware::setup::setup::<Settings>(
+                c.core,
+                c.device,
+                clock,
+                hardware::Sampling::LowLatency,
+                SAMPLE_TICKS,
+            );
+
+        let pounder = match mezzanine {
+            Mezzanine::Pounder(pounder) => Some(pounder),
+            Mezzanine::CurrentSense(_) => None,
+        };
+        if pounder.is_some() {
+            stabilizer
+                .settings
+                .dual_iir
+                .pounder
+                .get_or_insert_with(Default::default);
+        }
+        // The DDS clock is initially configured to the default by `setup()`.
+        let dds_clock = pounder.as_ref().map(|_| ClockConfig::default());
 
         let mut network = NetworkUsers::new(
             stabilizer.network_devices.stack,
@@ -431,6 +453,7 @@ mod app {
                 times: Default::default(),
             },
             settings: stabilizer.settings,
+            pounder,
         };
 
         let mut local = Local {
@@ -442,6 +465,7 @@ mod app {
             dacs: stabilizer.dacs,
             generator,
             cpu_temp_sensor: stabilizer.temperature_sensor,
+            dds_clock,
         };
 
         // Enable ADC/DAC events
@@ -585,7 +609,7 @@ mod app {
         }
     }
 
-    #[task(priority = 1, local=[afes], shared=[network, settings, state])]
+    #[task(priority = 1, local=[afes, dds_clock], shared=[network, settings, state, pounder])]
     async fn settings_update(mut c: settings_update::Context) {
         c.shared.settings.lock(|settings| {
             c.local.afes[0].set_gain(settings.dual_iir.ch[0].gain);
@@ -618,13 +642,20 @@ mod app {
                     a.set_filter(run, biquad);
                 }
             });
+            c.shared.pounder.lock(|pounder| {
+                if let (Some(pounder), Some(config)) =
+                    (pounder, &settings.dual_iir.pounder)
+                {
+                    pounder.update_dds(config, c.local.dds_clock);
+                }
+            });
             c.shared
                 .network
                 .lock(|net| net.direct_stream(settings.dual_iir.stream));
         });
     }
 
-    #[task(priority = 1, shared=[network, settings, state], local=[cpu_temp_sensor, count: u32 = 0])]
+    #[task(priority = 1, shared=[network, settings, state, pounder], local=[cpu_temp_sensor, count: u32 = 0])]
     async fn telemetry(mut c: telemetry::Context) -> ! {
         loop {
             // Take the timing statistics accumulated since the previous report and the
@@ -671,6 +702,9 @@ mod app {
                 ),
                 output: times.output_max as f32 * CPU_CYCLE,
                 late: times.late,
+                pounder: c.shared.pounder.lock(|pounder| {
+                    pounder.as_mut().map(|p| p.pounder.get_telemetry())
+                }),
             };
 
             c.shared.network.lock(|net| {
